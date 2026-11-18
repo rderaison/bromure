@@ -89,7 +89,7 @@ struct RemoteSignInEndTests {
         #expect(after.contains("events(.finished(success: ok, message: message))"))
         #expect(!fc.contains("self.controller.sessionCommand(s.id, \"signin\")"))
         let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
-        #expect(fc[button.upperBound...].prefix(1000).contains("failed.beginSheetModal(for: self)"))
+        #expect(fc[button.upperBound...].prefix(2000).contains("failed.beginSheetModal(for: self)"))
     }
 
     /// Finding (CWE-670): "A missed sign-in result leaves the fat-client card
@@ -161,7 +161,7 @@ struct RemoteSignInEndTests {
         #expect(!r.contains("teardownClaudeRegistration(reason: .failure)\n"))
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
         let button = try #require(fc.range(of: "guard a.runModal() == .alertFirstButtonReturn else { return }"))
-        let after = fc[button.upperBound...].prefix(1000)
+        let after = fc[button.upperBound...].prefix(2000)
         #expect(after.contains("guard !ok, let self else { return }"))
         #expect(after.contains("failed.informativeText = message ?? NSLocalizedString("))
     }

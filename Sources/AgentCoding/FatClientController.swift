@@ -238,6 +238,9 @@ final class RemoteHostController {
     /// window opens a pop-out terminal; other platforms present their own.
     var onRegistrationTerminal: ((_ sessionID: UUID, _ provider: String) -> Void)?
     var onRegistrationTerminalClosed: (() -> Void)?
+    /// A sign-in page from the host just opened in this Mac's browser: the
+    /// "Starting a sign-in machine…" progress can go.
+    var onRegistrationPageOpened: (() -> Void)?
     /// Minimal mirrored profiles (id/name/color/tool) — the grid needs a
     /// `Profile` for appearance and the deleted-workspace check.
     private(set) var profilesByID: [Profile.ID: Profile] = [:]
@@ -640,6 +643,7 @@ final class RemoteHostController {
 #else
         UIApplication.shared.open(url)
 #endif
+        onRegistrationPageOpened?()
     }
 
     /// Shared-folder paths per running VM (feeds the remote file browser's
@@ -4799,9 +4803,18 @@ final class RemoteHostWindow: NSWindow {
         a.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         a.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        // The page takes a while (the remote boots a sign-in machine and
+        // the agent's login starts in it -- ~30 s for Hermes): say so on the
+        // window the click came from, until the page opens or the run ends,
+        // rather than nothing at all.
+        let progress = RemoteSignInProgress.show(
+            provider: provider.displayName, host: controller.host.name,
+            on: NSApp.keyWindow ?? self)
+        controller.onRegistrationPageOpened = { progress.close() }
         // A run that ends without its credential says why here: the host's
         // own notice lands on a Mac nobody may be sitting at.
         controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID) { [weak self] ok, message in
+            progress.close()
             guard !ok, let self else { return }
             let failed = NSAlert()
             failed.alertStyle = .warning
@@ -5002,6 +5015,7 @@ final class RemoteHostWindow: NSWindow {
         // Remote editors keep the "— host" suffix: with several mirrors open,
         // which machine the workspace lands on is the thing you can't guess.
         let hostName = controller.host.name
+        let c = controller
         win.title = "\(draft.name) — \(hostName)"
         win.center()
         win.isReleasedWhenClosed = false
@@ -5016,6 +5030,31 @@ final class RemoteHostWindow: NSWindow {
             },
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
+            // Sign-ins from a workspace not created yet: the host gives the
+            // new workspace its own id (never the draft's), so a login scoped
+            // to the draft would be stranded. They go to the remote's shared
+            // account -- what its new workspace uses -- as from the remote's
+            // Preferences.
+            claudeAccountSavedAt: { [weak c] in c?.subscriptionStatus["claude"]?.registeredAt },
+            claudeReauthRequiredAt: { [weak c] in c?.subscriptionStatus["claude"]?.reauthRequiredAt },
+            codexReauthRequiredAt: { [weak c] in c?.subscriptionStatus["codex"]?.reauthRequiredAt },
+            grokReauthRequiredAt: { [weak c] in c?.subscriptionStatus["grok"]?.reauthRequiredAt },
+            kimiReauthRequiredAt: { [weak c] in c?.subscriptionStatus["kimi"]?.reauthRequiredAt },
+            onRegisterClaude: { [weak self] in self?.beginRemoteRegistration(.claude, nil) },
+            onForgetClaude: { [weak c] in c?.forgetRemoteSubscription(provider: "claude", profileID: nil) },
+            codexAccountSavedAt: { [weak c] in c?.subscriptionStatus["codex"]?.registeredAt },
+            onRegisterCodex: { [weak self] in self?.beginRemoteRegistration(.codex, nil) },
+            onForgetCodex: { [weak c] in c?.forgetRemoteSubscription(provider: "codex", profileID: nil) },
+            grokAccountSavedAt: { [weak c] in c?.subscriptionStatus["grok"]?.registeredAt },
+            onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, nil) },
+            onForgetGrok: { [weak c] in c?.forgetRemoteSubscription(provider: "grok", profileID: nil) },
+            kimiAccountSavedAt: { [weak c] in c?.subscriptionStatus["kimi"]?.registeredAt },
+            onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, nil) },
+            onForgetKimi: { [weak c] in c?.forgetRemoteSubscription(provider: "kimi", profileID: nil) },
+            nousAccountSavedAt: { [weak c] in c?.subscriptionStatus["hermes"]?.registeredAt },
+            nousReauthRequiredAt: { [weak c] in c?.subscriptionStatus["hermes"]?.reauthRequiredAt },
+            onRegisterNous: { [weak self] in self?.beginRemoteRegistration(.nous, nil) },
+            onForgetNous: { [weak c] in c?.forgetRemoteSubscription(provider: "hermes", profileID: nil) },
             localModelsRemoteAny: remoteModelBackend(),
             modelsPane: .workspace(global: remoteGlobalModels),
             newHomeDefaultGB: newHomeDefaultGB)
