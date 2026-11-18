@@ -21,15 +21,24 @@ struct HermesWorkspaceSetupTests {
 
     @Test("the image step gives every workspace the packages and the lock")
     func imageStep() throws {
-        let s = try Self.step(39)
+        // Part of the Hermes install itself (38): one step, nothing extra to
+        // offer on top of it.
+        let s = try Self.step(38)
         let cmd = try #require(s["command"] as? String)
-        // After the Hermes install itself (38), from the same app version.
-        #expect(try Self.step(38)["min_version"] as? String == s["min_version"] as? String)
+        let data = try Data(contentsOf: Self.top.appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json"))
+        let doc = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let steps = try #require(doc["postinstall"] as? [[String: Any]])
+        #expect(steps.filter { (($0["command"] as? String) ?? "").contains("/opt/hermes") }.count == 1)
+        // After the install succeeded, before its failure branch.
+        let ok = try #require(cmd.range(of: "if [ -n \"$ok\" ]; then"))
+        let fail = try #require(cmd.range(of: "\nelse\n    rm -rf /opt/hermes"))
+        let mv = try #require(cmd.range(of: "mv /opt/hermes/cache/uv"))
+        #expect(ok.upperBound <= mv.lowerBound && mv.upperBound <= fail.lowerBound)
         #expect(cmd.contains("mv /opt/hermes/cache/uv /opt/hermes/uv-cache"))
         #expect(cmd.contains("chmod -R a+rX /opt/hermes/uv-cache"))
         #expect(cmd.contains("chmod 666 /opt/hermes/tools/.install.lock"))
         #expect(cmd.contains("chmod a+r /opt/hermes/tools/facts.json"))
-        #expect(cmd.contains("if [ -d /opt/hermes/hermes-agent ] && [ -d /opt/hermes/tools ]; then"), "nothing without Hermes in /opt")
+        #expect(cmd.contains("if [ -d /opt/hermes/tools ]; then"), "nothing when the store layout changed")
         // It parses (bash -n): a broken step fails the image build.
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
