@@ -150,6 +150,40 @@ struct HermesAgentTests {
         // (Unsetting what was never set didn't fail the run: status 0.)
     }
 
+    /// "storage_unavailable": a Nous workspace with no model chosen left
+    /// Hermes's model.default unset; its gateway then saved every session
+    /// with no model and refused to reopen it ("invalid policy"). The
+    /// catalog's labeled default -- what Hermes runs a turn on anyway -- is
+    /// written out instead.
+    @Test("Nous with no model chosen gets Hermes's own catalog default written out")
+    func applyNousDefault() throws {
+        let home = try tempDir()
+        let cache = home.appendingPathComponent(".hermes/cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let catalog: [String: Any] = ["providers": ["nous": ["models": [
+            ["id": "anthropic/claude-fable-5.2"], ["id": "z-ai/glm-5.3", "default": true]]]]]
+        try JSONSerialization.data(withJSONObject: catalog).write(to: cache.appendingPathComponent("model_catalog.json"))
+        let calls = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:], home: home)
+        #expect(calls.contains("config set model.default z-ai/glm-5.3"))
+        #expect(!calls.contains("config unset model.default"))
+        // A model the workspace chose wins.
+        let chosen = try runApply(settings: ["model": ["provider": "nous", "default": "openai/gpt-5.5"], "key_var": ""],
+                                  servers: [:], home: home)
+        #expect(chosen.contains("config set model.default openai/gpt-5.5"))
+        #expect(!chosen.contains("config set model.default z-ai/glm-5.3"))
+        // Another provider without a model: still its own default, unset.
+        let other = try runApply(settings: ["model": ["provider": "anthropic"], "key_var": "ANTHROPIC_API_KEY"],
+                                 servers: [:], home: home)
+        #expect(other.contains("config unset model.default"))
+        // No catalog, or a labeled id that isn't one: unset, as before.
+        let bad: [String: Any] = ["providers": ["nous": ["models": [["id": "x y; rm", "default": true]]]]]
+        try JSONSerialization.data(withJSONObject: bad).write(to: cache.appendingPathComponent("model_catalog.json"))
+        let rejected = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:], home: home)
+        #expect(rejected.contains("config unset model.default"))
+        // Workspaces whose settings didn't change apply this once.
+        #expect(try renderBashrc().contains("printf 'apply-2 '"))
+    }
+
     @Test("a failed `hermes config` fails the step, so the wrapper doesn't stamp it done")
     func applyFailureRetries() throws {
         let home = try tempDir()
