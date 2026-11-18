@@ -1940,47 +1940,85 @@ def _shell_connect_to_host():
         return None
 
 
+# The host's idle connections are a pool of POOL_SIZE: each one a request
+# claims (an exec, a terminal, a file op) is replaced (`replenish`). A
+# replacement used to be tried 20 times, 0.1 s apart, then given up for
+# good -- and nothing tried again. A burst of runs starting at once (several
+# commit reviews) drained the pool while the host was slow to accept, the
+# replacements gave up, and the workspace could never open a shell or a
+# session again until agentd restarted ("No shell connection"). So the pool
+# has one refiller that keeps trying, backing off, for as long as agentd runs.
+SHELL_REFILL_BACKOFF_MIN = 0.1
+SHELL_REFILL_BACKOFF_MAX = 5.0
+
+
+class _ShellPool:
+    """POOL_SIZE idle connections to the host, kept topped up. `replenish()`
+    says one was used (or lost): the refiller opens a replacement, retrying
+    with backoff until it gets one -- never giving up while `running()`."""
+
+    def __init__(self, connect, handle, running, sleep=time.sleep,
+                 clock=time.monotonic, size=None):
+        self._connect, self._handle, self._running = connect, handle, running
+        self._sleep, self._clock = sleep, clock
+        self._size = POOL_SIZE if size is None else size
+        self._cond = threading.Condition()
+        self._missing = 0
+        self.established = 0   # connections opened, ever (tests, logs)
+
+    def replenish(self):
+        with self._cond:
+            self._missing += 1
+            self._cond.notify()
+
+    def missing(self):
+        with self._cond:
+            return self._missing
+
+    def _next_missing(self, timeout):
+        with self._cond:
+            if self._missing == 0:
+                self._cond.wait(timeout)
+            return self._missing
+
+    def run(self):
+        """The refiller: fills the pool, then keeps it full. Returns when
+        agentd stops."""
+        with self._cond:
+            self._missing += self._size
+        backoff, failing_since, failures, ready = SHELL_REFILL_BACKOFF_MIN, None, 0, False
+        while self._running():
+            if self._next_missing(1.0) == 0:
+                if not ready:
+                    ready = True
+                    log("shell", "pool ready (%d connections)" % self._size)
+                continue
+            s = self._connect()
+            if s is None:
+                failures += 1
+                if failing_since is None:
+                    failing_since = self._clock()
+                    log("shell", "the host isn't taking pool connections; retrying"
+                                 " until it does (%d missing)" % self.missing())
+                self._sleep(backoff)
+                backoff = min(backoff * 2, SHELL_REFILL_BACKOFF_MAX)
+                continue
+            with self._cond:
+                self._missing -= 1
+            self.established += 1
+            threading.Thread(target=self._handle, args=(s, self.replenish),
+                             daemon=True).start()
+            if failing_since is not None:
+                log("shell", "pool connection to the host restored after %d failed"
+                             " attempt%s (%.1f s)" % (failures, "" if failures == 1 else "s",
+                                                     self._clock() - failing_since))
+            backoff, failing_since, failures = SHELL_REFILL_BACKOFF_MIN, None, 0
+
+
 def shell_agent_service():
     """Guest-initiated vsock pool to host port 5800 (see shell-agent.py)."""
     log("shell", "starting")
-
-    def replenish():
-        """Open a new vsock connection to refill the pool."""
-        for _ in range(20):
-            if not _RUNNING.is_set():
-                return
-            s = _shell_connect_to_host()
-            if s:
-                t = threading.Thread(
-                    target=_shell_handle_connection, args=(s, replenish),
-                    daemon=True)
-                t.start()
-                return
-            time.sleep(0.1)
-        log("shell", "failed to replenish pool after 20 attempts")
-
-    # Fill the initial pool.
-    established = 0
-    for _ in range(POOL_SIZE):
-        if not _RUNNING.is_set():
-            return
-        for _ in range(30):
-            if not _RUNNING.is_set():
-                return
-            s = _shell_connect_to_host()
-            if s:
-                established += 1
-                t = threading.Thread(
-                    target=_shell_handle_connection, args=(s, replenish),
-                    daemon=True)
-                t.start()
-                break
-            time.sleep(0.2)
-
-    log("shell", "pool ready (%d connections)" % established)
-
-    while _RUNNING.is_set():
-        time.sleep(1)
+    _ShellPool(_shell_connect_to_host, _shell_handle_connection, _RUNNING.is_set).run()
 
 
 # ─────────────── §4 vm-bridge (local listeners → host vsock MITM) ───────────
