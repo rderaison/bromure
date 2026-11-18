@@ -7348,6 +7348,63 @@ public final class ProfileStore {
     ' 2>/dev/null) && [ -n "$_v" ] || return 1
         printf '%s' "$_v"
     }
+    #    What Hermes's composer in tmux pane $1 holds (printed): its last
+    #    `❯ ` row, less the italic placeholder Hermes draws in an empty one.
+    #    Fails (2) with no composer on screen.
+    _bromure_hermes_composer() {
+        tmux capture-pane -p -e -t "$1" 2>/dev/null | python3 -c '
+    import re, sys
+    esc, glyph = chr(27), chr(0x276F) + " "
+    rows = [l for l in sys.stdin.read().split(chr(10)) if glyph in l]
+    if not rows:
+        sys.exit(2)
+    italic, text = False, ""
+    for sgr, ch in re.findall(esc + "[[]([0-9;]*)m|([^" + esc + "])", rows[-1].split(glyph, 1)[1]):
+        if ch:
+            text += "" if italic else ch
+            continue
+        codes, i = (sgr or "0").split(";"), 0
+        while i < len(codes):
+            if codes[i] in ("38", "48", "58"):
+                i += 5 if codes[i + 1:i + 2] == ["2"] else 3
+                continue
+            if codes[i] in ("", "0", "23"):
+                italic = False
+            elif codes[i] == "3":
+                italic = True
+            i += 1
+    print(text.strip())
+    '
+    }
+    #    Type $2 (the resume's `/model`) into the Hermes that is starting in
+    #    tmux pane $1, once its composer is up and empty, then send it. The
+    #    screen must have changed since the start (an earlier Hermes's last
+    #    frame shows a composer too) and a Hermes must run on the pane's
+    #    terminal. Never types over the user's own text; gives up after a
+    #    minute, and sends nothing it doesn't then see in the composer.
+    _bromure_hermes_type_model() {
+        local _p="$1" _m="$2" _i=0 _j _c _tty _first
+        _tty=$(tmux display-message -p -t "$_p" '#{pane_tty}' 2>/dev/null) || return 0
+        _tty="${_tty#/dev/}"
+        _first=$(tmux capture-pane -p -t "$_p" 2>/dev/null)
+        while [ "$_i" -lt 120 ]; do
+            sleep 0.5; _i=$((_i + 1))
+            [ "$(tmux capture-pane -p -t "$_p" 2>/dev/null)" != "$_first" ] || continue
+            ps -t "$_tty" -o args= 2>/dev/null | grep -v -E '^-?(bash|sh)( |$)' \\
+                | grep -q hermes || continue
+            _c=$(_bromure_hermes_composer "$_p") || continue
+            [ -z "$_c" ] || return 0
+            tmux send-keys -t "$_p" -l -- "$_m" || return 0
+            for _j in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 0.2
+                if [ "$(_bromure_hermes_composer "$_p")" = "$_m" ]; then
+                    tmux send-keys -t "$_p" Enter
+                    return 0
+                fi
+            done
+            return 0
+        done
+    }
     hermes() {
         if ! type -P hermes >/dev/null 2>&1; then
             _bromure_install_tool hermes || return 127
@@ -7393,11 +7450,16 @@ public final class ProfileStore {
         # session begun on another provider (a local model, before the
         # workspace moved to Nous Portal) then wanted that provider's key,
         # hidden from it: "No API key for the custom endpoint". Bromure's
-        # own resume (nothing but the resume and --yolo) opens on the
-        # workspace's model instead, with Hermes's session-only /model as
-        # its first input; no model call, nothing persisted.
+        # own resume (nothing but the resume and --yolo) moves it to the
+        # workspace's model with Hermes's session-only /model, typed into
+        # the composer once Hermes is up -- what Hermes itself says to do
+        # after a resume. Not `chat --query`: a seeded query goes in
+        # literally, as a turn on the old model.
         local _rm
-        _rm=$(_bromure_hermes_resume_model "$@") && set -- "$@" chat --query="$_rm"
+        if [ -n "${TMUX_PANE:-}" ] && [ -t 0 ] \
+                && _rm=$(_bromure_hermes_resume_model "$@"); then
+            ( _bromure_hermes_type_model "$TMUX_PANE" "$_rm" </dev/null >/dev/null 2>&1 & )
+        fi
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
