@@ -6,9 +6,9 @@
 # (instant, and no space until they diverge); on ext4 each one is a full copy.
 #
 # When /opt/bromure isn't on btrfs already (ext4, xfs…), the script:
-#   1. creates a sparse btrfs image file (default /var/lib/bromure-btrfs.img,
-#      90% of the free space where it lives, or --size) and mounts it on
-#      /opt/bromure (loop, noatime);
+#   1. creates a sparse btrfs image file (default /var/lib/bromure-btrfs.img)
+#      and mounts it on /opt/bromure (loop, noatime). Its size is --size, or
+#      asked for (the default offered: 90% of the free space where it lives);
 #   2. moves the guest image (/var/lib/bromure-ac-image) and the users' state
 #      (/var/lib/bromure-ac) onto it, into /opt/bromure/image and
 #      /opt/bromure/state, and bind-mounts them back where the server looks
@@ -21,9 +21,11 @@
 # On btrfs already it checks the same things and changes nothing that is
 # in place. Moving existing data needs the server stopped (it says how).
 #
-# --size SIZE   the image's size (truncate's syntax: 500G, 2T). It is sparse:
-#               it takes host space as VMs write, up to SIZE, so keep SIZE
-#               within the free space it reports.
+# --size SIZE   the image's size: 500G, 2T (K/M/G/T/P, powers of 1024; at
+#               least 20G). Without it the script asks, offering 90% of the
+#               free space (that default as is with --yes or without a
+#               terminal). It is sparse: it takes host space as VMs write,
+#               up to SIZE, so keep SIZE within the free space it reports.
 # --image FILE  where the image file goes (not under /opt/bromure).
 # --dry-run     print what would be done, change nothing.
 # --yes         don't ask before changing anything.
@@ -42,7 +44,7 @@ ME=$(basename "$0")
 
 die() { echo "$ME: $*" >&2; exit 1; }
 say() { echo "$ME: $*"; }
-usage() { sed -n '2,32s/^# \{0,1\}//p' "$0"; }
+usage() { awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"; }
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -57,7 +59,7 @@ done
 
 # --- preflight -------------------------------------------------------------
 [ "$(id -u)" = 0 ] || [ "$DRY" = 1 ] || die "run as root (sudo $ME)"
-for c in findmnt mount umount truncate cp stat df du awk; do
+for c in findmnt mount umount truncate cp stat df du awk numfmt; do
   command -v "$c" >/dev/null || die "'$c' is missing"
 done
 case "$IMG" in "$MNT"|"$MNT"/*) die "the image file can't live inside $MNT itself";; esac
@@ -81,6 +83,12 @@ confirm() {
   local a; read -r -p "$1 [y/N] " a
   case $a in y|Y|yes|YES) ;; *) die "stopped; nothing more was changed";; esac
 }
+size_bytes() {   # 500G, 2T, 1.5T, 600GiB -> bytes (powers of 1024); nothing if it isn't a size
+  local v=${1%iB}; v=${v%B}
+  [[ $v =~ ^[0-9]+(\.[0-9]+)?[KMGTPkmgtp]$ ]] || return 0
+  numfmt --from=iec "${v^^}" 2>/dev/null || true
+}
+gib() { echo $(( $1 / 1073741824 )); }
 
 FSTAB_BACKED_UP=0
 fstab_add() {   # one line, once per mount point; the first change backs fstab up
@@ -136,15 +144,36 @@ else
       moving=$((moving + $(du -sB1 "$d" | awk '{print $1}')))
     fi
   done
-  if [ -n "$SIZE" ]; then
-    size_arg=$SIZE
+  [ "$moving" -lt "$avail" ] || die "moving the existing data ($(gib "$moving") GiB) needs that much free space under $IMG_DIR (has $(gib "$avail") GiB)"
+  default_bytes=$(( (avail - moving) * 9 / 10 ))
+  default_size=$(gib "$default_bytes")G
+  [ "$default_bytes" -ge "$MIN_BYTES" ] || default_size=
+  check_size() {   # the size's bytes, or why it won't do
+    local b; b=$(size_bytes "$1")
+    [ -n "$b" ] || { echo "'$1' isn't a size (500G, 2T)" >&2; return 1; }
+    [ "$b" -ge "$MIN_BYTES" ] || { echo "$1 is too small (at least $(gib "$MIN_BYTES")G)" >&2; return 1; }
+    [ "$b" -ge "$moving" ] || { echo "$1 can't hold the $(gib "$moving") GiB to move onto it" >&2; return 1; }
+    echo "$b"
+  }
+  if [ -z "$SIZE" ] && [ "$YES" = 0 ] && [ "$DRY" = 0 ] && [ -t 0 ]; then
+    say "$(gib "$avail") GiB free under $IMG_DIR$([ "$moving" = 0 ] || echo ", $(gib "$moving") GiB of it to move onto the image"); the image is sparse (it takes space as VMs write)"
+    while :; do
+      read -r -p "Image size${default_size:+ [$default_size]}: " SIZE
+      SIZE=${SIZE:-$default_size}
+      [ -n "$SIZE" ] || continue
+      bytes=$(check_size "$SIZE") || { SIZE=; continue; }
+      break
+    done
+  elif [ -n "$SIZE" ]; then
+    bytes=$(check_size "$SIZE") || die "--size: see above"
   else
-    bytes=$(( (avail - moving) * 9 / 10 ))
-    [ "$bytes" -ge "$MIN_BYTES" ] || die "only $((avail / 1073741824)) GiB free under $IMG_DIR ($((moving / 1073741824)) GiB to move): pass --size, or --image on a bigger disk"
-    size_arg=$(( bytes / 1073741824 ))G
+    [ -n "$default_size" ] || die "only $(gib "$avail") GiB free under $IMG_DIR ($(gib "$moving") GiB to move): pass --size, or --image on a bigger disk"
+    SIZE=$default_size; bytes=$default_bytes
   fi
-  [ "$moving" -lt "$avail" ] || die "moving the existing data ($((moving / 1073741824)) GiB) needs that much free space under $IMG_DIR (has $((avail / 1073741824)) GiB)"
-  say "image $IMG, $size_arg (sparse; $((avail / 1073741824)) GiB free there now), mounted on $MNT"
+  [ "$bytes" -le "$avail" ] || say "warning: $SIZE is more than the $(gib "$avail") GiB free under $IMG_DIR: the host's disk fills up before the image does"
+  size_arg=$(gib "$bytes")G
+  [ "$bytes" = $(( $(gib "$bytes") * 1073741824 )) ] || size_arg=$bytes
+  say "image $IMG, $SIZE (sparse; $(gib "$avail") GiB free there now), mounted on $MNT"
   confirm "Create it and add it to $FSTAB?"
   [ "$DRY" = 1 ] || cp -p "$FSTAB" "$FSTAB.bromure-rollback"
   CREATED_IMAGE=1
