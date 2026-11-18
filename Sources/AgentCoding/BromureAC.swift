@@ -4542,12 +4542,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Start the SSH front door iff `remoteAccess.enabled` (default OFF).
     ///
-    /// Never while the base image is absent or an install is in flight
-    /// (download or local bake): the remote menu exists to create and
-    /// launch workspaces, all of which need a settled base.img — a remote
-    /// session poking at profiles mid-install would race the image swap.
-    /// `startInit`/`startPostinstall` stop the server up front and call
-    /// this again from their completion path.
+    /// Never before a base image exists (the first install): the remote
+    /// side exists to create and run workspaces, which need one. A rebuild,
+    /// an update or new recommended packages keep the server up -- the old
+    /// image stays bootable until the new one is swapped in whole, a boot
+    /// mid-swap is refused where every boot is (`prepare()` needs
+    /// `hasBaseImage`), and a paused server cut every remote client off its
+    /// running workspaces for the whole build. `startInit`/`startPostinstall`
+    /// call this again from their completion path (a first install's start).
     @MainActor func startRemoteAccessIfNeeded() {
         guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
         // A side-by-side test instance shares this Mac's device identity and
@@ -4556,7 +4558,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             SupplyChainLog.shared.record("[remote] disabled for this instance (BROMURE_AC_NO_REMOTE).")
             return
         }
-        guard imageManager.hasBaseImage, installTask == nil else {
+        guard imageManager.hasBaseImage else {
             SupplyChainLog.shared.record(
                 "[remote] SSH front door deferred until the base image is installed.")
             return
@@ -4699,12 +4701,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard cfg.passwordAuth || cfg.pubkeyAuth else {
                 return ["error": "Enable at least one of password / public-key auth."]
             }
-            // No SSH while the base image is being installed (or before
-            // one exists) — same invariant startRemoteAccessIfNeeded
-            // enforces at launch. Refuse instead of deferring silently so
-            // the CLI/Preferences caller knows nothing is listening.
-            if enabled, installTask != nil || !imageManager.hasBaseImage {
-                return ["error": "Base image install in progress (or no image yet) — enable remote access once it completes."]
+            // No SSH before a base image exists -- same invariant
+            // startRemoteAccessIfNeeded enforces at launch. Refuse instead of
+            // deferring silently so the CLI/Preferences caller knows nothing
+            // is listening. (A rebuild in flight is fine: the old image stays.)
+            if enabled, !imageManager.hasBaseImage {
+                return ["error": "No base image yet — enable remote access once it is installed."]
             }
             d.set(enabled, forKey: "remoteAccess.enabled")
             if enabled {
@@ -4719,9 +4721,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         } else if d.bool(forKey: "remoteAccess.enabled") {
             // No enable/disable in this call but we're on → apply live.
-            // (Skipped mid-install — the server is paused then; the
-            // post-install resume picks the new config up.)
-            if installTask == nil {
+            // (Skipped before a first image: the server isn't up yet; the
+            // post-install start picks the new config up.)
+            if imageManager.hasBaseImage {
                 let cfg = remoteAccessConfig()
                 do { try RemoteAccessServer.shared.start(cfg) }
                 catch { return ["error": error.localizedDescription] }
@@ -9021,18 +9023,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // rebuilds and CLI-started installs.
         if !fromWizard { renderInitializing() }
 
-        // No SSH front door while the base image is being installed — a remote
-        // session could otherwise launch workspaces against a base that's
-        // absent or mid-swap. Resumed (when still enabled) by the defer.
-        if RemoteAccessServer.shared.isRunning {
-            SupplyChainLog.shared.record("[remote] SSH front door paused for base-image install.")
-            stopRemoteAccess()
-        }
-
+        // The SSH front door stays up through a rebuild or an update (see
+        // startRemoteAccessIfNeeded); a first install starts it once done.
         installTask = Task { @MainActor in
             defer {
                 self.installTask = nil
-                self.startRemoteAccessIfNeeded()
+                // Started only if it isn't up: a start restarts the server,
+                // dropping every remote client again.
+                if !RemoteAccessServer.shared.isRunning { self.startRemoteAccessIfNeeded() }
             }
             // High-level checkpoints: drive the status pill + weighted
             // progress bar + bookmark the console log with a leading
@@ -9168,16 +9166,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         )
         NSApp.activate(ignoringOtherApps: true)
 
-        // Same SSH pause as startInit — base.img is being amended + swapped.
-        if RemoteAccessServer.shared.isRunning {
-            SupplyChainLog.shared.record("[remote] SSH front door paused for base-image install.")
-            stopRemoteAccess()
-        }
-
+        // The SSH front door stays up, as in startInit: the image being
+        // amended is swapped in whole, and a boot mid-swap is refused.
         installTask = Task { @MainActor in
             defer {
                 self.installTask = nil
-                self.startRemoteAccessIfNeeded()
+                if !RemoteAccessServer.shared.isRunning { self.startRemoteAccessIfNeeded() }
             }
             do {
                 try await self.imageManager.applyPostinstallSteps(
