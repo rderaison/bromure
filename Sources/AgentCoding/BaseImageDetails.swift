@@ -16,6 +16,9 @@ struct BaseImageWorkspaceRow: Identifiable, Equatable {
         case kept
         /// An older base, nothing decided.
         case older
+        /// A disk with no record of the base it came from: possibly older,
+        /// so the workspace chooser lists it (as `BaseImageUpdateChoice` does).
+        case unknown
     }
     let id: UUID
     let name: String
@@ -36,9 +39,10 @@ struct BaseImageWorkspaceRow: Identifiable, Equatable {
         workspaces.map { w in
             let state: State
             if !w.hasDisk { state = .notStarted }
-            else if w.baseAtClone == nil || current == nil || w.baseAtClone == current { state = .current }
+            else if current == nil || w.baseAtClone == current { state = .current }
             else if w.acceptedFor == current { state = .updatesAtNextStart }
             else if w.declinedFor == current { state = .kept }
+            else if w.baseAtClone == nil { state = .unknown }
             else { state = .older }
             return BaseImageWorkspaceRow(id: w.id, name: w.name, base: w.baseAtClone, state: state)
         }
@@ -46,7 +50,7 @@ struct BaseImageWorkspaceRow: Identifiable, Equatable {
     }
 
     /// Whether the workspace chooser has something to decide for it.
-    var onOlderBase: Bool { [.updatesAtNextStart, .kept, .older].contains(state) }
+    var onOlderBase: Bool { [.updatesAtNextStart, .kept, .older, .unknown].contains(state) }
 }
 
 @MainActor @Observable
@@ -178,6 +182,8 @@ struct BaseImageDetailsView: View {
             return String(format: NSLocalizedString("v%@ · kept", comment: "base image details workspace row; %@ = version"), base)
         case .older:
             return String(format: NSLocalizedString("v%@ · older", comment: "base image details workspace row; %@ = version"), base)
+        case .unknown:
+            return NSLocalizedString("Base unknown", comment: "base image details workspace row: no record of the base its disk came from")
         }
     }
 }
