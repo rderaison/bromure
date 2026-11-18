@@ -112,6 +112,38 @@ struct AgentdShellPoolTests {
         #expect(out["missing"] as? Int == 0)
     }
 
+    /// Review finding on d8685b65: a terminal requested before the sandbox was
+    /// ready replenished twice (before the sandbox wait, then on claim), and
+    /// each replenish is one more slot: the pool grew past its size.
+    @Test("a terminal that waited for the sandbox is replaced once, not twice")
+    func interactiveBeforeSandboxReplenishesOnce() throws {
+        let out = try run("""
+            import struct
+            m._SANDBOX_READY.clear()
+            m.sandbox_gate = lambda through_sentry_hold=False: (True, "")
+            m._run_interactive = lambda sock, req: None
+            m._version_mismatch = lambda req: False
+            body = json.dumps({"interactive": True, "cmd": "bash"}).encode()
+            class Sock:
+                def __init__(self): self.buf = struct.pack(">I", len(body)) + body
+                def recv(self, n):
+                    b, self.buf = self.buf[:n], self.buf[n:]
+                    return b
+                def recv_into(self, view, n=0):
+                    n = n or len(view)
+                    b, self.buf = self.buf[:n], self.buf[n:]
+                    view[:len(b)] = b
+                    return len(b)
+                def sendall(self, b): pass
+                def close(self): pass
+                def settimeout(self, t): pass
+            calls = []
+            m._shell_handle_connection(Sock(), lambda: calls.append(1))
+            out["replenished"] = len(calls)
+            """)
+        #expect(out["replenished"] as? Int == 1)
+    }
+
     @Test("the service runs the pool on the real connect and handler")
     func wired() throws {
         let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()

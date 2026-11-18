@@ -1812,8 +1812,11 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             # the life of the terminal session (possibly hours). Without an
             # immediate replacement, N concurrent host terminals would drain the
             # POOL_SIZE idle connections and starve exec/roster traffic.
-            replenished = True
-            replenish_fn()
+            # Once only: a request that waited for the sandbox was replaced
+            # already, and each replenish is one more pool slot.
+            if not replenished:
+                replenished = True
+                replenish_fn()
             _run_interactive(vsock_sock, req)
             return  # finally below closes the vsock
 
