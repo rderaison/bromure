@@ -8981,6 +8981,45 @@ def ip_reporter_service():
         time.sleep(5)
 
 
+def _kernel_list():
+    """The running kernel first, then every other installed one (newest
+    first): the ones /lib/modules has a modules.dep for, like
+    bromure_sandbox_status.installed_kernels()."""
+    running = os.uname().release
+    installed = []
+    try:
+        for name in os.listdir("/lib/modules"):
+            if name != running and os.path.isfile(os.path.join("/lib/modules", name, "modules.dep")):
+                installed.append(name)
+    except OSError:
+        pass
+    return [running] + sorted(installed, reverse=True)
+
+
+def kernel_reporter_service():
+    """Tell the host which kernels this workspace has, in every workspace
+    (the sandbox status only reports them where the sentry runs): the host
+    fetches the signed bromure_zeropages module for each from the CDN and
+    stages it in the meta share, where the image's root service
+    (bromure-zeropages.service) loads the running kernel's. Written only when
+    the set changes (an `apt upgrade` installing a kernel), atomically so the
+    host never reads half a file."""
+    path = os.path.join(OUTBOX, "kernels.json")
+    last = None
+    while _RUNNING.is_set():
+        kernels = _kernel_list()
+        if kernels != last:
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump({"running": kernels[0], "kernels": kernels}, f)
+                os.replace(tmp, path)
+                last = kernels
+            except OSError:
+                pass
+        time.sleep(30)
+
+
 # ─────────────────────────────── §10 main() ────────────────────────────────
 def _on_signal(signum, frame):
     """Stop the world. Registered ONLY on the main thread (signal.signal is
@@ -9416,6 +9455,7 @@ def main():
         ("command", command_loop_service),
         ("resume", resume_watcher_service),
         ("ip", ip_reporter_service),
+        ("kernels", kernel_reporter_service),
         ("session-monitor", session_monitor_service),
         ("seed", seed_watcher_service),
         ("docker-registries", docker_registries_watcher_service),

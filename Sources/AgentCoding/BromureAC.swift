@@ -16965,6 +16965,65 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.pane(for: pid)?.model.ipAddress = ip
             }
         }
+        sandbox.onKernelsReport = { [weak sandbox] kernels in
+            let meta = sandbox?.sessionDisk?.metadataDirectory
+            Self.deliverZeropages(kernels: kernels, profileID: pid, metadataDirectory: meta)
+        }
+    }
+
+    /// bromure_zeropages for a running workspace: remember its kernels (the
+    /// next boot stages their modules up front), fetch and verify each one's
+    /// module from the CDN, and drop it into the meta share's `zeropages/`,
+    /// where the image's root bromure-zeropages service loads the running
+    /// kernel's. Every workspace, sandboxed or not.
+    ///
+    /// One delivery task per workspace, replaced by each new report. It keeps
+    /// going until every kernel is staged or the session's meta share is gone:
+    /// agentd only rewrites kernels.json when the set changes, so a first
+    /// fetch that failed (offline, a blip) must be retried here — the guest's
+    /// loader keeps polling for the file. A transient failure retries with
+    /// backoff (30 s → 5 min); "not published yet" hourly (the daily job may
+    /// publish it). Rounds start at least 30 s apart, so a guest rewriting the
+    /// file can't make the host hammer the CDN.
+    nonisolated static func deliverZeropages(kernels: [String], profileID: UUID, metadataDirectory: URL?) {
+        guard let hash = SentryModuleStore.shippedZeropagesSourceHash() else { return }
+        let store = SentryModuleStore.zeropages
+        store.record(kernels: kernels, for: profileID)
+        guard let meta = metadataDirectory else { return }
+        let dir = meta.appendingPathComponent("zeropages", isDirectory: true)
+        let short = String(profileID.uuidString.prefix(8))
+        ZeropagesDelivery.shared.replace(profileID) { lastRound in
+            var pending = kernels
+            var backoff: TimeInterval = 30
+            var round = 0
+            while !pending.isEmpty, !Task.isCancelled,
+                  FileManager.default.fileExists(atPath: meta.path) {
+                let wait = 30 - Date().timeIntervalSince(lastRound())
+                if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1e9)) }
+                guard !Task.isCancelled else { return }
+                ZeropagesDelivery.shared.markRound(profileID)
+                var retry: [String] = []
+                var transient = false
+                for kernel in pending {
+                    if let f = await store.ensureOutcome(kernel: kernel, hash: hash) {
+                        if round == 0, kernel == kernels.first {
+                            SentryModuleStore.log("\(short): zeropages for \(kernel): \(f.reason)")
+                        }
+                        if !f.definitive { transient = true }
+                        retry.append(kernel)
+                    } else if store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
+                        transient = true      // cached, but the meta share write failed
+                        retry.append(kernel)
+                    }
+                }
+                pending = retry
+                round += 1
+                guard !pending.isEmpty else { return }
+                let delay: TimeInterval = transient ? backoff : 3600
+                backoff = min(backoff * 2, 300)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1e9))
+            }
+        }
     }
 
     // MARK: - Session lifetime (persistent-agent model)
@@ -19337,4 +19396,24 @@ extension ACAppDelegate {
         case .zai, .bedrock, .openrouter, .custom: return nil
         }
     }
+}
+
+/// The running bromure_zeropages delivery per workspace
+/// (deliverZeropages in BromureAC.swift): a new kernel report replaces it.
+final class ZeropagesDelivery: @unchecked Sendable {
+    static let shared = ZeropagesDelivery()
+    private let lock = NSLock()
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var rounds: [UUID: Date] = [:]
+
+    func replace(_ id: UUID, _ work: @escaping @Sendable (_ lastRound: @escaping @Sendable () -> Date) async -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        tasks[id]?.cancel()
+        tasks[id] = Task.detached { [weak self] in
+            await work { self?.lastRound(id) ?? .distantPast }
+        }
+    }
+
+    func markRound(_ id: UUID) { lock.lock(); rounds[id] = Date(); lock.unlock() }
+    func lastRound(_ id: UUID) -> Date { lock.lock(); defer { lock.unlock() }; return rounds[id] ?? .distantPast }
 }

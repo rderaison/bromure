@@ -232,6 +232,21 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// it actually changes (avoids spammy re-renders).
     private var lastReportedIP: String?
 
+    /// The kernels agentd reports (outbox/kernels.json: the running one
+    /// first, then the installed ones), when the set changes. Guest-written,
+    /// so only well-formed kernel names, at most 16.
+    public var onKernelsReport: (([String]) -> Void)?
+    private var lastReportedKernels: [String]?
+
+    /// `kernels.json` → its kernel list, untrusted input made safe: names
+    /// that aren't a kernel release are dropped, and so is the rest past 16.
+    nonisolated static func parseKernelsReport(_ raw: String) -> [String] {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              let list = obj["kernels"] as? [String] else { return [] }
+        var seen = Set<String>()
+        return Array(list.filter { SentryModuleCatalog.isKernelName($0) && seen.insert($0).inserted }.prefix(16))
+    }
+
     private let imageManager: UbuntuImageManager
     /// Exposed so the host can write tab-agent commands into the outbox.
     public let sessionDisk: SessionDisk?
@@ -1417,6 +1432,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         guard ip != vm.lastReportedIP else { return }
                         vm.lastReportedIP = ip
                         vm.onIPUpdate?(ip)
+                    }
+                }
+            }
+            // agentd's kernel report (bromure_zeropages: the host fetches
+            // and stages the module for these kernels).
+            if let raw = VM.boundedText(outbox.appendingPathComponent("kernels.json"), max: 8192) {
+                let kernels = VM.parseKernelsReport(raw)
+                if !kernels.isEmpty {
+                    events.append { vm in
+                        guard kernels != vm.lastReportedKernels else { return }
+                        vm.lastReportedKernels = kernels
+                        vm.onKernelsReport?(kernels)
                     }
                 }
             }

@@ -547,6 +547,59 @@ EOS
 systemctl enable bromure-resume.path >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
+# bromure_zeropages: zero the pages the guest frees, so macOS's memory
+# compressor can take that memory back from the VM (Virtualization.framework
+# can't be handed guest memory back). The host fetches the signed module for
+# each kernel agentd reports (outbox/kernels.json) from the CDN and stages it
+# in the meta share — read-only to the guest and to the host's VZ share, so
+# only the host can put a module there. This root service loads the running
+# kernel's once it is there. It polls instead of watching: the guest isn't
+# notified of host-side writes to the share. The module refuses to load
+# without init_on_alloc (Ubuntu's default), which is what keeps memory the
+# guest never used untouched; no compaction for the same reason (kcompactd
+# writes the pages it migrates to).
+# ---------------------------------------------------------------------------
+cat > /usr/local/sbin/bromure-zeropages-load <<'EOZ'
+#!/bin/sh
+K=$(uname -r)
+M=/mnt/bromure-meta/zeropages/bromure_zeropages-$K.ko
+n=0
+while :; do
+    [ -d /sys/module/bromure_zeropages ] && exit 0
+    if [ -f "$M" ]; then
+        echo 0 > /proc/sys/vm/compaction_proactiveness 2>/dev/null || true
+        if insmod "$M"; then
+            echo "bromure_zeropages loaded for $K"
+        else
+            echo "bromure_zeropages: insmod refused the module for $K"
+        fi
+        # A module the kernel refused won't load on a retry this boot.
+        exit 0
+    fi
+    # Every 10 s for 10 minutes (a first boot: the host is fetching it),
+    # then every 5 minutes (offline, or not published for this kernel yet).
+    n=$((n + 1))
+    if [ "$n" -lt 60 ]; then sleep 10; else sleep 300; fi
+done
+EOZ
+chmod 0755 /usr/local/sbin/bromure-zeropages-load
+
+cat > /etc/systemd/system/bromure-zeropages.service <<'EOS'
+[Unit]
+Description=Load bromure_zeropages so macOS can reclaim freed VM memory
+After=mnt-bromure\x2dmeta.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/bromure-zeropages-load
+
+[Install]
+WantedBy=multi-user.target
+EOS
+
+systemctl enable bromure-zeropages.service >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
 # GitHub CLI (gh) — official apt repo. Picks up ~/.config/gh/hosts.yml the
 # host writes from a profile's HTTPS-token credential.
 # ---------------------------------------------------------------------------

@@ -948,6 +948,16 @@ public final class SessionDisk {
                 } else {
                     try? fm.removeItem(at: advisorDest)
                 }
+                // bromure_zeropages, for every workspace: the verified cached
+                // module of each kernel agentd has reported for it
+                // (outbox/kernels.json). The image's root bromure-zeropages
+                // service loads the running kernel's; a kernel seen for the
+                // first time is fetched and staged while the VM runs.
+                if let zpHash = SentryModuleStore.shippedZeropagesSourceHash() {
+                    let zp = SentryModuleStore.zeropages
+                    zp.stage(kernels: zp.knownKernels(for: profile.id), hash: zpHash,
+                             into: tmp.appendingPathComponent("zeropages", isDirectory: true))
+                }
                 // The guest side: the root launcher + supervisor, the kernel
                 // sentry loader, their Python modules, and the prebuilt sentry
                 // module (+ its source for an on-guest rebuild when the guest

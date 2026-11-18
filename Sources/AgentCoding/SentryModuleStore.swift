@@ -8,6 +8,11 @@ import SandboxEngine
 /// (SUPublicEDKey); a module loads into the guest kernel as root, so the
 /// signature covers every field the host trusts — kernel, object path, sha256
 /// and size.
+///
+/// The same shape publishes other guest modules (`module`, e.g. zeropages:
+/// `zeropages/<sourceHash>/catalog.json`, tools/make-sentry-catalog.mjs
+/// --module); the module name is in every signing domain, so a catalog or
+/// module signed for one never verifies as another's.
 public struct SentryModuleCatalog: Codable, Equatable, Sendable {
     public struct Module: Codable, Equatable, Sendable {
         public var kernel: String
@@ -29,10 +34,11 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
     /// bytes with this key: Sparkle signs raw update archives, so that would
     /// let a module pass for a signed update.
     public static let moduleMagic = "bromure-sentry-module-v1"
+    public static func moduleMagic(for module: String) -> String { "bromure-\(module)-module-v1" }
 
     /// tools/make-sentry-catalog.mjs `moduleSigningPayload`, byte for byte.
-    public static func moduleSigningPayload(sourceHash: String, _ m: Module) -> Data {
-        Data([moduleMagic, "sourceHash=\(sourceHash)", "kernel=\(m.kernel)",
+    public static func moduleSigningPayload(module: String = "sentry", sourceHash: String, _ m: Module) -> Data {
+        Data([moduleMagic(for: module), "sourceHash=\(sourceHash)", "kernel=\(m.kernel)",
               "sha256=\(m.sha256.lowercased())", "bytes=\(m.bytes)"].joined(separator: "\n").utf8)
     }
 
@@ -40,7 +46,7 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
         guard let s = m.signature, let sig = Data(base64Encoded: s),
               let keyData = Data(base64Encoded: publicKeyBase64),
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData) else { return false }
-        return key.isValidSignature(sig, for: Self.moduleSigningPayload(sourceHash: sourceHash, m))
+        return key.isValidSignature(sig, for: Self.moduleSigningPayload(module: module, sourceHash: sourceHash, m))
     }
 
     public struct Signature: Codable, Equatable, Sendable {
@@ -53,14 +59,21 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
     public var sourceHash: String
     public var modules: [Module]
     public var signature: Signature?
+    /// Which module this catalog lists (not in the JSON: the store that
+    /// fetched it sets it, from the URL it asked). Part of every signing
+    /// payload and of the object prefix.
+    public var module = "sentry"
+
+    private enum CodingKeys: String, CodingKey { case formatVersion, sourceHash, modules, signature }
 
     /// Domain separator: the same key signs image catalogs and app updates.
     public static let magic = "bromure-sentry-modules-v1"
+    public static func magic(for module: String) -> String { "bromure-\(module)-modules-v1" }
 
     /// The bytes the signature covers. tools/make-sentry-catalog.mjs builds
     /// the IDENTICAL string; change both or neither (and bump the magic).
     public func signingPayload(signedAt: String) -> Data {
-        var lines = [Self.magic, "signedAt=\(signedAt)", "formatVersion=\(formatVersion)",
+        var lines = [Self.magic(for: module), "signedAt=\(signedAt)", "formatVersion=\(formatVersion)",
                      "sourceHash=\(sourceHash)"]
         for m in modules.sorted(by: { $0.kernel < $1.kernel }) {
             lines.append("module.\(m.kernel).path=\(m.path)")
@@ -90,7 +103,7 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
     /// that would escape a file name.
     public func isWellFormed(for hash: String) -> Bool {
         guard formatVersion == 1, sourceHash == hash else { return false }
-        let prefix = "sentry/\(hash)/"
+        let prefix = "\(module)/\(hash)/"
         return modules.allSatisfy { m in
             Self.isKernelName(m.kernel) && m.path.hasPrefix(prefix) && !m.path.contains("..")
                 && m.sha256.count == 64 && m.sha256.allSatisfy(\.isHexDigit)
@@ -115,8 +128,19 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
 /// Trust: the catalog must verify against the pinned SUPublicEDKey and name
 /// only this source's objects; every module is re-hashed against the catalog
 /// before it is staged, so a file edited in the cache is never loaded.
+///
+/// One store per guest module: `shared` is the sentry's; `zeropages` serves
+/// bromure_zeropages (Jenkinsfile.zeropages) the same way, for every
+/// workspace — its kernels come from agentd's `outbox/kernels.json`, and the
+/// image's root `bromure-zeropages` service loads it from `$META/zeropages/`.
 public final class SentryModuleStore: @unchecked Sendable {
     public static let shared = SentryModuleStore()
+    public static let zeropages = SentryModuleStore(module: "zeropages")
+
+    /// The module this store serves: its CDN prefix (`<module>/<hash>/`),
+    /// file stem (`bromure_<module>-<kernel>.ko`) and signing domains.
+    public let module: String
+    private var stem: String { "bromure_\(module)" }
 
     public static let defaultBase = URL(string: "https://dl.bromure.io/")!
 
@@ -150,12 +174,14 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// When a fetched catalog was last accepted (cached as current).
     private var catalogAcceptedAt: [String: Date] = [:]
 
-    public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
+    public init(module: String = "sentry",
+                root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
                 publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64,
                 session: URLSession = .shared) {
+        self.module = module
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BromureAC", isDirectory: true)
-        self.root = root ?? support.appendingPathComponent("sentry-modules", isDirectory: true)
+        self.root = root ?? support.appendingPathComponent("\(module)-modules", isDirectory: true)
         self.base = base ?? Self.overrideBase ?? Self.defaultBase
         self.requireSignature = requireSignature ?? (Self.overrideBase == nil)
         self.publicKeyBase64 = publicKeyBase64
@@ -169,8 +195,14 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// as `name\n<length>\n<bytes>`. scripts/openshell-guest/sentry/source-hash.sh
     /// computes the identical value.
     public static func sourceHash(of dir: URL) -> String? {
+        sourceHash(of: dir, files: ["Makefile", "bromure_sentry.c", "bromure_sentry.h"])
+    }
+
+    /// The same framing over `files` (scripts/zeropages/source-hash.sh for
+    /// bromure_zeropages).
+    public static func sourceHash(of dir: URL, files: [String]) -> String? {
         var hasher = SHA256()
-        for name in ["Makefile", "bromure_sentry.c", "bromure_sentry.h"] {
+        for name in files {
             guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else { return nil }
             hasher.update(data: Data("\(name)\n\(data.count)\n".utf8))
             hasher.update(data: data)
@@ -184,6 +216,17 @@ public final class SentryModuleStore: @unchecked Sendable {
         let dir = setupDir.appendingPathComponent("sentry-dist/src", isDirectory: true)
         if let hit = sha256Cache.object(forKey: dir as NSURL) { return hit as String }
         guard let h = sourceHash(of: dir) else { return nil }
+        sha256Cache.setObject(h as NSString, forKey: dir as NSURL)
+        return h
+    }
+
+    /// The hash of the bromure_zeropages source the app ships: the browser
+    /// engine's `vm-setup/zeropages` (Provisioner.setupDir), the very source
+    /// the browser image builds and Jenkinsfile.zeropages publishes.
+    public static func shippedZeropagesSourceHash() -> String? {
+        guard let dir = Provisioner.setupDir?.appendingPathComponent("zeropages", isDirectory: true) else { return nil }
+        if let hit = sha256Cache.object(forKey: dir as NSURL) { return hit as String }
+        guard let h = sourceHash(of: dir, files: ["Makefile", "bromure_zeropages.c"]) else { return nil }
         sha256Cache.setObject(h as NSString, forKey: dir as NSURL)
         return h
     }
@@ -213,8 +256,9 @@ public final class SentryModuleStore: @unchecked Sendable {
         if let c = catalogs[hash] { lock.unlock(); return c }
         lock.unlock()
         guard let data = try? Data(contentsOf: catalogFile(hash)),
-              let c = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data),
-              accept(c, for: hash) else { return nil }
+              var c = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data) else { return nil }
+        c.module = module
+        guard accept(c, for: hash) else { return nil }
         lock.lock(); catalogs[hash] = c; lock.unlock()
         return c
     }
@@ -240,16 +284,17 @@ public final class SentryModuleStore: @unchecked Sendable {
         lock.unlock()
         let cached = cachedCatalog(hash)
         if recent && !force { return (cached, acceptedRecently && cached != nil) }
-        let url = base.appendingPathComponent("sentry/\(hash)/catalog.json")
+        let url = base.appendingPathComponent("\(module)/\(hash)/catalog.json")
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         guard let (data, response) = try? await session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
-              let fetched = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data)
+              var fetched = try? JSONDecoder().decode(SentryModuleCatalog.self, from: data)
         else {
             Self.log("catalog for source \(hash.prefix(12)) unavailable from \(url.host ?? "?"); using \(cached == nil ? "nothing" : "the cached one")")
             return (cached, false)
         }
+        fetched.module = module
         lock.lock(); catalogFetchedAt[hash] = Date(); lock.unlock()
         guard accept(fetched, for: hash) else {
             Self.log("REJECTED the catalog for source \(hash.prefix(12)): bad signature or shape")
@@ -268,7 +313,7 @@ public final class SentryModuleStore: @unchecked Sendable {
     // MARK: Modules
 
     private func cacheFile(_ kernel: String, _ hash: String) -> URL {
-        root.appendingPathComponent(hash, isDirectory: true).appendingPathComponent("bromure_sentry-\(kernel).ko")
+        root.appendingPathComponent(hash, isDirectory: true).appendingPathComponent("\(stem)-\(kernel).ko")
     }
 
     private static func sha256Hex(_ data: Data) -> String {
@@ -352,7 +397,7 @@ public final class SentryModuleStore: @unchecked Sendable {
         let dest = cacheFile(kernel, hash)
         try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         do { try data.write(to: dest, options: .atomic) } catch { return transient("couldn't cache the module: \(error.localizedDescription)") }
-        Self.log("cached the sentry module for \(kernel) (source \(hash.prefix(12)))")
+        Self.log("cached the \(module) module for \(kernel) (source \(hash.prefix(12)))")
         return nil
     }
 
@@ -365,9 +410,9 @@ public final class SentryModuleStore: @unchecked Sendable {
         var staged: [String] = []
         for kernel in Set(kernels) {
             guard let data = verifiedModule(kernel: kernel, hash: hash) else { continue }
-            let dest = dir.appendingPathComponent("bromure_sentry-\(kernel).ko")
+            let dest = dir.appendingPathComponent("\(stem)-\(kernel).ko")
             if (try? Data(contentsOf: dest)) != data {
-                let tmp = dir.appendingPathComponent(".bromure_sentry-\(kernel).ko.\(UUID().uuidString.prefix(8))")
+                let tmp = dir.appendingPathComponent(".\(stem)-\(kernel).ko.\(UUID().uuidString.prefix(8))")
                 do {
                     try data.write(to: tmp)
                     try fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)], ofItemAtPath: tmp.path)
@@ -378,7 +423,7 @@ public final class SentryModuleStore: @unchecked Sendable {
                     continue
                 }
             }
-            try? fm.removeItem(at: dir.appendingPathComponent("bromure_sentry-\(kernel).unavailable"))
+            try? fm.removeItem(at: dir.appendingPathComponent("\(stem)-\(kernel).unavailable"))
             staged.append(kernel)
         }
         return staged.sorted()
@@ -395,7 +440,7 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// stops at once instead of timing out. Removed when a module is staged.
     public func markUnavailable(_ reasons: [String: String], in dir: URL) {
         for (kernel, why) in reasons where SentryModuleCatalog.isKernelName(kernel) {
-            let marker = dir.appendingPathComponent("bromure_sentry-\(kernel).unavailable")
+            let marker = dir.appendingPathComponent("\(stem)-\(kernel).unavailable")
             try? Data((why + "\n").utf8).write(to: marker, options: .atomic)
         }
     }
