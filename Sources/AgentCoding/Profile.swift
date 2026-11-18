@@ -1115,6 +1115,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// switched by a setting (omp, Hermes) rather than tied to one.
         public var switchesProvider: Bool { self == .omp || self == .hermes }
 
+        /// Hermes starts only on a model the workspace names (Models
+        /// settings, or the workspace's own pick): with none, its sessions
+        /// are saved without one and can't be reopened ("storage_unavailable").
+        /// Not startable until then; the workspace's settings still save.
+        public var needsModelToStart: Bool { self == .hermes }
+
         /// The guest variable carrying Hermes's (stand-in) provider key: the
         /// bashrc `hermes()` wrapper hands it to Hermes as its provider's
         /// variable at launch.

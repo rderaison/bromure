@@ -4402,3 +4402,6 @@
 "v%@ · older" = "v%@ · anterior";
 "Published image %@" = "Imagen publicada %@";
 "Built on this Mac" = "Creada en este Mac";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ no tiene ningún modelo configurado en esta máquina. Elija uno en los ajustes de la máquina › Modelos.";
+"No model set up (settings › Models)" = "Sin modelo configurado (ajustes › Modelos)";

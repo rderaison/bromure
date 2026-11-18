@@ -4400,3 +4400,6 @@
 "v%@ · older" = "v%@ · 旧版";
 "Published image %@" = "公開イメージ %@";
 "Built on this Mac" = "このMacで作成";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "このマシンでは %@ のモデルが設定されていません。マシンの設定 › モデル で選択してください。";
+"No model set up (settings › Models)" = "モデル未設定（設定 › モデル）";

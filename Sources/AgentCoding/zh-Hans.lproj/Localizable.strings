@@ -4400,3 +4400,6 @@
 "v%@ · older" = "v%@ · 旧版";
 "Published image %@" = "已发布映像 %@";
 "Built on this Mac" = "在此 Mac 上构建";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "此机器上尚未为 %@ 设置模型。请在机器的设置 › 模型 中选择一个。";
+"No model set up (settings › Models)" = "未设置模型（设置 › 模型）";

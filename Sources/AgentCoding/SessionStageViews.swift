@@ -1830,8 +1830,20 @@ struct NewSessionView: View {
         }
     }
 
+    /// The picked agent can't start on this machine: it needs a model and
+    /// the machine has none set up for it.
+    private var agentNeedsModel: Bool {
+        tool.needsModelToStart && selectedProfile != nil && !configuredTools.contains(tool)
+    }
+
+    static func needsModelMessage(_ tool: Profile.Tool) -> String {
+        String(format: NSLocalizedString(
+            "%@ has no model set up on this machine. Choose one in the machine's settings › Models.",
+            comment: "new session: agent can't start; %@ = agent name"), tool.displayName)
+    }
+
     private var canStart: Bool {
-        guard selectedProfile != nil else { return false }
+        guard selectedProfile != nil, !agentNeedsModel else { return false }
         if place == .repository {
             return !repoURL.trimmingCharacters(in: .whitespaces).isEmpty
                 && !effectiveFolder.isEmpty && effectiveFolder != "~"
@@ -1924,6 +1936,14 @@ struct NewSessionView: View {
                                         .allowsHitTesting(false)
                                 }
                             }
+                        if agentNeedsModel {
+                            Label(Self.needsModelMessage(tool), systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .symbolRenderingMode(.multicolor)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         if recentStarts.count > 1 { recentStartsRow }
                         recentRow
                         Text(Self.footnote)
@@ -2279,6 +2299,7 @@ struct NewSessionView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Profile.Tool.allCases, id: \.self) { t in
                 let configured = configuredTools.contains(t)
+                let blocked = !configured && t.needsModelToStart
                 let selected = t == tool
                 Button {
                     tool = t; agentPopover = false
@@ -2290,6 +2311,8 @@ struct NewSessionView: View {
                                 .font(.system(size: 13, weight: selected ? .semibold : .medium))
                             Text(configured
                                  ? NSLocalizedString("Ready", comment: "new session agent")
+                                 : blocked
+                                 ? NSLocalizedString("No model set up (settings › Models)", comment: "new session agent: can't start")
                                  : t.switchesProvider
                                  ? NSLocalizedString("Pick a model provider when it starts", comment: "new session agent")
                                  : NSLocalizedString("Sign in when it starts", comment: "new session agent"))
@@ -2309,6 +2332,9 @@ struct NewSessionView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(blocked)
+                .opacity(blocked ? 0.45 : 1)
+                .help(blocked ? Self.needsModelMessage(t) : "")
             }
         }
         .padding(6)
