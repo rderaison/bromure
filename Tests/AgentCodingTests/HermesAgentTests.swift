@@ -154,34 +154,84 @@ struct HermesAgentTests {
     /// Hermes's model.default unset; its gateway then saved every session
     /// with no model and refused to reopen it ("invalid policy"). The
     /// catalog's labeled default -- what Hermes runs a turn on anyway -- is
-    /// written out instead.
+    /// written out instead (`_bromure_hermes_catalog_default`).
     @Test("Nous with no model chosen gets Hermes's own catalog default written out")
     func applyNousDefault() throws {
         let home = try tempDir()
-        let cache = home.appendingPathComponent(".hermes/cache")
-        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
-        let catalog: [String: Any] = ["providers": ["nous": ["models": [
-            ["id": "anthropic/claude-fable-5.2"], ["id": "z-ai/glm-5.3", "default": true]]]]]
-        try JSONSerialization.data(withJSONObject: catalog).write(to: cache.appendingPathComponent("model_catalog.json"))
-        let calls = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:], home: home)
+        let nous = ["BROMURE_HERMES_NOUS_DEFAULT": "z-ai/glm-5.3"]
+        let calls = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:],
+                                 home: home, env: nous)
         #expect(calls.contains("config set model.default z-ai/glm-5.3"))
         #expect(!calls.contains("config unset model.default"))
         // A model the workspace chose wins.
         let chosen = try runApply(settings: ["model": ["provider": "nous", "default": "openai/gpt-5.5"], "key_var": ""],
-                                  servers: [:], home: home)
+                                  servers: [:], home: home, env: nous)
         #expect(chosen.contains("config set model.default openai/gpt-5.5"))
         #expect(!chosen.contains("config set model.default z-ai/glm-5.3"))
         // Another provider without a model: still its own default, unset.
         let other = try runApply(settings: ["model": ["provider": "anthropic"], "key_var": "ANTHROPIC_API_KEY"],
-                                 servers: [:], home: home)
+                                 servers: [:], home: home, env: nous)
         #expect(other.contains("config unset model.default"))
-        // No catalog, or a labeled id that isn't one: unset, as before.
-        let bad: [String: Any] = ["providers": ["nous": ["models": [["id": "x y; rm", "default": true]]]]]
-        try JSONSerialization.data(withJSONObject: bad).write(to: cache.appendingPathComponent("model_catalog.json"))
-        let rejected = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:], home: home)
-        #expect(rejected.contains("config unset model.default"))
-        // Workspaces whose settings didn't change apply this once.
-        #expect(try renderBashrc().contains("printf 'apply-2 '"))
+        // No default known, or one that isn't a model id: unset, as before.
+        for bad in ["", "x y; rm"] {
+            let r = try runApply(settings: ["model": ["provider": "nous"], "key_var": ""], servers: [:],
+                                 home: home, env: ["BROMURE_HERMES_NOUS_DEFAULT": bad])
+            #expect(r.contains("config unset model.default"))
+        }
+    }
+
+    /// The stamp's run of `_bromure_hermes_catalog_default`, from the
+    /// rendered .bashrc, against a settings file and a Hermes cache.
+    private func catalogDefault(settings: [String: Any], catalog: [String: Any]?) throws -> String {
+        let rc = try renderBashrc()
+        let lines = rc.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.hasPrefix("_bromure_hermes_catalog_default() {") })
+        let close = try #require(lines[(start + 1)...].firstIndex { $0 == "BROMURE_HERMES_CATALOG" })
+        let end = try #require(lines[(close + 1)...].firstIndex { $0 == "}" })
+        let fn = lines[start...end].joined(separator: "\n")
+        let dir = try tempDir()
+        let meta = dir.appendingPathComponent("meta")
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: settings).write(to: meta.appendingPathComponent("hermes-settings.json"))
+        let cache = dir.appendingPathComponent(".hermes/cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        if let catalog {
+            try JSONSerialization.data(withJSONObject: catalog).write(to: cache.appendingPathComponent("model_catalog.json"))
+        }
+        let out = Pipe()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", fn + "\n_bromure_hermes_catalog_default"]
+        p.environment = ["HOME": dir.path, "HERMES_HOME": "", "BROMURE_META_DIR": meta.path, "PATH": "/usr/bin:/bin"]
+        p.standardOutput = out
+        try p.run(); p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Finding "Hermes stays pinned to a stale Nous default after catalog
+    /// refresh": the default was read inside the apply only, and the stamp
+    /// didn't carry it -- a default Hermes's catalog rotated to, or one that
+    /// appeared after a first apply with no catalog, was never applied.
+    @Test("the stamp carries the catalog's Nous default, so a new one is applied again")
+    func catalogDefaultInStamp() throws {
+        let nous: [String: Any] = ["model": ["provider": "nous"]]
+        let cat = { (id: String) -> [String: Any] in
+            ["providers": ["nous": ["models": [["id": "anthropic/claude-fable-5.2"], ["id": id, "default": true]]]]]
+        }
+        #expect(try catalogDefault(settings: nous, catalog: cat("z-ai/glm-5.3")) == "z-ai/glm-5.3")
+        #expect(try catalogDefault(settings: nous, catalog: cat("z-ai/glm-6")) == "z-ai/glm-6")
+        #expect(try catalogDefault(settings: nous, catalog: nil) == "")
+        #expect(try catalogDefault(settings: nous, catalog: cat("x y; rm")) == "")
+        // Not on Nous: nothing read, nothing in the stamp to change.
+        #expect(try catalogDefault(settings: ["model": ["provider": "anthropic"]], catalog: cat("z-ai/glm-5.3")) == "")
+        let rc = try renderBashrc()
+        let stamp = try #require(rc.range(of: "_bromure_hermes_stamp() {"))
+        let stampEnd = try #require(rc.range(of: "_bromure_hermes_apply() {", range: stamp.upperBound..<rc.endIndex))
+        let body = String(rc[stamp.upperBound..<stampEnd.lowerBound])
+        #expect(body.contains("_bromure_hermes_catalog_default | sha256sum"))
+        #expect(body.contains("printf 'apply-3 '"))
+        #expect(rc.contains("BROMURE_HERMES_NOUS_DEFAULT=\"$(_bromure_hermes_catalog_default)\""))
     }
 
     @Test("a failed `hermes config` fails the step, so the wrapper doesn't stamp it done")
@@ -200,7 +250,7 @@ struct HermesAgentTests {
         #expect(rc.contains("cat \"$_h/.env\" 2>/dev/null | sha256sum"))
         // The step's own `hermes config` runs see no other provider's key.
         #expect(rc.contains("_bromure_hermes_apply \"${_u[@]}\""))
-        #expect(rc.contains("command env \"$@\" -u BROMURE_HERMES_API_KEY python3 -"))
+        #expect(rc.contains("command env \"$@\" -u BROMURE_HERMES_API_KEY \\\n"))
     }
 
     @Test("a stand-in for a hidden key left in Hermes's .env is dropped; the user's own keys stay")
