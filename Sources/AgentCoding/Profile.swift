@@ -2087,6 +2087,16 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
+    /// A new workspace made from this one (a duplicate, the template)
+    /// answers the base-image offer for itself: the source's Update would
+    /// reset the copy's cloned disk at its first boot, unasked; its "No"
+    /// or "Remind me later" would silence the copy's own question.
+    public mutating func forgetBaseImageAnswers() {
+        baseImageUpgradeAcceptedFor = nil
+        baseImageUpgradeDeclinedFor = nil
+        baseImageUpgradeRemindAfter = nil
+    }
+
     public mutating func adoptRuntimeFields(from stored: Profile) {
         createdAt = stored.createdAt
         // The later of the two: a use recorded while the editor was open
@@ -3950,6 +3960,7 @@ public final class ProfileStore {
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
+        p.forgetBaseImageAnswers()
         // A new workspace's agents reach every workspace (and the remote
         // hosts this Mac mirrors) until the user narrows it in General ›
         // Reach — whatever the template holds.
@@ -4368,6 +4379,11 @@ public final class ProfileStore {
         // would file the copy under wherever the original sits in the
         // list, which is confusing.
         fresh.createdAt = Date()
+        // Its cloned disk is the source's: the source's pending Update
+        // (the chooser after a base-image install) would reset it at the
+        // copy's first boot, though nobody chose that for the copy
+        // (Finding "Duplicating a workspace copies its pending disk reset").
+        fresh.forgetBaseImageAnswers()
 
         // The clones cost nothing at first but grow as either copy is
         // written, like any new VM's disks: keep the same 1 GB floor.

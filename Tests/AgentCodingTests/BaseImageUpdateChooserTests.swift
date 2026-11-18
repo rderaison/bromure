@@ -68,6 +68,51 @@ struct BaseImageUpdateChooserTests {
         #expect(!delegate.acceptedBaseImageUpgradeDue(try stored(), current: "201.1"))
     }
 
+    @MainActor
+    @Test("a duplicate (or a workspace from the template) doesn't inherit the source's Update, No or Remind")
+    func copiesAnswerForThemselves() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chooser-dup-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let delegate = ACAppDelegate(
+            imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp), headless: true)
+        var p = Profile(name: "w", tool: .claude, authMode: .token)
+        p.baseImageVersionAtClone = "201"
+        try delegate.store.save(p)
+        defer { try? FileManager.default.removeItem(at: delegate.store.profileDirectory(for: p)) }
+        let disk = delegate.store.diskURL(for: p)
+        try FileManager.default.createDirectory(at: disk.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: disk.path, contents: Data("x".utf8))
+        delegate.recordBaseImageUpdateChoice(profileID: p.id, current: "201.1", update: true)
+        let source = try #require(delegate.store.loadAll().first { $0.id == p.id })
+        #expect(delegate.acceptedBaseImageUpgradeDue(source, current: "201.1"))
+
+        // The copy's cloned disk is kept: its first boot asks instead.
+        let copy = try delegate.store.duplicate(source, named: "w copy")
+        defer { try? FileManager.default.removeItem(at: delegate.store.profileDirectory(for: copy)) }
+        #expect(FileManager.default.fileExists(atPath: delegate.store.diskURL(for: copy).path))
+        let stored = try #require(delegate.store.loadAll().first { $0.id == copy.id })
+        #expect(stored.baseImageUpgradeAcceptedFor == nil)
+        #expect(!delegate.acceptedBaseImageUpgradeDue(stored, current: "201.1"))
+        #expect(delegate.baseImageUpgradeOfferDue(stored, current: "201.1"))
+        // The source keeps its own Update.
+        #expect(delegate.acceptedBaseImageUpgradeDue(
+            try #require(delegate.store.loadAll().first { $0.id == p.id }), current: "201.1"))
+
+        // "No" and "Remind me later" are the source's own answers too.
+        var answered = source
+        answered.baseImageUpgradeAcceptedFor = nil
+        answered.baseImageUpgradeDeclinedFor = "201.1"
+        answered.baseImageUpgradeRemindAfter = Date().addingTimeInterval(3600)
+        answered.forgetBaseImageAnswers()
+        #expect(answered.baseImageUpgradeDeclinedFor == nil && answered.baseImageUpgradeRemindAfter == nil)
+
+        // The template path drops them as well.
+        let src = try Self.src("Sources/AgentCoding/Profile.swift")
+        let fn = try #require(src.range(of: "public func newProfileFromTemplate("))
+        #expect(src[fn.lowerBound...].prefix(1200).contains("p.forgetBaseImageAnswers()"))
+    }
+
     @Test("the answer survives a save and reload")
     func codable() throws {
         var p = Profile(name: "w", tool: .claude, authMode: .token)
