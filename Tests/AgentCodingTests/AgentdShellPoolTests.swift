@@ -65,12 +65,12 @@ struct AgentdShellPoolTests {
             running = [True]
             pool = m._ShellPool(connect, handle, lambda: running[0], sleep=nap, size=4)
             t = threading.Thread(target=pool.run, daemon=True); t.start()
-            out["filled"] = wait_for(lambda: pool.established == 4)
+            out["filled"] = wait_for(lambda: pool.established == 4 and len(held) == 4)
             # A burst claims all four, while the host refuses 200 attempts in a
             # row (the old code gave up after 20).
             state["fail"] = 200
             for r in list(held): r()
-            out["refilled"] = wait_for(lambda: pool.established == 8 and pool.missing() == 0)
+            out["refilled"] = wait_for(lambda: pool.established == 8 and pool.missing() == 0 and len(held) == 8)
             out["failed_attempts"] = 200 - state["fail"]
             out["max_sleep"] = max(sleeps) if sleeps else 0
             out["min_sleep"] = min(sleeps) if sleeps else 0
@@ -100,12 +100,12 @@ struct AgentdShellPoolTests {
             pool = m._ShellPool(lambda: object(), lambda s, r: held.append(r), lambda: running[0],
                                 sleep=lambda x: None, size=4)
             t = threading.Thread(target=pool.run, daemon=True); t.start()
-            wait_for(lambda: pool.established == 4)
+            wait_for(lambda: pool.established == 4 and len(held) == 4)
             # Three claimed at once, from three threads, as parallel runs do.
             claims = [threading.Thread(target=held[i]) for i in range(3)]
             for c in claims: c.start()
             for c in claims: c.join()
-            wait_for(lambda: pool.established == 7)
+            wait_for(lambda: pool.established == 7 and len(held) == 7)
             time.sleep(0.2)
             out["established"] = pool.established
             out["missing"] = pool.missing()
@@ -170,7 +170,7 @@ struct AgentdShellPoolTests {
             running = [True]
             pool = m._ShellPool(connect, lambda s, r: held.append(r), lambda: running[0], size=4)
             t = threading.Thread(target=pool.run, daemon=True); t.start()
-            wait_for(lambda: pool.established == 4)
+            wait_for(lambda: pool.established == 4 and len(held) == 4)
             slow[0] = True
             started = time.time()
             for r in list(held[:4]): threading.Thread(target=r).start()
@@ -184,6 +184,29 @@ struct AgentdShellPoolTests {
         #expect(out["refilled"] as? Bool == true)
         #expect((out["took"] as? Double ?? 99) < 2.5, "all four back well inside the host's 3 s")
         #expect(out["most_at_once"] as? Int == 4, "one filler per missing slot, connecting at once")
+        #expect(out["missing"] as? Int == 0)
+    }
+
+    @Test("a connect that raises costs a retry, never the slot")
+    func connectRaising() throws {
+        let out = try run("""
+            calls = [0]
+            def connect():
+                calls[0] += 1
+                if calls[0] <= 3:
+                    raise RuntimeError("boom")
+                return object()
+            held = []
+            running = [True]
+            pool = m._ShellPool(connect, lambda s, r: held.append(r), lambda: running[0],
+                                sleep=lambda x: None, size=1)
+            t = threading.Thread(target=pool.run, daemon=True); t.start()
+            out["filled"] = wait_for(lambda: len(held) == 1)
+            out["missing"] = pool.missing()
+            running[0] = False
+            t.join(3)
+            """)
+        #expect(out["filled"] as? Bool == true)
         #expect(out["missing"] as? Int == 0)
     }
 

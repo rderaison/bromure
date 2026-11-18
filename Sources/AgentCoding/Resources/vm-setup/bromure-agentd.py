@@ -1986,7 +1986,11 @@ class _ShellPool:
     def _fill_one(self):
         backoff = SHELL_REFILL_BACKOFF_MIN
         while self._running():
-            s = self._connect()
+            try:
+                s = self._connect()
+            except Exception as e:  # never lose the slot: a failure like any other
+                log("shell", "pool connect failed: %s" % e)
+                s = None
             if s is None:
                 with self._lock:
                     first = self._outage is None
