@@ -135,4 +135,122 @@ struct HermesSessionTests {
         #expect(try run("-c", model: ["provider": "nous"]) == nil)
         #expect(try run("-c", model: ["provider": "nous", "default": "a b; rm -rf ~"]) == nil)
     }
+
+    /// The .bashrc's functions `names`, lifted out as they are written.
+    private static func bashrcFunctions(_ names: [String]) throws -> (String, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-type-\(UUID().uuidString)")
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .hermes, authMode: .token)
+        let seed = root.appendingPathComponent("seed")
+        try store.writeHomeSeedFiles(for: p, into: seed, terminalDefaults: .fallback)
+        let rc = try String(contentsOf: seed.appendingPathComponent("files/.bashrc"), encoding: .utf8)
+        let lines = rc.components(separatedBy: "\n")
+        let body = try names.map { name -> String in
+            let start = try #require(lines.firstIndex { $0 == name + "() {" })
+            let end = try #require(lines[start...].firstIndex { $0 == "}" })
+            return lines[start...end].joined(separator: "\n")
+        }.joined(separator: "\n")
+        return (body, root)
+    }
+
+    /// A stand-in tmux pane: `capture-pane` draws Hermes's composer once
+    /// `$SIM/up` exists (its placeholder in italics while `$SIM/text` is
+    /// empty), `send-keys -l` types into it, Enter sends it to `$SIM/sent`;
+    /// `ps` shows a Hermes on the pane's terminal once it is up.
+    private static func simulatedPane(in root: URL) throws -> URL {
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let tmux = """
+        #!/bin/sh
+        case "$1" in
+          display-message) echo /dev/pts/9 ;;
+          capture-pane)
+            if [ -e "$SIM/up" ]; then
+              echo '↻ Resumed session local-abc'
+              t=$(cat "$SIM/text" 2>/dev/null)
+              if [ -n "$t" ]; then printf '\\033[38;5;230m❯ \\033[0m%s\\n' "$t"
+              else printf '\\033[38;5;230m❯ \\033[3m\\033[38;5;136mFind and fix a failing test\\033[0m\\n'; fi
+              printf '\\033[38;5;250m ☤ \\033[1mgpt-5.5\\033[0m\\n'
+            else
+              echo 'ubuntu@vm:~$ hermes -c'
+            fi ;;
+          send-keys)
+            shift 3
+            if [ "$1" = -l ]; then printf '%s' "$3" >> "$SIM/text"; else mv "$SIM/text" "$SIM/sent"; fi ;;
+        esac
+        """
+        let ps = "#!/bin/sh\n[ -e \"$SIM/up\" ] && echo 'python3 -I -c import hermes_bootstrap /opt/hermes/hermes-agent'\nexit 0\n"
+        for (name, text) in [("tmux", tmux), ("ps", ps)] {
+            let url = bin.appendingPathComponent(name)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+        return bin
+    }
+
+    private static func bash(_ script: String, path: URL, sim: URL) throws -> (Int32, String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", script]
+        proc.environment = ["PATH": path.path + ":/usr/bin:/bin", "SIM": sim.path]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        try proc.run(); proc.waitUntilExit()
+        return (proc.terminationStatus, String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+    }
+
+    @Test("the composer reader drops Hermes's italic placeholder and keeps typed text")
+    func composer() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        let read = fns + "\n_bromure_hermes_composer %1"
+        #expect(try Self.bash(read, path: bin, sim: sim).0 == 2, "no composer on screen")
+        FileManager.default.createFile(atPath: sim.appendingPathComponent("up").path, contents: nil)
+        #expect(try Self.bash(read, path: bin, sim: sim) == (0, "\n"), "the placeholder is not content")
+        try "fix the build".write(to: sim.appendingPathComponent("text"), atomically: true, encoding: .utf8)
+        #expect(try Self.bash(read, path: bin, sim: sim) == (0, "fix the build\n"))
+    }
+
+    /// The resume's `/model` goes into Hermes's composer as typed input, once
+    /// Hermes is up: never as `chat --query`, which Hermes sends literally,
+    /// as a turn on the session's old model.
+    @Test("a bare resume's /model is typed into an empty composer, never over the user's text", arguments: [false, true])
+    func typesModel(userTyped: Bool) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        let model = "/model openai/gpt-5.5 --provider nous --session"
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '\(model)' &
+        sleep 0.3
+        \(userTyped ? "printf 'hello' > \"$SIM/text\"" : ":")
+        touch "$SIM/up"
+        wait
+        """
+        #expect(try Self.bash(script, path: bin, sim: sim).0 == 0)
+        let sent = try? String(contentsOf: sim.appendingPathComponent("sent"), encoding: .utf8)
+        let left = try? String(contentsOf: sim.appendingPathComponent("text"), encoding: .utf8)
+        if userTyped {
+            #expect(sent == nil)
+            #expect(left == "hello")
+        } else {
+            #expect(sent == model)
+            #expect(left == nil)
+        }
+    }
+
+    @Test("the wrapper no longer seeds the resume's /model as a chat query")
+    func noModelQuery() throws {
+        let (fns, root) = try Self.bashrcFunctions(["hermes"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(!fns.contains("chat --query=\"$_rm\""))
+        #expect(fns.contains("_bromure_hermes_type_model \"$TMUX_PANE\" \"$_rm\""))
+    }
 }
