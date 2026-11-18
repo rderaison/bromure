@@ -168,7 +168,18 @@ struct HermesSessionTests {
         case "$1" in
           display-message)
             case "$5" in
-              *pane_width*) cat "$SIM/width" 2>/dev/null || echo 200 ;;
+              *pane_width*)
+                # Width, then the cursor: right after the text, or -- for a
+                # text ending a row exactly -- parked off the composer, as
+                # Hermes leaves it.
+                w=$(cat "$SIM/width" 2>/dev/null || echo 200)
+                t=$(cat "$SIM/text" 2>/dev/null); n=${#t}
+                if [ "$n" -lt $((w - 2)) ]; then echo "$w $((2 + n)) 1"
+                elif [ "$n" -eq $((w - 2)) ]; then echo "$w 0 0"
+                else
+                  rest=$((n - (w - 2))); q=$(((rest + w - 1) / w)); x=$((rest - (q - 1) * w))
+                  if [ "$x" -eq "$w" ]; then echo "$w 0 0"; else echo "$w $x $((1 + q))"; fi
+                fi ;;
               *) echo /dev/pts/9 ;;
             esac ;;
           capture-pane)
@@ -348,6 +359,13 @@ struct HermesSessionTests {
         ("/model anthropic/claude-opus-5-5 --provider nous --session", "/model anthropic/claude-opus-5-5 --provider nous", false),
         ("/model anthropic/claude-opus-5-5 --provider nous --session extra", "/model anthropic/claude-opus-5-5 --provider nous --session", false),
         ("/model anthropic/claude-opus-5-5", "/model other", false),
+        // Finding "Wrapped composer check accepts extra input after a full
+        // row": the expected text ends a row exactly, more input starts
+        // the next one with a blank -- not Hermes's status row.
+        ("/model 0123456789012345678901234567890 extra", "/model 0123456789012345678901234567890", false),
+        ("/model 0123456789012345678901234567890 ", "/model 0123456789012345678901234567890", false),
+        ("/model short  ", "/model short", false),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session  ", "/model anthropic/claude-opus-5-5 --provider nous --session", false),
     ])
     func composerHolds(typed: String, want: String, holds: Bool) throws {
         let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer"])

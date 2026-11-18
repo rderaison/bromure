@@ -7353,14 +7353,16 @@ public final class ProfileStore {
     #    Fails (2) with no composer on screen. With $2: whether the composer
     #    holds exactly $2 (fails 1 if not) -- read across the rows Hermes
     #    wraps it onto: it cuts long input at the pane's width, character by
-    #    character, and carries on at the next row's first column.
+    #    character, and carries on at the next row's first column -- and
+    #    nothing typed after it: the cursor sits right after it.
     _bromure_hermes_composer() {
         local _w
-        _w=$(tmux display-message -p -t "$1" '#{pane_width}' 2>/dev/null)
+        _w=$(tmux display-message -p -t "$1" '#{pane_width} #{cursor_x} #{cursor_y}' 2>/dev/null)
         tmux capture-pane -p -e -t "$1" 2>/dev/null | python3 -c '
     import re, sys, unicodedata
     esc, glyph = chr(27), chr(0x276F) + " "
-    width = int(sys.argv[1]) if sys.argv[1:2] and sys.argv[1].isdigit() else 0
+    geo = (sys.argv[1] if len(sys.argv) > 1 else "").split()
+    width, cx, cy = (int(g) for g in geo) if len(geo) == 3 and all(g.isdigit() for g in geo) else (0, 0, 0)
     want = sys.argv[2] if len(sys.argv) > 2 else None
     lines = sys.stdin.read().split(chr(10))
     at = [n for n, l in enumerate(lines) if glyph in l]
@@ -7403,10 +7405,18 @@ public final class ProfileStore {
     shown = [visible(first)] + [visible(l) for l in lines[at[-1] + 1:at[-1] + len(rows) + 1]]
     if [r.rstrip() for r in shown[:len(rows)]] != [r.rstrip() for r in rows]:
         sys.exit(1)
-    # More typed text would carry on in the row below; the status row
-    # under the composer starts with a blank.
-    after = shown[len(rows)] if len(shown) > len(rows) else ""
-    sys.exit(0 if after[:1] in ("", " ") or after.startswith(chr(0x2500)) else 1)
+    # Nothing typed after it (the rows do not tell: tmux drops trailing
+    # blanks, and what follows a full row may be the next row of input or
+    # the row under the composer, whatever the skin draws there): the
+    # cursor sits right after the text. A text ending a row exactly leaves
+    # it parked off the rows of the composer -- any more input moves it to the
+    # row below, past column 0.
+    last = at[-1] + len(rows) - 1
+    if used < width:
+        ok = (cx, cy) == (used, last)
+    else:
+        ok = cy <= last or (cy == last + 1 and cx == 0)
+    sys.exit(0 if ok else 1)
     ' "$_w" ${2+"$2"}
     }
     #    Whether Hermes is what terminal $1 runs in the foreground: a
