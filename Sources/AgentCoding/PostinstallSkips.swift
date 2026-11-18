@@ -26,6 +26,14 @@ struct PostinstallSkips {
         store(uuids.subtracting(ids))
     }
 
+    /// Of the steps an install was asked for, the ones the image now has:
+    /// only those come off the skip list -- a failed install keeps the
+    /// user's choice.
+    static func installed(_ requested: [String], applied: some Sequence<String>) -> [String] {
+        let applied = Set(applied)
+        return requested.filter(applied.contains)
+    }
+
     private func store(_ set: Set<String>) {
         if set.isEmpty { defaults.removeObject(forKey: Self.defaultsKey) }
         else { defaults.set(set.sorted(), forKey: Self.defaultsKey) }

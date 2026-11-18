@@ -35,6 +35,27 @@ struct PostinstallSkipTests {
         #expect(skips.defaults.object(forKey: PostinstallSkips.defaultsKey) == nil)
     }
 
+    /// Finding "Failed manual package install clears permanent skip": Base
+    /// Image details took the steps off the skip list before installing
+    /// them, so a failed install undid the skip without installing anything.
+    @Test("Install Selected unskips only what the image got")
+    func unskipAfterInstall() throws {
+        #expect(PostinstallSkips.installed(["b", "c"], applied: ["a", "b"]) == ["b"])
+        #expect(PostinstallSkips.installed(["b"], applied: ["a"]).isEmpty, "failed: still skipped")
+        let skips = PostinstallSkips(defaults: Self.defaults())
+        skips.skip(["b", "c"])
+        skips.unskip(PostinstallSkips.installed(["b", "c"], applied: ["a", "b"]))
+        #expect(skips.uuids == ["c"])
+        let top = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let fn = try #require(ac.range(of: "func installPostinstallStepsNow("))
+        let body = ac[fn.upperBound...].prefix(900)
+        let wait = try #require(body.range(of: "await installTask?.value"))
+        let unskip = try #require(body.range(of: "PostinstallSkips().unskip(PostinstallSkips.installed("))
+        #expect(wait.upperBound <= unskip.lowerBound, "unskipped only after the install")
+    }
+
     @Test("a skipped step is neither offered nor installed by a new image")
     func filtered() {
         #expect(Self.catalog.baseImageSteps(skipping: ["b"]).map(\.uuid) == ["a", "c"])
