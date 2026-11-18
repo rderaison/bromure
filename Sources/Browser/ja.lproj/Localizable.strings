@@ -197,8 +197,9 @@
 "8 GB" = "8 GB";
 "16 GB" = "16 GB";
 "CPU Cores" = "CPUコア数";
-"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "ブラウザで使用可能なプロセッサコアの数です。「自動」はメモリに応じて調整され（1 GBあたり2コア）、このMacのコア数が上限となります。";
+"Number of processor cores available to the browser. Automatic uses half of this Mac\U2019s cores, from 2 to 12." = "\U30D6\U30E9\U30A6\U30B6\U304C\U4F7F\U7528\U3067\U304D\U308B\U30D7\U30ED\U30BB\U30C3\U30B5\U30B3\U30A2\U306E\U6570\U3067\U3059\U3002\U300C\U81EA\U52D5\U300D\U3067\U306F\U3001\U3053\U306E Mac \U306E\U30B3\U30A2\U306E\U534A\U5206\UFF082\U301C12 \U500B\UFF09\U3092\U4F7F\U7528\U3057\U307E\U3059\U3002";
 "Automatic (%lld)" = "自動（%lld）";
+"Automatic (%lld GB)" = "自動（%lld GB）";
 "Energy Mode" = "エネルギーモード";
 "Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "アイドル状態のブラウザセッションを一時停止してバッテリーを節約するタイミングを制御します。「自動」はMacの低電力モードに従います。「省エネ」はMacの設定に関係なく、3分間操作がないと一時停止します。「高パフォーマンス」は一時停止しません。";
 "High Power" = "高パフォーマンス";

@@ -442,7 +442,7 @@ public struct VMConfig {
         // video was visibly choppy). Half the host cores, capped at 12,
         // matches what v1.0.0 shipped and what smooth 1080p60 software
         // playback needs. Idle vCPUs cost the host ~nothing.
-        self.cpuCount = cpuCount ?? max(2, min(ProcessInfo.processInfo.processorCount / 2, 12))
+        self.cpuCount = cpuCount ?? Self.automaticCPUCount
         self.memorySize = memorySize
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight
@@ -1068,6 +1068,24 @@ public struct VMConfig {
         ]
         let region = defaultRegions[lang] ?? lang.uppercased()
         return "\(lang)_\(region)"
+    }
+
+    /// Memory per browser VM, in GB, while Settings ▸ Hardware ▸ Memory is
+    /// on Automatic (`vm.memoryGB` unset or 0): sized to the Mac.
+    public static var automaticMemoryGB: Int {
+        automaticMemoryGB(hostMemoryGB: Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)))
+    }
+
+    public static func automaticMemoryGB(hostMemoryGB: Int) -> Int {
+        if hostMemoryGB < 18 { return 2 }
+        if hostMemoryGB < 36 { return 3 }
+        return 4
+    }
+
+    /// vCPUs per browser VM while Settings ▸ Hardware ▸ CPU Cores is on
+    /// Automatic: half the Mac's cores, from 2 to 12 (see `init`).
+    public static var automaticCPUCount: Int {
+        max(2, min(ProcessInfo.processInfo.processorCount / 2, 12))
     }
 
     /// Default extra kernel boot options.

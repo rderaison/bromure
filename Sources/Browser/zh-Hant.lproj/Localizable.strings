@@ -197,8 +197,9 @@
 "8 GB" = "8 GB";
 "16 GB" = "16 GB";
 "CPU Cores" = "CPU 核心數";
-"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "瀏覽器可用的處理器核心數。「自動」會隨記憶體自動調整（每 GB 2 個核心），最多不超過此 Mac 的核心數。";
+"Number of processor cores available to the browser. Automatic uses half of this Mac\U2019s cores, from 2 to 12." = "\U700F\U89BD\U5668\U53EF\U4F7F\U7528\U7684\U8655\U7406\U5668\U6838\U5FC3\U6578\U3002\U300C\U81EA\U52D5\U300D\U6703\U4F7F\U7528\U9019\U53F0 Mac \U4E00\U534A\U7684\U6838\U5FC3\UFF0C\U6700\U5C11 2 \U500B\UFF0C\U6700\U591A 12 \U500B\U3002";
 "Automatic (%lld)" = "自動（%lld）";
+"Automatic (%lld GB)" = "自動（%lld GB）";
 "Energy Mode" = "能源模式";
 "Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "控制閒置的瀏覽器工作階段何時暫停以節省電力。「自動」會跟隨 Mac 的低耗電模式。「低功耗」無論 Mac 設定為何，閒置 3 分鐘後都會暫停。「高效能」從不暫停。";
 "High Power" = "高效能";

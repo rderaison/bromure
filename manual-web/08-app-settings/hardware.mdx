@@ -16,7 +16,7 @@ The **Hardware** pane ("Resources allocated to each browser session") sets the v
 
 | Setting | Description |
 |---|---|
-| **Memory** | How much RAM each browser VM gets: **1 GB**, **2 GB**, **3 GB**, **4 GB**, **8 GB**, or **16 GB**. "2 GB works for most websites. Increase to 4 GB or more for heavy web apps." Default: sized to your Mac (see below). |
+| **Memory** | How much RAM each browser VM gets: **Automatic**, **1 GB**, **2 GB**, **3 GB**, **4 GB**, **8 GB**, or **16 GB**. "2 GB works for most websites. Increase to 4 GB or more for heavy web apps." Default: **Automatic**, sized to your Mac (see below). |
 | **CPU Cores** | How many processor cores each browser VM gets: **Automatic** or a fixed number from 1 to the number of cores in your Mac. Default: **Automatic**. |
 | **Energy Mode** | When idle browser windows pause to save power: **High Power**, **Automatic**, or **Low Power**. Default: **Automatic**. |
 | **Kernel Boot Options** | Extra parameters appended to the Linux kernel command line of every browser VM. Default: `arm64.nosme`. |
@@ -25,7 +25,7 @@ The pane's footnote reads "Changes take effect when the next browser session sta
 
 ## Memory
 
-Until you pick a value, Bromure sizes each VM from your Mac's installed memory:
+With **Automatic**, Bromure sizes each VM from your Mac's installed memory:
 
 | Your Mac's memory | Memory per browser VM |
 |---|---|
@@ -33,13 +33,13 @@ Until you pick a value, Bromure sizes each VM from your Mac's installed memory:
 | 18 GB to less than 36 GB | 3 GB |
 | 36 GB or more | 4 GB |
 
-The menu shows **2 GB** until you choose a value yourself. Once you choose one, it is used on every Mac model.
+The menu shows the size this Mac gets next to **Automatic**, for example **Automatic (4 GB)**. A size you choose yourself is used on every Mac model.
 
 Some features need more than the minimum. Choosing **Cloudflare WARP** for a profile whose VMs have less than 2 GB offers to raise the memory to 2 GB (see [VPN & Ads](../07-profile-settings/vpn-ads.mdx)). Heavy web apps, many open tabs, or video calls with camera effects benefit from 4 GB or more.
 
 ## CPU Cores
 
-With **Automatic**, each browser VM gets half of your Mac's cores, never fewer than 2 and never more than 12. The number shown in parentheses next to **Automatic** in the menu is an estimate based on the memory setting (two cores per gigabyte, up to the number of cores in your Mac). Choose a fixed number if you want to be certain how many cores each window uses.
+With **Automatic**, each browser VM gets half of your Mac's cores, never fewer than 2 and never more than 12; the menu shows that number next to **Automatic**. Choose a fixed number to give each window a different count.
 
 ## Energy Mode
 
@@ -63,7 +63,7 @@ As soon as the field differs from the default, the pane shows a red warning, "In
 
 | Setting | Key | Type | Default |
 |---|---|---|---|
-| **Memory** | `vm.memoryGB` | Integer (GB) | not set (sized to your Mac) |
+| **Memory** | `vm.memoryGB` | Integer (GB; `0` or not set = Automatic) | not set (Automatic) |
 | **CPU Cores** | `vm.cpuCount` | Integer (`0` = Automatic) | `0` |
 | **Energy Mode** | `vm.energyMode` | String: `highPower`, `automatic`, `lowPower` | `automatic` |
 | **Kernel Boot Options** | `vm.extraKernelOptions` | String | `arm64.nosme` |

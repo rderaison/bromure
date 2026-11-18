@@ -536,6 +536,19 @@ struct CustomRootCATests {
 
 @Suite("VMConfig")
 struct VMConfigTests {
+    @Test("Automatic memory and CPU sizes match what Settings ▸ Hardware shows")
+    func automaticHardwareSizes() {
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 8) == 2)
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 17) == 2)
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 18) == 3)
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 35) == 3)
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 36) == 4)
+        #expect(VMConfig.automaticMemoryGB(hostMemoryGB: 128) == 4)
+        let cores = ProcessInfo.processInfo.processorCount
+        #expect(VMConfig.automaticCPUCount == max(2, min(cores / 2, 12)))
+        #expect(VMConfig().cpuCount == VMConfig.automaticCPUCount)
+    }
+
     @Test("Default initializer uses sensible defaults")
     func defaultInit() {
         let config = VMConfig()

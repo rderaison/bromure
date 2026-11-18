@@ -268,7 +268,7 @@ enum ManualShots {
     private static func maskPreferences() {
         var mask = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         let defaults: [String: Any] = [
-            "vm.memoryGB": 2, "vm.cpuCount": 0, "vm.swapCmdCtrl": true, "vm.appearance": "system",
+            "vm.memoryGB": 0, "vm.cpuCount": 0, "vm.swapCmdCtrl": true, "vm.appearance": "system",
             "vm.dnsServers": "", "vm.networkMode": "nat", "vm.bridgedInterface": "",
             "vm.extraKernelOptions": VMConfig.defaultExtraKernelOptions,
             "vm.energyMode": EnergyMode.default.rawValue,

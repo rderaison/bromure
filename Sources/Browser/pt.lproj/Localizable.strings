@@ -197,8 +197,9 @@
 "8 GB" = "8 GB";
 "16 GB" = "16 GB";
 "CPU Cores" = "Núcleos de CPU";
-"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "Número de núcleos de processador disponíveis para o navegador. O modo automático ajusta conforme a memória (2 núcleos por GB), até o número de núcleos deste Mac.";
+"Number of processor cores available to the browser. Automatic uses half of this Mac\U2019s cores, from 2 to 12." = "N\U00FAmero de n\U00FAcleos do processador dispon\U00EDveis para o navegador. Autom\U00E1tico usa metade dos n\U00FAcleos deste Mac, de 2 a 12.";
 "Automatic (%lld)" = "Automático (%lld)";
+"Automatic (%lld GB)" = "Automático (%lld GB)";
 "Energy Mode" = "Modo de energia";
 "Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "Controla quando sessões de navegador inativas são pausadas para economizar bateria. “Automático” segue o Modo de Baixo Consumo do seu Mac. “Baixo consumo” pausa após 3 minutos de inatividade, independentemente do ajuste do Mac. “Alto desempenho” nunca pausa.";
 "High Power" = "Alto desempenho";

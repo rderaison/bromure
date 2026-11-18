@@ -46,7 +46,9 @@ private enum AppSettingsCategory: String, CaseIterable, Identifiable {
 // MARK: - Main View
 
 struct SettingsView: View {
-    @AppStorage("vm.memoryGB") private var memoryGB = 2
+    // 0 = Automatic: unset means the VM is sized to the Mac
+    // (VMConfig.automaticMemoryGB), so the menu must not claim a size.
+    @AppStorage("vm.memoryGB") private var memoryGB = 0
     @AppStorage("vm.cpuCount") private var cpuCount = 0
     // Audio moved to per-profile (ProfileSettings.enableAudio)
     @AppStorage("vm.swapCmdCtrl") private var swapCmdCtrl = true
@@ -84,10 +86,7 @@ struct SettingsView: View {
     @State private var naturalScrolling: Bool = true
     @State private var displayScale: Int = 2
 
-    private var autoCPU: Int {
-        let mem = memoryGB > 0 ? memoryGB : 2
-        return min(max(2, mem * 2), ProcessInfo.processInfo.processorCount)
-    }
+    private var autoCPU: Int { VMConfig.automaticCPUCount }
 
     static let keyboardLayouts: [(label: String, value: String)] = [
         ("US (QWERTY)", "us"),
@@ -465,6 +464,7 @@ struct SettingsView: View {
                 Text("How much RAM each browser gets. 2 GB works for most websites. Increase to 4 GB or more for heavy web apps.")
                     .settingDescription()
                 Picker("", selection: $memoryGB) {
+                    Text("Automatic (\(VMConfig.automaticMemoryGB) GB)").tag(0)
                     Text("1 GB").tag(1)
                     Text("2 GB").tag(2)
                     Text("3 GB").tag(3)
@@ -480,7 +480,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("CPU Cores").font(.headline)
-                Text("Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac.")
+                Text("Number of processor cores available to the browser. Automatic uses half of this Mac\u{2019}s cores, from 2 to 12.")
                     .settingDescription()
                 Picker("", selection: $cpuCount) {
                     Text("Automatic (\(autoCPU))").tag(0)

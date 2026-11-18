@@ -197,8 +197,9 @@
 "8 GB" = "8 GB";
 "16 GB" = "16 GB";
 "CPU Cores" = "CPU \U6838\U5fc3\U6570";
-"Number of processor cores available to the browser. Automatic scales with memory (2 cores per GB), up to the number of cores on this Mac." = "\U6d4f\U89c8\U5668\U53ef\U7528\U7684\U5904\U7406\U5668\U6838\U5fc3\U6570\U3002\U81ea\U52a8\U6a21\U5f0f\U6839\U636e\U5185\U5b58\U5927\U5c0f\U8c03\U6574\Uff08\U6bcf GB \U5185\U5b58 2 \U4e2a\U6838\U5fc3\Uff09\Uff0c\U4e0a\U9650\U4e3a\U6b64 Mac \U7684\U6838\U5fc3\U603b\U6570\U3002";
+"Number of processor cores available to the browser. Automatic uses half of this Mac\U2019s cores, from 2 to 12." = "\U6D4F\U89C8\U5668\U53EF\U7528\U7684\U5904\U7406\U5668\U6838\U5FC3\U6570\U3002\U201C\U81EA\U52A8\U201D\U4F7F\U7528\U6B64 Mac \U4E00\U534A\U7684\U6838\U5FC3\UFF0C\U6700\U5C11 2 \U4E2A\UFF0C\U6700\U591A 12 \U4E2A\U3002";
 "Automatic (%lld)" = "\U81ea\U52a8 (%lld)";
+"Automatic (%lld GB)" = "\U81ea\U52a8 (%lld GB)";
 "Energy Mode" = "\U80fd\U6548\U6a21\U5f0f";
 "Controls when idle browser sessions pause to save battery. Automatic follows your Mac\U2019s Low Power Mode. Low Power pauses after 3 minutes of inactivity regardless. High Power never pauses." = "\U63a7\U5236\U7a7a\U95f2\U7684\U6d4f\U89c8\U5668\U4f1a\U8bdd\U4f55\U65f6\U6682\U505c\U4ee5\U8282\U7701\U7535\U91cf\U3002\U201c\U81ea\U52a8\U201d\U4f1a\U8ddf\U968f Mac \U7684\U4f4e\U7535\U91cf\U6a21\U5f0f\U3002\U201c\U4f4e\U529f\U8017\U201d\U65e0\U8bba Mac \U8bbe\U7f6e\U5982\U4f55\Uff0c\U5728\U7a7a\U95f2 3 \U5206\U949f\U540e\U59cb\U7ec8\U6682\U505c\U3002\U201c\U9ad8\U6027\U80fd\U201d\U4ece\U4e0d\U6682\U505c\U3002";
 "High Power" = "\U9ad8\U6027\U80fd";
