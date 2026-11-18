@@ -183,7 +183,12 @@ public final class VMPool {
         // balloon, which VZ leaves resident — the helper jumps to the full
         // 4.1 GB within seconds and never comes back down, even after the
         // deflate on claim. The balloon device stays attached (harmless),
-        // but inflating it costs memory instead of saving it.
+        // but inflating it costs memory instead of saving it. Nothing sets
+        // its target either: VZ starts it empty (target = the VM's memory),
+        // and a target computed from the pool's config instead of the
+        // VM's own once ballooned away the difference when the two sizes
+        // differed (an 8 GB session VM under a 4 GB pool kept 4 GB, all of
+        // it written by the guest and resident on the host).
 
         // Suspend the pre-warmed VM after 30s to save CPU while it waits.
         // VZVirtualMachineView is created at claim time (after resume), so there's
@@ -498,7 +503,6 @@ public final class VMPool {
                     _ = await Self.releaseResources(dedicated)
                     return nil
                 }
-                deflateBalloon(vm: dedicated.vm)
                 var warm = dedicated
                 warm = applyNetworkFiltering(warm: warm, config: config)
                 if let fsDevice = dedicated.vm.directorySharingDevices.first as? VZVirtioFileSystemDevice {
@@ -549,10 +553,6 @@ public final class VMPool {
             _ = await Self.releaseResources(warm)
             return nil
         }
-        // Deflate balloon — give all memory back before running the browser
-        deflateBalloon(vm: warm.vm)
-        print("[VMPool] claim: balloon deflated")
-
         // Apply filtering to the existing NetworkFilter (same attachment type,
         // no VZ attachment swap needed — just host-side rule changes).
         warm = applyNetworkFiltering(warm: warm, config: config)
@@ -1383,31 +1383,6 @@ public final class VMPool {
         return waiter
     }
 
-    // MARK: - Memory Balloon
-
-    /// Inflate the balloon to reclaim unused guest memory.
-    /// Keeps a small amount (128 MB) for the idle shell and kernel.
-    private func inflateBalloon(vm: VZVirtualMachine) {
-        guard let balloon = vm.memoryBalloonDevices.first
-                as? VZVirtioTraditionalMemoryBalloonDevice else { return }
-        let keep: UInt64 = 512 * 1024 * 1024  // 512 MB for idle guest
-        let total = config.memorySize
-        let target = total > keep ? total - keep : 0
-        balloon.targetVirtualMachineMemorySize = keep
-        if bromureDebug {
-            print("[VMPool] Balloon inflated: reclaiming \(target / 1024 / 1024) MB, guest keeps \(keep / 1024 / 1024) MB")
-        }
-    }
-
-    /// Deflate the balloon to return all memory to the guest.
-    private func deflateBalloon(vm: VZVirtualMachine) {
-        guard let balloon = vm.memoryBalloonDevices.first
-                as? VZVirtioTraditionalMemoryBalloonDevice else { return }
-        balloon.targetVirtualMachineMemorySize = config.memorySize
-        if bromureDebug {
-            print("[VMPool] Balloon deflated: guest has full \(config.memorySize / 1024 / 1024) MB")
-        }
-    }
 }
 
 /// Delegate that logs when a pre-warmed VM stops unexpectedly.
