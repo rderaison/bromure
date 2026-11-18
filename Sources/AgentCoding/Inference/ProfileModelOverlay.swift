@@ -334,6 +334,18 @@ public extension Profile {
             let ref = settings.ref(for: agent, tier: .medium)
                 ?? settings.ref(for: agent, tier: .large)
                 ?? settings.ref(for: agent, tier: .small)
+            // Hermes assigned a Nous Portal model: the launch overlay switches
+            // it to Nous, its own provider, whose sign-in it runs on -- judged
+            // like any agent on its own provider, not as a gateway that takes
+            // a pasted key (it never showed as ready otherwise, as a
+            // workspace's extra agent). Only Nous: the one sign-in Hermes
+            // can use (any other provider still needs its key), and omp
+            // runs on keys alone.
+            var agentOmpProvider = ompProvider
+            if tool == .hermes, let ref, case .provider(.nous) = ref.source,
+               let cred = settings.credential(.nous), cred.isUsable {
+                agentOmpProvider = .nous
+            }
             if let ref, ref.isLocal {
                 ready.insert(tool)
             } else if let ref, case .provider(.bedrock) = ref.source {
@@ -344,14 +356,14 @@ public extension Profile {
                     ready.insert(tool)
                 }
             } else if let ref, case .provider(let prov) = ref.source,
-                      case let native = Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+                      case let native = Self.nativeProvider(tool: tool, ompProvider: agentOmpProvider),
                       prov != native, prov.canRoute(agent, native: native) {
                 // A gateway / non-native provider: its key is all it takes.
                 if let cred = settings.credential(prov), cred.isUsable,
                    !(cred.apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                     ready.insert(tool)
                 }
-            } else if Self.cloudAuth(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
+            } else if Self.cloudAuth(tool: tool, ompProvider: agentOmpProvider, ompBaseURL: ompBaseURL,
                                      settings: settings, subscribed: subscribed) != nil {
                 ready.insert(tool)
             }

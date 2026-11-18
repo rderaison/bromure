@@ -26,6 +26,42 @@ struct AgentNeedsModelTests {
         #expect(local.hasModel(for: local.allToolSpecs[0]))
     }
 
+    @Test("Hermes on a sign-in's model is ready in any workspace, not only one whose agent it is")
+    func hermesOnSignIn() {
+        // "I logged into Nous and assigned gpt-5.5 to Hermes, but no
+        // workspace lets me pick Hermes": as an extra agent, the Nous
+        // sign-in was judged as a gateway needing a pasted key.
+        for (prov, model) in [(ModelProvider.nous, "openai/gpt-5.5")] {
+            var cred = ProviderCredential(provider: prov)
+            cred.useSubscription = true
+            var s = ModelSettings()
+            s.providers = [cred]
+            s.setTier(.medium, ModelRef(source: .provider(prov), modelID: model), for: .hermes)
+            for primary in [Profile.Tool.claude, .codex, .hermes] {
+                let p = Profile(name: "w", tool: primary, authMode: .subscription, apiKey: nil)
+                #expect(p.agentsReadyToStart(s, subscribed: [prov]).contains(.hermes), "\(prov) / \(primary)")
+                let spec = p.readyToolSpecs(s, subscribed: [prov]).first { $0.tool == .hermes }
+                #expect(spec?.ompModel == model)
+                #expect(spec?.authMode == .subscription)
+            }
+        }
+        // A sign-in Hermes and omp can't run on (ChatGPT) still takes a key.
+        var oa = ProviderCredential(provider: .openai)
+        oa.useSubscription = true
+        for tool in [Profile.Tool.hermes, .omp] {
+            var s = ModelSettings()
+            s.providers = [oa]
+            s.setTier(.medium, ModelRef(source: .provider(.openai), modelID: "gpt-5.5"), for: ModelAgent.from(tool))
+            #expect(!Profile(name: "w", tool: .claude, authMode: .subscription, apiKey: nil)
+                .agentsReadyToStart(s, subscribed: [.openai]).contains(tool), "\(tool)")
+        }
+        // Signed out (no credential): still not ready, whatever the assignment.
+        var s = ModelSettings()
+        s.setTier(.medium, ModelRef(source: .provider(.nous), modelID: "openai/gpt-5.5"), for: .hermes)
+        #expect(!Profile(name: "w", tool: .claude, authMode: .subscription, apiKey: nil)
+            .agentsReadyToStart(s).contains(.hermes))
+    }
+
     @Test("only Hermes is held to it: omp and the vendor agents keep their defaults")
     func onlyHermes() {
         #expect(Profile.Tool.allCases.filter(\.needsModelToStart) == [.hermes])
