@@ -2109,6 +2109,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if stored.baseImageVersionAtClone != nil {
             baseImageVersionAtClone = stored.baseImageVersionAtClone
         }
+        // The answers to the base-image offer: only the app records them
+        // (the drift prompt, the chooser after a base-image install, the
+        // launch that applies an Update and clears it), never the editor.
+        // The stored ones win, nil included -- an editor opened before the
+        // chooser held no Update, and its save erased it (Finding "Saving
+        // an older workspace editor copy erases the Update choice").
+        baseImageUpgradeAcceptedFor = stored.baseImageUpgradeAcceptedFor
+        baseImageUpgradeDeclinedFor = stored.baseImageUpgradeDeclinedFor
+        baseImageUpgradeRemindAfter = stored.baseImageUpgradeRemindAfter
     }
 
     /// The base-image version stamp captured the moment this profile's
