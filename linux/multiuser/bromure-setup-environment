@@ -1,0 +1,248 @@
+#!/bin/bash
+# bromure-setup-environment [--size SIZE] [--image FILE] [--dry-run] [--yes]
+#
+# Puts the multi-user Bromure server's VM storage on btrfs. A workspace's
+# disk, a clone, a checkpoint and a resume's memory copy are reflinks there
+# (instant, and no space until they diverge); on ext4 each one is a full copy.
+#
+# When /opt/bromure isn't on btrfs already (ext4, xfs…), the script:
+#   1. creates a sparse btrfs image file (default /var/lib/bromure-btrfs.img,
+#      90% of the free space where it lives, or --size) and mounts it on
+#      /opt/bromure (loop, noatime);
+#   2. moves the guest image (/var/lib/bromure-ac-image) and the users' state
+#      (/var/lib/bromure-ac) onto it, into /opt/bromure/image and
+#      /opt/bromure/state, and bind-mounts them back where the server looks
+#      for them. The originals are kept as <dir>.pre-btrfs until you delete
+#      them;
+#   3. writes the mounts to /etc/fstab (a dated backup is kept beside it),
+#      and makes the server's units wait for them (RequiresMountsFor), so a
+#      daemon never starts on the bare directories underneath;
+#   4. checks that the mounts are up and that reflinks work.
+# On btrfs already it checks the same things and changes nothing that is
+# in place. Moving existing data needs the server stopped (it says how).
+#
+# --size SIZE   the image's size (truncate's syntax: 500G, 2T). It is sparse:
+#               it takes host space as VMs write, up to SIZE, so keep SIZE
+#               within the free space it reports.
+# --image FILE  where the image file goes (not under /opt/bromure).
+# --dry-run     print what would be done, change nothing.
+# --yes         don't ask before changing anything.
+set -euo pipefail
+
+# Paths (the BROMURE_SETUP_* overrides are for the script's own tests).
+MNT=${BROMURE_SETUP_MOUNT:-/opt/bromure}
+IMG=${BROMURE_SETUP_IMAGE_FILE:-/var/lib/bromure-btrfs.img}
+STATE=${BROMURE_SETUP_STATE_DIR:-/var/lib/bromure-ac}
+GUEST=${BROMURE_SETUP_GUEST_DIR:-/var/lib/bromure-ac-image}
+FSTAB=${BROMURE_SETUP_FSTAB:-/etc/fstab}
+DROPIN_DIR=${BROMURE_SETUP_SYSTEMD_DIR:-/etc/systemd/system}
+SIZE=; DRY=0; YES=0
+MIN_BYTES=$((20 * 1024 * 1024 * 1024))
+ME=$(basename "$0")
+
+die() { echo "$ME: $*" >&2; exit 1; }
+say() { echo "$ME: $*"; }
+usage() { sed -n '2,32s/^# \{0,1\}//p' "$0"; }
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --size) [ $# -ge 2 ] || die "--size needs a value"; SIZE=$2; shift 2;;
+    --image) [ $# -ge 2 ] || die "--image needs a value"; IMG=$2; shift 2;;
+    --dry-run) DRY=1; shift;;
+    --yes|-y) YES=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) die "unknown argument '$1' (--help)";;
+  esac
+done
+
+# --- preflight -------------------------------------------------------------
+[ "$(id -u)" = 0 ] || [ "$DRY" = 1 ] || die "run as root (sudo $ME)"
+for c in findmnt mount umount truncate cp stat df du awk; do
+  command -v "$c" >/dev/null || die "'$c' is missing"
+done
+case "$IMG" in "$MNT"|"$MNT"/*) die "the image file can't live inside $MNT itself";; esac
+
+run() {   # a change: printed, and done unless --dry-run
+  echo "  + $*"
+  [ "$DRY" = 1 ] || "$@"
+}
+fstype_at() {   # the type of the filesystem a path is (or would be) on
+  local p=$1
+  while [ ! -e "$p" ]; do p=$(dirname "$p"); done
+  findmnt -no FSTYPE -T "$p" | head -1
+}
+is_mountpoint() { findmnt -rno TARGET "$1" >/dev/null 2>&1 && [ "$(findmnt -rno TARGET "$1" | head -1)" = "$1" ]; }
+submounts() { findmnt -rno TARGET | awk -v d="$1/" 'index($0, d) == 1'; }   # mounts strictly under a dir
+fstab_has() { awk -v m="$1" '$1 !~ /^#/ && $2 == m { f=1 } END { exit !f }' "$FSTAB"; }
+nonempty() { [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null)" ]; }
+confirm() {
+  [ "$YES" = 1 ] || [ "$DRY" = 1 ] && return 0
+  [ -t 0 ] || die "not a terminal: re-run with --yes to go ahead"
+  local a; read -r -p "$1 [y/N] " a
+  case $a in y|Y|yes|YES) ;; *) die "stopped; nothing more was changed";; esac
+}
+
+FSTAB_BACKED_UP=0
+fstab_add() {   # one line, once per mount point; the first change backs fstab up
+  local line=$1 target
+  target=$(awk '{print $2}' <<<"$line")
+  if fstab_has "$target"; then say "fstab already mounts $target: kept as it is"; return; fi
+  if [ "$FSTAB_BACKED_UP" = 0 ]; then
+    run cp -p "$FSTAB" "$FSTAB.bromure-$(date +%Y%m%d-%H%M%S)"
+    FSTAB_BACKED_UP=1
+  fi
+  echo "  + append to $FSTAB: $line"
+  [ "$DRY" = 1 ] || printf '%s\n' "$line" >>"$FSTAB"
+}
+
+# Rollback of a fresh image while nothing was moved onto it yet: on any
+# failure before the first move, the image, its mount and its fstab line go.
+CREATED_IMAGE=0
+rollback() {
+  local rc=$?
+  [ "$rc" = 0 ] && return
+  if [ "$CREATED_IMAGE" = 1 ] && [ "$DRY" = 0 ]; then
+    echo "$ME: failed (exit $rc): undoing the new image" >&2
+    is_mountpoint "$MNT" && umount "$MNT" || true
+    if [ -f "$FSTAB.bromure-rollback" ]; then cp -p "$FSTAB.bromure-rollback" "$FSTAB" && rm -f "$FSTAB.bromure-rollback"; fi
+    rm -f "$IMG"
+  fi
+}
+trap rollback EXIT
+
+active_units() {
+  systemctl list-units --no-legend --plain --state=active 'bromure-ac@*.service' 'bromure-gw.service' 'bromure-lan.service' 2>/dev/null \
+    | awk '{print $1}'
+}
+
+# --- 1. the btrfs filesystem on /opt/bromure --------------------------------
+MNT_FS=$(fstype_at "$MNT")
+if [ "$MNT_FS" = btrfs ]; then
+  say "$MNT is on btrfs already"
+else
+  say "$MNT is on $MNT_FS, not btrfs: making a btrfs image for it"
+  command -v mkfs.btrfs >/dev/null || die "mkfs.btrfs is missing: apt-get install btrfs-progs"
+  [ -e "$IMG" ] && die "$IMG exists already: mount it on $MNT, or remove it, or pass --image"
+  is_mountpoint "$MNT" && die "$MNT is a mount point ($MNT_FS): unmount it first, or make it btrfs yourself"
+  nonempty "$MNT" && die "$MNT isn't empty: move its contents away first (the image is mounted over it)"
+  IMG_DIR=$(dirname "$IMG")
+  [ -d "$IMG_DIR" ] || die "$IMG_DIR doesn't exist"
+  avail=$(df -B1 --output=avail "$IMG_DIR" | tail -1 | tr -d ' ')
+  # What moves onto the image (when it's on the image's host filesystem, it
+  # needs that much room again until the .pre-btrfs copies are deleted).
+  moving=0
+  for d in "$STATE" "$GUEST"; do
+    if nonempty "$d" && ! is_mountpoint "$d"; then
+      moving=$((moving + $(du -sB1 "$d" | awk '{print $1}')))
+    fi
+  done
+  if [ -n "$SIZE" ]; then
+    size_arg=$SIZE
+  else
+    bytes=$(( (avail - moving) * 9 / 10 ))
+    [ "$bytes" -ge "$MIN_BYTES" ] || die "only $((avail / 1073741824)) GiB free under $IMG_DIR ($((moving / 1073741824)) GiB to move): pass --size, or --image on a bigger disk"
+    size_arg=$(( bytes / 1073741824 ))G
+  fi
+  [ "$moving" -lt "$avail" ] || die "moving the existing data ($((moving / 1073741824)) GiB) needs that much free space under $IMG_DIR (has $((avail / 1073741824)) GiB)"
+  say "image $IMG, $size_arg (sparse; $((avail / 1073741824)) GiB free there now), mounted on $MNT"
+  confirm "Create it and add it to $FSTAB?"
+  [ "$DRY" = 1 ] || cp -p "$FSTAB" "$FSTAB.bromure-rollback"
+  CREATED_IMAGE=1
+  run truncate -s "$size_arg" "$IMG"
+  run chmod 600 "$IMG"
+  run mkfs.btrfs -q -L bromure "$IMG"
+  run mkdir -p "$MNT"
+  fstab_add "$IMG $MNT btrfs loop,noatime,nofail 0 0"
+  run mount -o loop,noatime "$IMG" "$MNT"
+  if [ "$DRY" = 0 ]; then
+    [ "$(findmnt -no FSTYPE "$MNT")" = btrfs ] || die "$MNT didn't come up as btrfs"
+  fi
+fi
+
+# --- 2. the image and the users' state, moved onto it ------------------------
+# A directory already on btrfs (bind-mounted, or the whole tree) stays. One
+# with per-user mounts under it (a partial setup done by hand) is left to
+# its owner: each user's directory is reported, nothing is moved.
+place() {   # dir name
+  local dir=$1 sub=$2 src=$MNT/$2
+  if [ "$(fstype_at "$dir")" = btrfs ]; then say "$dir is on btrfs already"; return; fi
+  if [ -d "$dir" ] && ! is_mountpoint "$dir" && [ -n "$(submounts "$dir")" ]; then
+    say "$dir has mounts under it (set up by hand): left as it is"
+    for u in "$dir"/*/; do
+      [ -d "$u" ] || continue
+      u=${u%/}; case $u in *.pre-btrfs) continue;; esac
+      say "  $u: $(fstype_at "$u")"
+    done
+    return
+  fi
+  if nonempty "$dir"; then
+    local units; units=$(active_units)
+    if [ -n "$units" ] && [ "${BROMURE_SETUP_SKIP_SERVICE_CHECK:-0}" != 1 ]; then
+      die "moving $dir needs the server stopped. Running: $(echo $units). Stop them (systemctl stop $(echo $units)), run this again, then start them"
+    fi
+    [ -e "$dir.pre-btrfs" ] && die "$dir.pre-btrfs exists already: delete or rename it first"
+    confirm "Move $dir onto $MNT/$sub (the original stays as $dir.pre-btrfs)?"
+    [ "$DRY" = 1 ] || rm -f "$FSTAB.bromure-rollback"
+    CREATED_IMAGE=0   # data is on the image from here: never rolled back
+    run mkdir -p "$src"
+    if ! run cp -a --sparse=always "$dir/." "$src/"; then
+      [ "$DRY" = 1 ] || rm -rf --one-file-system "${src:?}"
+      die "copying $dir failed: it is untouched, $src removed"
+    fi
+    run mv "$dir" "$dir.pre-btrfs"
+    run mkdir "$dir"
+    run chown --reference="$dir.pre-btrfs" "$dir"
+    run chmod --reference="$dir.pre-btrfs" "$dir"
+    run chown --reference="$dir.pre-btrfs" "$src"
+    run chmod --reference="$dir.pre-btrfs" "$src"
+  else
+    run mkdir -p "$src" "$dir"
+    [ "$DRY" = 1 ] || chmod 755 "$src" "$dir"
+  fi
+  fstab_add "$src $dir none bind,x-systemd.requires-mounts-for=$MNT 0 0"
+  is_mountpoint "$dir" || run mount --bind "$src" "$dir"
+}
+place "$GUEST" image
+place "$STATE" state
+[ "$DRY" = 1 ] || rm -f "$FSTAB.bromure-rollback"
+CREATED_IMAGE=0
+
+# --- 3. the units wait for the mounts ---------------------------------------
+dropin() {   # unit
+  local d=$DROPIN_DIR/$1.d f
+  f=$d/bromure-btrfs.conf
+  local want="[Unit]
+# bromure-setup-environment: never start on the bare directories under the mounts.
+RequiresMountsFor=$STATE $GUEST"
+  if [ -f "$f" ] && [ "$(cat "$f")" = "$want" ]; then return; fi
+  run mkdir -p "$d"
+  echo "  + write $f"
+  [ "$DRY" = 1 ] || printf '%s\n' "$want" >"$f"
+  DROPINS_CHANGED=1
+}
+DROPINS_CHANGED=0
+dropin bromure-ac@.service
+dropin bromure-gw.service
+if [ "$DRY" = 0 ] && [ "$FSTAB" = /etc/fstab ] && [ "$DROPIN_DIR" = /etc/systemd/system ]; then
+  systemctl daemon-reload
+fi
+
+# --- 4. checks ----------------------------------------------------------------
+[ "$DRY" = 1 ] && { say "dry run: nothing was changed"; exit 0; }
+bad=0
+for d in "$MNT" "$GUEST" "$STATE"; do
+  t=$(fstype_at "$d")
+  if [ "$t" = btrfs ]; then say "ok: $d on btrfs"
+  elif [ "$d" = "$STATE" ] && [ -n "$(submounts "$d")" ]; then say "note: $d is per-user (see above)"
+  else echo "$ME: $d is on $t, not btrfs" >&2; bad=1; fi
+done
+probe=$(mktemp -p "$MNT" .reflink-probe.XXXXXX)
+echo bromure >"$probe"
+if cp --reflink=always "$probe" "$probe.clone" 2>/dev/null; then say "ok: reflinks work on $MNT"
+else echo "$ME: reflinks don't work on $MNT" >&2; bad=1; fi
+rm -f "$probe" "$probe.clone"
+for d in "$STATE" "$GUEST"; do
+  [ -e "$d.pre-btrfs" ] && say "the old $d is kept as $d.pre-btrfs: delete it once the server runs well ($(du -sh "$d.pre-btrfs" | cut -f1))"
+done
+[ "$bad" = 0 ] || exit 1
+say "done: $(df -h --output=size,used,avail "$MNT" | tail -1 | awk '{print $1" image, "$2" used, "$3" free"}')"
