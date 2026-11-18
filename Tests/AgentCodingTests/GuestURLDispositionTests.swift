@@ -77,7 +77,7 @@ struct GuestURLDispositionTests {
         #expect(card[fn.upperBound...].prefix(700).contains(
             "if AgentScreen.prefillsDeviceCode(s) {\n            ACAppDelegate.openGuestRelayedURL(url)\n            return\n        }"))
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("self.adoptRegistrationReply(run: resp?.json[\"registration\"] as? String, provider: provider)"))
+        #expect(fc.contains("self.adoptRegistrationReply(run: resp?.json[\"registration\"] as? String, provider: provider, request: request)"))
     }
 
     @Test("any other public page asks: a name can resolve to the LAN, a page redirect there")
