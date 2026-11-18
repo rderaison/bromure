@@ -85,7 +85,7 @@ struct RemoteSignInBindingTests {
         let reg: [String: Any] = ["id": "run-1", "provider": "Nous Portal", "url": page.absoluteString]
         #expect(c.registrationPage(reg) == .refused, "not bound yet")
         #expect(c.registrationPage(reg) == .refused)
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
         #expect(c.registrationPage(reg) == .open(page))
         #expect(c.registrationPage(reg) == RemoteHostController.RegistrationPage.none, "opened once")
         #expect(c.registrationPage(["id": "run-1", "provider": "Nous Portal"]) == RemoteHostController.RegistrationPage.none, "no URL")
@@ -94,7 +94,7 @@ struct RemoteSignInBindingTests {
     @Test("another client's run stays refused, however often /state shows it")
     func othersStayRefused() {
         let c = controller()
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
         let theirs: [String: Any] = ["id": "run-2", "provider": "Nous Portal", "url": page.absoluteString]
         #expect(c.registrationPage(theirs) == .refused)
         #expect(c.registrationPage(theirs) == .refused)
