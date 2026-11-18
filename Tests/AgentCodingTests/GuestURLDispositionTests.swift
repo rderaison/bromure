@@ -77,7 +77,7 @@ struct GuestURLDispositionTests {
         #expect(card[fn.upperBound...].prefix(700).contains(
             "if AgentScreen.prefillsDeviceCode(s) {\n            ACAppDelegate.openGuestRelayedURL(url)\n            return\n        }"))
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("requestedRegistrationProvider = provider\n"))
+        #expect(fc.contains("self.adoptRegistrationReply(run: resp?.json[\"registration\"] as? String, provider: provider)"))
     }
 
     @Test("any other public page asks: a name can resolve to the LAN, a page redirect there")
@@ -114,8 +114,8 @@ struct GuestURLDispositionTests {
         // The fat client (Mac and iOS) opens a published sign-in URL only when
         // it is one: no ask there, the VM terminal still shows the URL.
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) != .open {"))
-        #expect(fc.contains("guard GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) == .open else { return }"))
+        #expect(fc.contains("GuestURLGate.disposition(for: url, signInFor: signInFor) != .open {"))
+        #expect(fc.contains("guard GuestURLGate.disposition(for: url, signInFor: signInFor) == .open else { return }"))
         #expect(!fc.contains("GuestURLGate.opensInRealBrowser(url)"))
     }
 
