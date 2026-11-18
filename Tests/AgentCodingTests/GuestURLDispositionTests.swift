@@ -27,10 +27,57 @@ struct GuestURLDispositionTests {
                   "https://claude.com/cai/oauth/authorize?code=true&client_id=\(id)"
                     + "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s",
                   "https://auth.openai.com/codex/device",
-                  "https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5",
                   "https://auth.kimi.ai/device"] {
             #expect(Self.d(s) == .open, "\(s)")
         }
+    }
+
+    /// Finding CWE-345, "Unbound Nous device code bypasses guest URL
+    /// confirmation": a device page carrying its code approves whichever
+    /// device printed it -- from a guest, maybe an attacker's own login.
+    @Test("a device page carrying its code opens unasked only for the sign-in Bromure is waiting on")
+    func prefilledDeviceCodes() {
+        let nous = "https://portal.nousresearch.com/manage-subscription?user_code=84RM-5NER"
+        let grok = "https://accounts.x.ai/oauth2/device?user_code=QZQD-KPB5"
+        let kimi = "https://auth.kimi.ai/device?code=AB12-CD34"
+        for s in [nous, grok, kimi] {
+            #expect(AgentScreen.prefillsDeviceCode(s), "\(s)")
+            #expect(Self.d(s) == .ask, "unbound: \(s)")
+        }
+        func bound(_ s: String, _ agent: String) -> GuestURLGate.Disposition {
+            GuestURLGate.disposition(for: URL(string: s)!, signInFor: agent)
+        }
+        #expect(bound(nous, "hermes") == .open)
+        #expect(bound(grok, "grok") == .open)
+        #expect(bound(kimi, "kimi") == .open)
+        // Another agent's sign-in in flight doesn't vouch for it.
+        #expect(bound(nous, "codex") == .ask)
+        #expect(bound(grok, "hermes") == .ask)
+        // A device page with no code shows a form for the one the agent
+        // printed: it opens as before, and an authorize page is unaffected.
+        #expect(!AgentScreen.prefillsDeviceCode("https://auth.openai.com/codex/device"))
+        #expect(Self.d("https://auth.openai.com/codex/device") == .open)
+        #expect(!AgentScreen.prefillsDeviceCode("https://claude.ai/oauth/authorize?client_id=\(AgentScreen.claudeClientID)"
+                                                + "&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb"))
+        // A local host is still refused, bound or not.
+        #expect(bound("http://127.0.0.1/manage-subscription?user_code=X", "hermes") == .refuse)
+    }
+
+    @Test("each Bromure-started sign-in binds its page to its agent; a card read off the terminal asks")
+    func signInsBindTheirAgent() throws {
+        let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
+        #expect(ac.contains("let waiting = self.proxySignIns[pid].flatMap { $0.finished ? nil : $0.provider.rawValue }"))
+        #expect(ac.contains("Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name, signInFor: waiting)"))
+        let reg = try Self.src("Sources/AgentCoding/ClaudeRegistrationCoordinator.swift")
+        #expect(reg.contains("url, signInFor: self.claudeRegistration.flatMap { $0.finished ? nil : $0.provider.rawValue })"))
+        let wizard = try Self.src("Sources/AgentCoding/OnboardingWizard.swift")
+        #expect(wizard.contains("ACAppDelegate.openGuestRelayedURL(u, signInFor: signIn.provider.rawValue)"))
+        let card = try Self.src("Sources/AgentCoding/BeautifiedSessionView.swift")
+        let fn = try #require(card.range(of: "func openLoginURL() {"))
+        #expect(card[fn.upperBound...].prefix(700).contains(
+            "if AgentScreen.prefillsDeviceCode(s) {\n            ACAppDelegate.openGuestRelayedURL(url)\n            return\n        }"))
+        let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("requestedRegistrationProvider = provider\n"))
     }
 
     @Test("any other public page asks: a name can resolve to the LAN, a page redirect there")
@@ -60,15 +107,15 @@ struct GuestURLDispositionTests {
     @Test("every guest-URL hand-off goes through the disposition")
     func handOffsUseIt() throws {
         let ac = try Self.src("Sources/AgentCoding/BromureAC.swift")
-        let fn = try #require(ac.range(of: "static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {"))
+        let fn = try #require(ac.range(of: "static func openGuestRelayedURL(_ url: URL, workspace: String? = nil, signInFor: String? = nil) {"))
         let body = ac[fn.upperBound...].prefix(700)
-        #expect(body.contains("switch GuestURLGate.disposition(for: url) {"))
+        #expect(body.contains("switch GuestURLGate.disposition(for: url, signInFor: signInFor) {"))
         #expect(body.contains("case .ask:\n            askBeforeOpeningGuestURL(url, workspace: workspace)"))
         // The fat client (Mac and iOS) opens a published sign-in URL only when
         // it is one: no ask there, the VM terminal still shows the URL.
         let fc = try Self.src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("GuestURLGate.disposition(for: url) != .open {"))
-        #expect(fc.contains("guard GuestURLGate.disposition(for: url) == .open else { return }"))
+        #expect(fc.contains("GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) != .open {"))
+        #expect(fc.contains("guard GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) == .open else { return }"))
         #expect(!fc.contains("GuestURLGate.opensInRealBrowser(url)"))
     }
 

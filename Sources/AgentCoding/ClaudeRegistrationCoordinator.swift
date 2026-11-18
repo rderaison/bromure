@@ -502,7 +502,9 @@ extension ACAppDelegate {
                 }
                 self.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
-                ACAppDelegate.openGuestRelayedURL(url)
+                // This sign-in machine's own sign-in, for its provider.
+                ACAppDelegate.openGuestRelayedURL(
+                    url, signInFor: self.claudeRegistration.flatMap { $0.finished ? nil : $0.provider.rawValue })
             }
         }
     }

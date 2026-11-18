@@ -149,9 +149,22 @@ enum GuestURLGate {
     /// sign-in pages the agents print open by themselves (fixed provider
     /// hosts, whose redirect is the sign-in's own loopback callback); any
     /// other page needs the user's decision.
-    static func disposition(for url: URL) -> Disposition {
+    ///
+    /// `signInFor`: the agent (`SubscriptionProvider.rawValue`, its tool)
+    /// whose sign-in Bromure started and is waiting on for this URL. A
+    /// device page carrying its code opens unasked only for that sign-in:
+    /// anywhere else the code is the guest's word, maybe an attacker's
+    /// device login the user would approve on a page they trust (Finding
+    /// CWE-345, "Unbound Nous device code bypasses guest URL confirmation").
+    static func disposition(for url: URL, signInFor agent: String? = nil) -> Disposition {
         guard opensInRealBrowser(url) else { return .refuse }
-        return AgentScreen.isSignInURL(url.absoluteString, agent: nil) ? .open : .ask
+        let s = url.absoluteString
+        guard AgentScreen.isSignInURL(s, agent: nil) else { return .ask }
+        if AgentScreen.prefillsDeviceCode(s),
+           !(agent.map { AgentScreen.isSignInURL(s, agent: $0) } ?? false) {
+            return .ask
+        }
+        return .open
     }
 
     /// Whether `url` may be handed to the user's real browser: it must have a

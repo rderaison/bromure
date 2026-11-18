@@ -705,6 +705,17 @@ enum AgentScreen {
         return nil
     }
 
+    /// A device page whose URL carries the code it approves (Nous Portal's
+    /// `?user_code=…`, any query on a device page): opening it is one click
+    /// from authorizing whatever device printed that code -- an attacker's
+    /// own login, from a guest. Such a page opens unasked only for a sign-in
+    /// Bromure started and is waiting on (`GuestURLGate.disposition`); a
+    /// device page without one shows a form for the code the agent printed.
+    static func prefillsDeviceCode(_ url: String) -> Bool {
+        guard let page = signInPage(for: url, agent: nil), page.kind == .device else { return false }
+        return !(URLComponents(string: url)?.queryItems ?? []).isEmpty
+    }
+
     static func isLoopback(_ host: String) -> Bool {
         host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
     }

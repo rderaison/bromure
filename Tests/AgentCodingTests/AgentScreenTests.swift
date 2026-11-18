@@ -604,12 +604,14 @@ struct AgentScreenTests {
         }
     }
 
-    @Test("Hermes's Nous Portal approval page opens unasked; nothing else on the Portal does")
+    @Test("Hermes's Nous Portal approval page opens unasked for its own sign-in; nothing else on the Portal does")
     func nousSignInPage() {
         let page = "https://portal.nousresearch.com/manage-subscription?user_code=84RM-5NER"
         #expect(AgentScreen.isSignInURL(page, agent: "hermes"))
         #expect(AgentScreen.isSignInURL(page, agent: nil))
-        #expect(GuestURLGate.disposition(for: URL(string: page)!) == .open)
+        #expect(GuestURLGate.disposition(for: URL(string: page)!, signInFor: "hermes") == .open)
+        // Its code is the guest's word unless Bromure's Nous sign-in waits on it.
+        #expect(GuestURLGate.disposition(for: URL(string: page)!) == .ask)
         #expect(!AgentScreen.isSignInURL(page, agent: "claude"))
         for bad in ["http://portal.nousresearch.com/manage-subscription?user_code=X",
                     "https://portal.nousresearch.com/billing",

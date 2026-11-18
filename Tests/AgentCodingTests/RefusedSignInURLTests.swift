@@ -21,7 +21,7 @@ struct RefusedSignInURLTests {
         let body = r[closure.upperBound...]
         let gate = try #require(body.range(of: "guard ACAppDelegate.opensInRealBrowser(url) else {"))
         let remote = try #require(body.range(of: "if RemoteRegistrationBroker.shared.pending != nil {"))
-        let open = try #require(body.range(of: "ACAppDelegate.openGuestRelayedURL(url)"))
+        let open = try #require(body.range(of: "ACAppDelegate.openGuestRelayedURL(\n                    url, signInFor:"))
         #expect(gate.lowerBound < remote.lowerBound && remote.lowerBound < open.lowerBound)
         let refusal = body[gate.upperBound..<remote.lowerBound]
         #expect(refusal.contains("self.failClaudeRegistration(NSLocalizedString("))

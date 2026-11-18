@@ -3645,8 +3645,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// forwarder itself); any other page -- a public name can resolve to the
     /// LAN, a public page can redirect there -- opens only once the user says
     /// so (`GuestURLGate.disposition`).
-    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {
-        switch GuestURLGate.disposition(for: url) {
+    /// `signInFor`: the agent whose Bromure-started sign-in waits on this
+    /// page (see `GuestURLGate.disposition`).
+    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil, signInFor: String? = nil) {
+        switch GuestURLGate.disposition(for: url, signInFor: signInFor) {
         case .refuse:
             FileHandle.standardError.write(Data(
                 "[ac] refused to open guest URL with local/private host: \(url.host ?? "?")\n".utf8))
@@ -16685,7 +16687,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
-                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name)
+                // A sign-in card's own page: bound to its agent (a device
+                // page carrying a code opens unasked only then).
+                let waiting = self.proxySignIns[pid].flatMap { $0.finished ? nil : $0.provider.rawValue }
+                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name, signInFor: waiting)
             }
         }
         sandbox.onTabList = { [weak self] tabs in
