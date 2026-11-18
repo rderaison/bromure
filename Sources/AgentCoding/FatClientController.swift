@@ -350,6 +350,11 @@ final class RemoteHostController {
     /// (`GuestURLGate.disposition`; Finding CWE-345, "Remote sign-in opens
     /// another client's prefilled device-code URL after a rejected request").
     private(set) var ownRegistration: (id: String, provider: String)?
+    /// Sign-in requests sent, numbered, and the one whose accepted run is
+    /// `ownRegistration`: a reply only binds if it answers a later request
+    /// than the bound one, so a reply that comes late can't take over.
+    private var registrationRequestsSent = 0
+    private var boundRegistrationRequest = 0
     /// Sign-ins this client started, by the host's run id, each told how it
     /// ended (/state's `registrationEnded`): a refused or failed run
     /// otherwise just left /state, its reason shown only on the host.
@@ -442,12 +447,14 @@ final class RemoteHostController {
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
         let host = self.host
+        registrationRequestsSent += 1
+        let request = registrationRequestsSent
         Task { @MainActor [weak self] in
             let resp = try? await Task.detached(priority: .userInitiated) {
                 try RemoteTransport.client(for: host).request("POST", "/subscriptions/register", body: body)
             }.value
             guard let self else { return }
-            self.adoptRegistrationReply(run: resp?.json["registration"] as? String, provider: provider)
+            self.adoptRegistrationReply(run: resp?.json["registration"] as? String, provider: provider, request: request)
             self.pollOnce()
             guard let ended else { return }
             if let run = resp?.json["registration"] as? String {
@@ -477,15 +484,20 @@ final class RemoteHostController {
     /// Runs this client cancelled itself, until their end is heard.
     private(set) var cancelledRegistrations: Set<String> = []
 
-    /// The host's answer to this client's sign-in request: an accepted run
-    /// is this client's (by its id); a refused one binds nothing -- the run
-    /// /state then shows is someone else's.
-    func adoptRegistrationReply(run: String?, provider: String) {
-        if let run, !run.isEmpty {
-            ownRegistration = (run, provider)
-        } else {
-            ownRegistration = nil
-        }
+    /// The host's answer to this client's sign-in request `request`: an
+    /// accepted run is this client's (by its id). A refused one binds
+    /// nothing -- and unbinds nothing: the host refuses a second request
+    /// while a run is in flight, which may be this client's own, still
+    /// waiting to publish its page (Finding "Refused retry clears an active
+    /// sign-in's run binding"); the binding ends with its run
+    /// (`applyRegistrationEnded`). Matching by run id, a binding kept never
+    /// opens another client's page. A reply to an earlier request than the
+    /// bound one, or for a run already over, comes late and changes nothing.
+    func adoptRegistrationReply(run: String?, provider: String, request: Int) {
+        guard let run, !run.isEmpty, request > boundRegistrationRequest,
+              registrationEnds[run] == nil else { return }
+        ownRegistration = (run, provider)
+        boundRegistrationRequest = request
     }
 
     /// The agent whose sign-in this client started, for the run `reg`

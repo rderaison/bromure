@@ -21,7 +21,7 @@ struct RemoteSignInBindingTests {
     @Test("an accepted run opens its own device page; another run's asks")
     func accepted() {
         let c = controller()
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
         #expect(gate(c, ["id": "run-1", "provider": "Nous Portal", "url": page.absoluteString]) == .open)
         #expect(gate(c, ["id": "run-2", "provider": "Nous Portal", "url": page.absoluteString]) == .ask)
         #expect(gate(c, ["provider": "Nous Portal", "url": page.absoluteString]) == .ask, "no id: not ours")
@@ -30,19 +30,44 @@ struct RemoteSignInBindingTests {
     @Test("a refused request (another client's run in flight) binds nothing")
     func refused() {
         let c = controller()
-        c.adoptRegistrationReply(run: nil, provider: "hermes")
+        c.adoptRegistrationReply(run: nil, provider: "hermes", request: 1)
         #expect(c.ownRegistration == nil)
         #expect(gate(c, ["id": "theirs", "url": page.absoluteString]) == .ask)
-        // A later refusal drops an earlier binding too.
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
-        c.adoptRegistrationReply(run: nil, provider: "hermes")
-        #expect(gate(c, ["id": "run-1", "url": page.absoluteString]) == .ask)
+        c.adoptRegistrationReply(run: "", provider: "hermes", request: 2)
+        #expect(c.ownRegistration == nil, "an empty run is a refusal")
+    }
+
+    /// Finding "Refused retry clears an active sign-in's run binding": a
+    /// second click while this client's run is still booting is refused
+    /// (one in flight) -- and its run keeps its binding, so its page,
+    /// published later, still opens.
+    @Test("a refused retry leaves the accepted run bound")
+    func refusedRetry() {
+        let c = controller()
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
+        c.adoptRegistrationReply(run: nil, provider: "hermes", request: 2)
+        #expect(c.ownRegistration?.id == "run-1")
+        #expect(gate(c, ["id": "run-1", "url": page.absoluteString]) == .open)
+        #expect(gate(c, ["id": "theirs", "url": page.absoluteString]) == .ask, "still only its own run")
+    }
+
+    @Test("a late reply can't take over: an earlier request's, or a run already over")
+    func lateReplies() {
+        let c = controller()
+        c.adoptRegistrationReply(run: "run-2", provider: "claude", request: 2)
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
+        #expect(c.ownRegistration?.id == "run-2", "request 1's reply came after request 2's")
+        c.applyRegistrationEnded(["id": "run-2", "success": true])
+        c.adoptRegistrationReply(run: "run-2", provider: "claude", request: 3)
+        #expect(c.ownRegistration == nil, "a run already over binds nothing")
+        c.adoptRegistrationReply(run: "run-3", provider: "hermes", request: 4)
+        #expect(c.ownRegistration?.id == "run-3")
     }
 
     @Test("the binding ends with its run")
     func endsWithRun() {
         let c = controller()
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
         c.applyRegistrationEnded(["id": "run-2", "success": true])
         #expect(c.ownRegistration?.id == "run-1", "another run's end leaves it")
         c.applyRegistrationEnded(["id": "run-1", "success": false])
@@ -58,6 +83,7 @@ struct RemoteSignInBindingTests {
         let body = f[fn.upperBound...].prefix(1400)
         let post = try #require(body.range(of: "\"/subscriptions/register\""))
         let adopt = try #require(body.range(of: "self.adoptRegistrationReply(run:"))
+        #expect(body.contains("provider: provider, request: request)"))
         #expect(post.lowerBound < adopt.lowerBound)
         #expect(!body[..<post.lowerBound].contains("ownRegistration"))
     }

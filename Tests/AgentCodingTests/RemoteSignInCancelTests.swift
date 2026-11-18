@@ -22,7 +22,7 @@ struct RemoteSignInCancelTests {
         let c = controller()
         c.cancelOwnRegistration()
         #expect(c.cancelledRegistrations.isEmpty, "no run of its own: nothing to cancel")
-        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes", request: 1)
         c.cancelOwnRegistration()
         #expect(c.cancelledRegistrations == ["run-1"])
     }
