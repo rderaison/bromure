@@ -179,7 +179,17 @@ struct HermesSessionTests {
             if [ "$1" = -l ]; then printf '%s' "$3" >> "$SIM/text"; else mv "$SIM/text" "$SIM/sent"; fi ;;
         esac
         """
-        let ps = "#!/bin/sh\n[ -e \"$SIM/up\" ] && echo 'python3 -I -c import hermes_bootstrap /opt/hermes/hermes-agent'\nexit 0\n"
+        // `ps -o pgid=,tpgid=,args=`: the shell, its background jobs (this
+        // probe among them, its command line naming hermes), and Hermes in
+        // the foreground once up -- unless `$SIM/gone` says it has exited.
+        let ps = """
+        #!/bin/sh
+        if [ -e "$SIM/up" ] && [ ! -e "$SIM/gone" ]; then fg=100; else fg=90; fi
+        echo "   90 $fg -bash"
+        echo "  130 $fg grep -q hermes"
+        [ "$fg" = 100 ] && echo "  100 100 python3 -I -c import hermes_bootstrap /opt/hermes/hermes-agent"
+        exit 0
+        """
         for (name, text) in [("tmux", tmux), ("ps", ps)] {
             let url = bin.appendingPathComponent(name)
             try text.write(to: url, atomically: true, encoding: .utf8)
@@ -220,7 +230,7 @@ struct HermesSessionTests {
     /// as a turn on the session's old model.
     @Test("a bare resume's /model is typed into an empty composer, never over the user's text", arguments: [false, true])
     func typesModel(userTyped: Bool) throws {
-        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_type_model"])
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
         defer { try? FileManager.default.removeItem(at: root) }
         let sim = root.appendingPathComponent("sim")
         try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
@@ -244,6 +254,55 @@ struct HermesSessionTests {
             #expect(sent == model)
             #expect(left == nil)
         }
+    }
+
+    /// Hermes gone (the resume failed) but its last composer still on
+    /// screen: the shell has the terminal again, and nothing is typed into
+    /// it -- not even though a `grep hermes` of this very probe is on the
+    /// terminal too.
+    @Test("nothing is typed when Hermes isn't the terminal's foreground program")
+    func noHermesNoTyping() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        FileManager.default.createFile(atPath: sim.appendingPathComponent("gone").path, contents: nil)
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '/model openai/gpt-5.5 --provider nous --session' &
+        sleep 0.3
+        touch "$SIM/up"
+        sleep 2.5
+        kill $! 2>/dev/null
+        wait
+        """
+        _ = try Self.bash(script, path: bin, sim: sim)
+        #expect(!FileManager.default.fileExists(atPath: sim.appendingPathComponent("text").path))
+        #expect(!FileManager.default.fileExists(atPath: sim.appendingPathComponent("sent").path))
+    }
+
+    @Test("Hermes counts only as the terminal's foreground program", arguments: [
+        ("   90  100 -bash\n  100  100 python3 -I -c import hermes_bootstrap", true),
+        ("   90   90 -bash\n  130   90 grep -q hermes", false),
+        ("   90   90 /bin/bash -c hermes --resume x", false),
+        ("   90   90 bash -i\n  140   90 awk /herm[e]s/", false),
+        ("", false),
+    ])
+    func foreground(ps: String, running: Bool) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_foreground"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let url = bin.appendingPathComponent("ps")
+        try "#!/bin/sh\nprintf '%s\\n' \"$PS_OUT\"\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", fns + "\n_bromure_hermes_foreground pts/9"]
+        proc.environment = ["PATH": bin.path + ":/usr/bin:/bin", "PS_OUT": ps.replacingOccurrences(of: "\\n", with: "\n")]
+        try proc.run(); proc.waitUntilExit()
+        #expect((proc.terminationStatus == 0) == running)
     }
 
     @Test("the wrapper no longer seeds the resume's /model as a chat query")

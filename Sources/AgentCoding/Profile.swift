@@ -7376,6 +7376,16 @@ public final class ProfileStore {
     print(text.strip())
     '
     }
+    #    Whether Hermes is what terminal $1 runs in the foreground: a
+    #    process of the terminal's foreground group (pgid = tpgid) that isn't
+    #    a shell. This probe runs on that terminal too, as a background job,
+    #    so its own ps and awk are never in that group; the bracket keeps
+    #    awk's pattern from matching its own command line all the same.
+    _bromure_hermes_foreground() {
+        ps -t "$1" -o pgid=,tpgid=,args= 2>/dev/null | awk '
+            $1 == $2 && $3 !~ "^-?(.*/)?(ba|da|z)?sh$" && /herm[e]s/ { found = 1 }
+            END { exit !found }'
+    }
     #    Type $2 (the resume's `/model`) into the Hermes that is starting in
     #    tmux pane $1, once its composer is up and empty, then send it. The
     #    screen must have changed since the start (an earlier Hermes's last
@@ -7390,10 +7400,9 @@ public final class ProfileStore {
         while [ "$_i" -lt 120 ]; do
             sleep 0.5; _i=$((_i + 1))
             [ "$(tmux capture-pane -p -t "$_p" 2>/dev/null)" != "$_first" ] || continue
-            ps -t "$_tty" -o args= 2>/dev/null | grep -v -E '^-?(bash|sh)( |$)' \\
-                | grep -q hermes || continue
             _c=$(_bromure_hermes_composer "$_p") || continue
             [ -z "$_c" ] || return 0
+            _bromure_hermes_foreground "$_tty" || continue
             tmux send-keys -t "$_p" -l -- "$_m" || return 0
             for _j in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 0.2
