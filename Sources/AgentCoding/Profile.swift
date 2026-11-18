@@ -7363,7 +7363,9 @@ public final class ProfileStore {
     #    holds exactly $2 (fails 1 if not) -- read across the rows Hermes
     #    wraps it onto: it cuts long input at the pane's width, character by
     #    character, and carries on at the next row's first column -- and
-    #    nothing typed after it: the cursor sits right after it.
+    #    nothing typed after it: the cursor sits right after it. Fails 3 when
+    #    $2 ends a row exactly: then nothing on screen tells whether more
+    #    input follows (see below), and the caller must make it end elsewhere.
     _bromure_hermes_composer() {
         local _w
         _w=$(tmux display-message -p -t "$1" '#{pane_width} #{cursor_x} #{cursor_y}' 2>/dev/null)
@@ -7417,15 +7419,14 @@ public final class ProfileStore {
     # Nothing typed after it (the rows do not tell: tmux drops trailing
     # blanks, and what follows a full row may be the next row of input or
     # the row under the composer, whatever the skin draws there): the
-    # cursor sits right after the text. A text ending a row exactly leaves
-    # it parked off the rows of the composer -- any more input moves it to the
-    # row below, past column 0.
+    # cursor sits right after the text. Not for a text ending a row
+    # exactly: Hermes then parks the cursor above the composer, and does
+    # the same with one or more full rows of input after it -- so no answer
+    # (3), rather than a yes nothing backs.
+    if used >= width:
+        sys.exit(3)
     last = at[-1] + len(rows) - 1
-    if used < width:
-        ok = (cx, cy) == (used, last)
-    else:
-        ok = cy <= last or (cy == last + 1 and cx == 0)
-    sys.exit(0 if ok else 1)
+    sys.exit(0 if (cx, cy) == (used, last) else 1)
     ' "$_w" ${2+"$2"}
     }
     #    Whether Hermes is what terminal $1 runs in the foreground: a
@@ -7458,10 +7459,14 @@ public final class ProfileStore {
             tmux send-keys -t "$_p" -l -- "$_m" || return 0
             for _j in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 0.2
-                if _bromure_hermes_composer "$_p" "$_m"; then
-                    tmux send-keys -t "$_p" Enter
-                    return 0
-                fi
+                _bromure_hermes_composer "$_p" "$_m"
+                case $? in
+                    0) tmux send-keys -t "$_p" Enter; return 0 ;;
+                    # It ends a row exactly, where the check can't see past
+                    # it: one more blank (Hermes strips it) ends it inside
+                    # the next row, where it can.
+                    3) tmux send-keys -t "$_p" -l -- " " || return 0; _m="$_m " ;;
+                esac
             done
             return 0
         done
