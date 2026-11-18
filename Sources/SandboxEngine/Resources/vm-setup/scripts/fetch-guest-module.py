@@ -76,7 +76,9 @@ def ed25519_valid(payload, signature_b64):
 
 
 def get(url, limit):
-    with urllib.request.urlopen(url, timeout=30) as r:
+    # The CDN answers 403 to urllib's default "Python-urllib/3.x" agent.
+    req = urllib.request.Request(url, headers={"User-Agent": "bromure-image-build"})
+    with urllib.request.urlopen(req, timeout=30) as r:
         data = r.read(limit + 1)
     if len(data) > limit:
         raise ValueError(f"{url}: larger than {limit} bytes")
