@@ -7161,8 +7161,13 @@ public final class ProfileStore {
             run("set", "model." + key, model[key])
         else:
             run("unset", "model." + key)
+    # No model chosen (cleared, or a provider picked without one): the
+    # provider's own default, not the last model set -- which the next
+    # provider may not serve at all.
     if model.get("default"):
         run("set", "model.default", model["default"])
+    else:
+        run("unset", "model.default")
     run("set", "auth.adopt_external_logins", "false")
     def esc(name):
         return name.replace("\\\\", "\\\\\\\\").replace(".", "\\\\.")

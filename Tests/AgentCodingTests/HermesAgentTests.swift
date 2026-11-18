@@ -141,6 +141,9 @@ struct HermesAgentTests {
         #expect(again.contains("config unset model.key_env"))
         #expect(again.contains("config unset model.api_key"))
         #expect(!again.contains { $0.hasPrefix("config set model.default") })
+        // No model chosen any more: the previous one goes, not left for the
+        // new provider to be asked for.
+        #expect(again.contains("config unset model.default"))
         #expect(again.contains("config unset mcp_servers.docs\\.v2"))
         #expect(!again.contains("config unset mcp_servers.browser"))
         // (Unsetting what was never set didn't fail the run: status 0.)
