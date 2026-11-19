@@ -205,9 +205,10 @@ Blocked calls return a protocol-appropriate 403-style error body — a Kubernete
 
 ### Escape hatches
 
-Three per-machine toggles at the bottom of the Guardrails pane loosen interception for hosts and clients that break under it, without turning the proxy off. All apply live:
+Four per-machine settings at the bottom of the Guardrails pane loosen interception for hosts and clients that break under it, without turning the proxy off. All apply live:
 
 - **Allow per-request insecure bypass (X-bromure-insecure)** — on by default. An agent whose request to a self-signed or private-CA host fails validation can retry it with the header `X-bromure-insecure: yes`; that one request skips upstream certificate validation, carries no real credential, and is recorded in the Security Timeline.
+- **Trusted upstream certificates** — empty by default. You pin a self-signed server's exact certificate by hostname and SHA-256 fingerprint. A matching server is trusted like any valid one, so it receives real credentials. The agent can't add a pin.
 - **Disable transparent interception** — off by default. Stops the network-level divert, so raw sockets and certificate-pinned clients reach the network directly. Proxy-aware tools and the agent's own API calls still go through the proxy (and so keep the credential swap, tracing, Guardrails and prompt-injection scanning); traffic that ignores the proxy settings escapes the egress rules.
 - **Don't alert on credential exfiltration** — off by default. Suppresses the compromise alert and VM pause; the leak is still blocked and recorded.
 
@@ -249,6 +250,7 @@ Both systems are configured per machine, under **Security** in the machine's set
 | **Agent watchdog** | Guardrails | **Off** / **Alert** / **Quarantine** | Off |
 | **Disable transparent interception** | Guardrails | Toggle | Off (interception on) |
 | **Allow per-request insecure bypass (X-bromure-insecure)** | Guardrails | Toggle | On |
+| **Trusted upstream certificates** | Guardrails | Hostname + SHA-256 fingerprint list | Empty |
 | **Don't alert on credential exfiltration** | Guardrails | Toggle | Off |
 
 The full field-by-field references are [Prompt Injection settings](07-settings/prompt-injection.mdx), [Guardrails settings](07-settings/guardrails.mdx) and [Sandbox Policy settings](07-settings/sandbox-policy.mdx). Every detection and enforcement outcome is auditable after the fact — see [Tracing & Audit](11-tracing.mdx).
