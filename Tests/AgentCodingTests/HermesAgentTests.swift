@@ -474,15 +474,20 @@ struct HermesAgentTests {
         let dir = try tempDir()
         let proc = dir.appendingPathComponent("proc")
         let home = dir.appendingPathComponent("home")
-        let fns = try bashFunctions(["_bromure_hermes_claim"])
+        let fake = try bashFunctions(["_bromure_hermes_claim"])
             .replacingOccurrences(of: "\"/proc\"", with: "'\(proc.path)'")
             .replacingOccurrences(of: "\"/proc/%", with: "'\(proc.path)/%")
             .replacingOccurrences(of: "%d\" % p)", with: "%d' % p)")
+            .replacingOccurrences(of: "%d\" % pid)", with: "%d' % pid)")
             .replacingOccurrences(of: "%s/cmdline\" % d", with: "%s/cmdline' % d")
             .replacingOccurrences(of: "%s/comm\" % d", with: "%s/comm' % d")
             .replacingOccurrences(of: "%d/environ\" % pid", with: "%d/environ' % pid")
-            .replacingOccurrences(of: "os.kill(pid, signal.SIGTERM)",
-                                  with: "print(pid); __import__('shutil').rmtree('\(proc.path)/%d' % pid)")
+            .replacingOccurrences(of: "10), (signal.SIGKILL, 3)", with: "0.3), (signal.SIGKILL, 0.3)")
+        #expect(!fake.contains("\"/proc"))
+        // Signals become a print; a gateway dies of it unless it's 666.
+        let fns = fake.replacingOccurrences(
+            of: "os.kill(pid, sig)",
+            with: "print(pid, sig.name); pid != 666 and __import__('shutil').rmtree('\(proc.path)/%d' % pid)")
         #expect(!fns.contains("os.kill"))
         let bin = dir.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
@@ -512,7 +517,7 @@ struct HermesAgentTests {
         // Window 5's gateway, on another home: none of this one's business.
         try process(103, comm: "python3", argv: gateway, env: ["HERMES_HOME": home.path + "/.hermes/profiles/tab-5",
                                                                "TMUX_PANE": "%5"])
-        #expect(try claim(tab) == (0, "102\n"))
+        #expect(try claim(tab) == (0, "102 SIGTERM\n"))
         #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("101").path))
         #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("103").path))
         // The user's own home: window 5's chat is on it, so window 1 can't
@@ -527,6 +532,30 @@ struct HermesAgentTests {
         #expect(try claim(home.path + "/.hermes", pane: "%5") == (0, ""))
         // Outside tmux: never.
         #expect(try claim(tab, pane: "").0 == 1)
+        // A gateway that outlives SIGTERM gets SIGKILL; one that outlives
+        // that too fails the claim (the chat would attach to it).
+        let other = home.path + "/.hermes/profiles/tab-8"
+        try process(666, comm: "python3", argv: gateway, env: ["HERMES_HOME": other, "TMUX_PANE": "%9"])
+        #expect(try claim(other) == (1, "666 SIGTERM\n666 SIGKILL\n"))
+        // Another window's chat run as `python -m hermes_cli.main chat`:
+        // the home is taken, its gateway left alone.
+        let busy = home.path + "/.hermes/profiles/tab-6"
+        try process(301, comm: "python3", argv: gateway, env: ["HERMES_HOME": busy, "TMUX_PANE": "%5"])
+        try process(302, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "chat"],
+                    env: ["HERMES_HOME": busy, "TMUX_PANE": "%5"])
+        #expect(try claim(busy) == (1, ""))
+        // ...and one only Hermes's own registry names (its process not
+        // recognisable from argv).
+        let listed = home.path + "/.hermes/profiles/tab-7"
+        try FileManager.default.createDirectory(atPath: listed + "/runtime", withIntermediateDirectories: true)
+        try #"{"entries": [{"pid": 401, "session_id": "local-x"}]}"#
+            .write(toFile: listed + "/runtime/active_sessions.json", atomically: true, encoding: .utf8)
+        try process(401, comm: "node", argv: ["node", "ui-tui"], env: ["HERMES_HOME": listed, "TMUX_PANE": "%5"])
+        #expect(try claim(listed).0 == 1)
+        // The wrapper never falls back to the shared home in a tab.
+        let rc = try renderBashrc()
+        #expect(rc.contains("couldn't give this tab its own Hermes home"))
+        #expect(rc.contains("this task's Hermes is running in another tab"))
     }
 
     @Test("a board task's Hermes home gets the board server; a malformed task name gets nothing")

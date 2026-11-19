@@ -7437,7 +7437,7 @@ public final class ProfileStore {
     _bromure_hermes_claim() {
         [ -n "$1" ] || return 1
         python3 - "$1" "${TMUX_PANE:-}" <<'BROMURE_HERMES_CLAIM' 2>/dev/null
-    import os, signal, subprocess, sys, time
+    import json, os, signal, subprocess, sys, time
     home = os.path.realpath(sys.argv[1])
     pane = sys.argv[2]
     root = os.path.realpath(os.path.expanduser("~/.hermes"))
@@ -7483,6 +7483,22 @@ public final class ProfileStore {
     mine = window_of(pane)
     if not mine:
         sys.exit(1)
+    # Hermes's own record of the chats on this home (the hook reads it
+    # too): a live one from another window keeps the home.
+    try:
+        with open(os.path.join(home, "runtime", "active_sessions.json")) as f:
+            entries = json.load(f).get("entries") or []
+    except (OSError, ValueError, AttributeError):
+        entries = []
+    for e in entries:
+        try:
+            pid = int(e.get("pid"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if pid in me or not os.path.exists("/proc/%d" % pid):
+            continue
+        if window_of(environ_of(pid).get("TMUX_PANE") or "") != mine:
+            sys.exit(1)
     stale = []
     for d in os.listdir("/proc"):
         if not d.isdigit() or int(d) in me:
@@ -7497,9 +7513,12 @@ public final class ProfileStore {
         if not comm.startswith("python") and comm != "hermes":
             continue
         gateway = "hermes_cli.main" in words and "gateway" in words and "run" in words
-        launcher = any(os.path.basename(w) == "hermes" for w in words[:3]) \\
-            or ("-c" in words[:3] and any("hermes_bootstrap" in w for w in words[:4]))
-        if not (gateway or launcher) or any("hermes-hook" in w for w in words):
+        # A chat: the launcher (a script, or inline code), `-m hermes_cli.main`,
+        # or the TUI's own gateway child.
+        cli = any(os.path.basename(w) == "hermes" for w in words[:3]) \\
+            or ("-c" in words[:3] and any("hermes_bootstrap" in w for w in words[:4])) \\
+            or "hermes_cli.main" in words or any("tui_gateway" in w for w in words)
+        if not (gateway or cli) or any("hermes-hook" in w for w in words):
             continue
         env = environ_of(int(d))
         if home_of(words, env) != home:
@@ -7510,16 +7529,22 @@ public final class ProfileStore {
             stale.append(int(d))
         else:
             sys.exit(1)
-    for pid in stale:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.time() + 10
-    while stale and time.time() < deadline:
-        stale = [p for p in stale if os.path.exists("/proc/%d" % p)]
-        time.sleep(0.2)
-    sys.exit(0)
+    # Stopped, and gone before the chat starts: Hermes would attach to a
+    # survivor, which names its own window.
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
+        for pid in stale:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + wait
+        while stale and time.time() < deadline:
+            stale = [p for p in stale if os.path.exists("/proc/%d" % p)]
+            if stale:
+                time.sleep(0.2)
+        if not stale:
+            break
+    sys.exit(1 if stale else 0)
     BROMURE_HERMES_CLAIM
     }
     #    A profile signs in with the user's own login: Hermes keeps it in
@@ -7745,14 +7770,21 @@ public final class ProfileStore {
         if [ -n "$_t" ]; then
             local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
-            _bromure_hermes_claim "$HERMES_HOME" || true
-        elif [ -z "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
-                && _bromure_hermes_is_chat "$@"; then
-            local _th
-            if _th=$(_bromure_hermes_tab_home "$(_bromure_hermes_resume_id "$@")" "${_u[@]}") \\
-                    && [ -n "$_th" ]; then
-                local -x HERMES_HOME="$_th"
+            if [ -n "${TMUX_PANE:-}" ] && ! _bromure_hermes_claim "$HERMES_HOME"; then
+                echo "[bromure-ac] this task's Hermes is running in another tab; open it there." >&2
+                return 1
             fi
+        elif [ -z "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
+                && [ -n "${TMUX_PANE:-}" ] && _bromure_hermes_is_chat "$@"; then
+            # Never the shared home instead: its gateway would give this
+            # tab another tab's identity.
+            local _th
+            if ! _th=$(_bromure_hermes_tab_home "$(_bromure_hermes_resume_id "$@")" "${_u[@]}") \\
+                    || [ -z "$_th" ]; then
+                echo "[bromure-ac] couldn't give this tab its own Hermes home (another tab's Hermes is using it); try again in a moment." >&2
+                return 1
+            fi
+            local -x HERMES_HOME="$_th"
         fi
         _bromure_hermes_sync_auth
         # A sign-in machine only runs `hermes auth add nous`: the workspace
