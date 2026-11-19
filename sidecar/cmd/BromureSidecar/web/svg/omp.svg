@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <title>Oh My Pi (omp) tab template icon</title>
+  <g stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The ⌥ (option) brand mark: a broken bar over a rising stroke. -->
+    <path d="M40 74 L96 74 L160 182 L216 182"/>
+    <path d="M150 74 L216 74"/>
+  </g>
+</svg>

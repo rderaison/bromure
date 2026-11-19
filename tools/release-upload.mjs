@@ -25,7 +25,7 @@
  *   node tools/release-upload.mjs \
  *        --file .build/release/Bromure-2.6.0.zip \
  *        --version 2.6.0 \
- *        [--product bromure|bromure-ac|bromure-sidecar] \
+ *        [--product bromure|bromure-ac|bromure-sidecar|bromure-sidecar-windows-{x64,arm64,feed}] \
  *        [--channel stable] \
  *        [--min-system-version 14.0] \
  *        [--notes-file release-notes-2.6.0.html]
@@ -72,7 +72,7 @@ function die(msg) {
 
 if (!values.file) die("--file is required");
 if (!values.version) die("--version is required");
-if (!values.product) die("--product is required (one of: bromure, bromure-ac, bromure-sidecar)");
+if (!values.product) die("--product is required (one of: bromure, bromure-ac, bromure-sidecar, bromure-sidecar-windows-{x64,arm64,feed})");
 if (!/^\d+\.\d+(\.\d+)?(-[A-Za-z0-9._-]+)?$/.test(values.version)) {
   die(`invalid version string: ${values.version}`);
 }
@@ -101,6 +101,25 @@ const PRODUCT_CONFIG = {
     spacesPrefix: "releases-sidecar",
     apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-sidecar",
     latestKey: "releases-sidecar/BromureSidecar.dmg",
+  },
+  // Bromure Sidecar for Windows (sidecar/, Jenkinsfile.sidecar-windows):
+  // upload only. The installers, each also under a stable name for the
+  // download links, and the update feed its updater reads
+  // (sidecar/internal/updater: version, url, sha256 per architecture).
+  "bromure-sidecar-windows-x64": {
+    spacesPrefix: "releases-sidecar-windows",
+    apiURL: null,
+    latestKey: "releases-sidecar-windows/BromureSidecar-x64.exe",
+  },
+  "bromure-sidecar-windows-arm64": {
+    spacesPrefix: "releases-sidecar-windows",
+    apiURL: null,
+    latestKey: "releases-sidecar-windows/BromureSidecar-arm64.exe",
+  },
+  "bromure-sidecar-windows-feed": {
+    spacesPrefix: "releases-sidecar-windows",
+    apiURL: null,
+    latestKey: "releases-sidecar-windows/latest.json",
   },
 };
 if (!PRODUCT_CONFIG[PRODUCT]) {

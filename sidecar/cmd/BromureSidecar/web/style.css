@@ -1,0 +1,233 @@
+/* Bromure Sidecar — Windows 11 surfaces with the macOS Sidecar's 2026
+   look: glass cards over the system backdrop (acrylic / Mica), capsule
+   controls, the Sidecar blue. Light and dark follow the Windows theme. */
+
+:root {
+  color-scheme: light dark;
+  --accent: #5866FE;
+  --accent-2: #6F7BFF;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(88, 102, 254, 0.12);
+  --ink: #16171d;
+  --ink-2: rgba(22, 23, 29, 0.66);
+  --ink-3: rgba(22, 23, 29, 0.44);
+  --page: #f3f3f6;
+  --glass: rgba(255, 255, 255, 0.62);
+  --glass-strong: rgba(255, 255, 255, 0.82);
+  --glass-hover: rgba(255, 255, 255, 0.9);
+  --hairline: rgba(15, 18, 40, 0.08);
+  --hairline-2: rgba(15, 18, 40, 0.14);
+  --sheen: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  --shadow: 0 1px 2px rgba(18, 20, 40, 0.06), 0 8px 24px rgba(18, 20, 40, 0.06);
+  --good: #1e9e5a;
+  --busy: #e8890c;
+  --bad: #d93a3f;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  --radius: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #8C9BFF;
+    --accent-2: #a3afff;
+    --accent-ink: #0d0f24;
+    --accent-soft: rgba(140, 155, 255, 0.16);
+    --ink: #f2f3f8;
+    --ink-2: rgba(242, 243, 248, 0.68);
+    --ink-3: rgba(242, 243, 248, 0.42);
+    --page: #1f1f24;
+    --glass: rgba(255, 255, 255, 0.055);
+    --glass-strong: rgba(255, 255, 255, 0.09);
+    --glass-hover: rgba(255, 255, 255, 0.12);
+    --hairline: rgba(255, 255, 255, 0.08);
+    --hairline-2: rgba(255, 255, 255, 0.14);
+    --sheen: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.25);
+    --good: #3ccf7f;
+    --busy: #ffad33;
+    --bad: #ff6b6f;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font: 13px/1.4 "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--page);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+/* Over a system backdrop: the window shows through (the root too —
+   `color-scheme` otherwise paints the canvas). */
+html.backdrop, html.backdrop body { background: transparent !important; }
+
+button { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+.scroll { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
+.scroll::-webkit-scrollbar { width: 8px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--hairline-2); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+
+/* --- type --- */
+.title-xl { font: 650 26px/1.15 "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui; letter-spacing: -0.01em; }
+.title { font-weight: 600; font-size: 14px; }
+.sub { color: var(--ink-2); }
+.faint { color: var(--ink-3); }
+.small { font-size: 12px; }
+.tiny { font-size: 11px; }
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* --- glass --- */
+.card {
+  background: var(--glass);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  box-shadow: var(--sheen), var(--shadow);
+  backdrop-filter: blur(24px) saturate(1.4);
+}
+body:not(.backdrop) .card { background: var(--glass-strong); }
+
+.row { display: flex; align-items: center; gap: 10px; }
+.col { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.grow { flex: 1; min-width: 0; }
+
+/* --- the mark tile (the Mac menu header's) --- */
+.mark-tile {
+  width: 36px; height: 36px; border-radius: 11px; flex: none;
+  background: linear-gradient(180deg, #6675FF, #4C5CF7);
+  display: grid; place-items: center;
+  box-shadow: 0 4px 12px rgba(88, 102, 254, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.mark-tile svg { width: 21px; height: 21px; }
+.mark-tile svg path { fill: #fff; }
+.mark-tile.lg { width: 56px; height: 56px; border-radius: 16px; }
+.mark-tile.lg svg { width: 32px; height: 32px; }
+
+/* --- agent logo tiles (white template logos on the agent's colour) --- */
+.logo {
+  width: 30px; height: 30px; border-radius: 9px; flex: none;
+  display: grid; place-items: center; color: #fff;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--tint) 82%, white), var(--tint));
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--tint) 35%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.logo svg { width: 18px; height: 18px; }
+@media (prefers-color-scheme: dark) {
+  /* Dark tiles (Codex, Grok) keep an edge against a dark card. */
+  .logo { box-shadow: 0 3px 10px color-mix(in srgb, var(--tint) 35%, transparent), inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+}
+.logo.lg { width: 46px; height: 46px; border-radius: 13px; }
+.logo.lg svg { width: 26px; height: 26px; }
+
+/* --- status --- */
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.dot.good { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); }
+.dot.busy { background: var(--busy); box-shadow: 0 0 0 3px color-mix(in srgb, var(--busy) 22%, transparent); }
+.dot.bad { background: var(--bad); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  background: var(--glass-strong); border: 1px solid var(--hairline);
+  color: var(--ink-2);
+}
+.pill.working { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.pill.working .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.pill.needs { color: var(--busy); background: color-mix(in srgb, var(--busy) 14%, transparent); border-color: transparent; }
+.pill.needs .dot { background: var(--busy); }
+.pill.good { color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: transparent; }
+.pill.good .dot { background: var(--good); }
+.pill.bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: transparent; }
+@keyframes pulse { 50% { opacity: 0.35; transform: scale(0.8); } }
+
+/* --- buttons: capsules --- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  height: 30px; padding: 0 14px; border-radius: 999px;
+  border: 1px solid var(--hairline-2);
+  background: var(--glass-strong);
+  box-shadow: var(--sheen);
+  font-weight: 600; font-size: 12.5px; cursor: default;
+  transition: background 0.15s, transform 0.08s, box-shadow 0.15s;
+}
+.btn:hover { background: var(--glass-hover); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; pointer-events: none; }
+.btn.primary {
+  color: #fff; border-color: transparent;
+  background: linear-gradient(180deg, #6C79FF, #4E5CF6);
+  box-shadow: 0 4px 14px rgba(88, 102, 254, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.btn.primary:hover { background: linear-gradient(180deg, #7784FF, #5664FA); }
+.btn.ghost { background: transparent; border-color: transparent; box-shadow: none; color: var(--ink-2); }
+.btn.ghost:hover { background: var(--glass-hover); color: var(--ink); }
+.btn svg { width: 15px; height: 15px; flex: none; }
+.btn { white-space: nowrap; }
+.btn.danger { color: var(--bad); }
+.btn.sm { height: 26px; padding: 0 11px; font-size: 12px; }
+.btn.block { width: 100%; height: 34px; }
+
+.iconbtn {
+  width: 30px; height: 30px; border-radius: 10px; flex: none;
+  display: grid; place-items: center;
+  border: 0; background: transparent; color: var(--ink-2);
+  transition: background 0.15s;
+}
+.iconbtn:hover { background: var(--glass-hover); color: var(--ink); }
+.iconbtn svg { width: 17px; height: 17px; }
+
+/* --- segmented control --- */
+.seg { display: inline-flex; padding: 2px; border-radius: 999px; background: var(--hairline); gap: 2px; }
+.seg button {
+  border: 0; background: transparent; border-radius: 999px;
+  padding: 4px 11px; font-size: 11.5px; font-weight: 600; color: var(--ink-2);
+}
+.seg button.on { background: var(--glass-strong); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), var(--sheen); }
+
+/* --- toggle --- */
+.toggle { position: relative; width: 38px; height: 22px; flex: none; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle span {
+  position: absolute; inset: 0; border-radius: 999px; background: var(--hairline-2);
+  transition: background 0.2s;
+}
+.toggle span::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); transition: transform 0.2s;
+}
+.toggle input:checked + span { background: var(--accent); }
+.toggle input:checked + span::after { transform: translateX(16px); }
+
+/* --- fields --- */
+.field {
+  height: 32px; width: 100%; padding: 0 12px; border-radius: 10px;
+  border: 1px solid var(--hairline-2); background: var(--glass-strong); color: var(--ink);
+  font: inherit; outline: none; user-select: text;
+}
+.field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.code {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px 7px 11px; border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+  user-select: text;
+}
+
+/* --- progress --- */
+.bar { height: 3px; border-radius: 3px; background: var(--hairline); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 40%; border-radius: 3px; background: var(--accent); animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+
+/* --- entrance --- */
+.appear { animation: appear 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes appear { from { opacity: 0; transform: translateY(6px) scale(0.99); } }
+
+.toast {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  padding: 8px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--ink); color: var(--page); box-shadow: var(--shadow);
+  animation: appear 0.2s both; z-index: 10;
+}
