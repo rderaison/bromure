@@ -568,6 +568,84 @@ struct HermesAgentTests {
         #expect(try hello("w12", argv: ["w4"]) == "w4", "an explicit hello (tests) is still that")
     }
 
+    /// End to end, through a fake host (agentd's relay path, AF_VSOCK
+    /// refused): the first dial waits for the window the wrapper writes a
+    /// moment after Hermes starts the shim; a new window redials, and the
+    /// answer to the call that noticed it still comes back (it hung once:
+    /// a closed socket didn't wake the reader blocked on it).
+    @Test("the Hermes-mode shim waits for its window, and follows a change without losing the call")
+    func delegationShimRedial() throws {
+        let dir = try tempDir()
+        let shim = dir.appendingPathComponent("shim.py")
+        try SessionDisk.delegationMCPShimScript.write(to: shim, atomically: true, encoding: .utf8)
+        let harness = #"""
+        import json, os, socket, subprocess, sys, tempfile, threading, time
+        d = sys.argv[1]; shim = sys.argv[2]
+        # A unix socket path must be short (104 bytes on macOS).
+        relay = tempfile.mktemp(prefix="bhr", dir="/tmp"); home = os.path.join(d, "home"); os.makedirs(home)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(relay); srv.listen(8)
+        hellos = []
+        def serve(c):
+            f = c.makefile("rb")
+            f.readline(); c.sendall(b"ok\n")
+            hello = f.readline().decode().strip().replace("bromure-hello ", "", 1)
+            hellos.append(hello)
+            for line in f:
+                msg = json.loads(line)
+                c.sendall((json.dumps({"jsonrpc": "2.0", "id": msg.get("id"), "result": {"hello": hello}}) + "\n").encode())
+        def accept():
+            while True:
+                c, _ = srv.accept()
+                threading.Thread(target=serve, args=(c,), daemon=True).start()
+        threading.Thread(target=accept, daemon=True).start()
+        seccomp = ("import errno, runpy, socket, sys\n"
+                   "real = socket.socket\n"
+                   "def refused(family=-1, *a, **k):\n"
+                   "    if family == 40:\n"
+                   "        raise PermissionError(errno.EPERM, 'Operation not permitted')\n"
+                   "    return real(family, *a, **k)\n"
+                   "socket.socket = refused\n"
+                   "sys.argv = sys.argv[1:]\n"
+                   "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        env = {"PATH": "/usr/bin:/bin", "HERMES_HOME": home, "BROMURE_VSOCK_RELAY": relay}
+        p = subprocess.Popen([sys.executable, "-I", "-c", seccomp, shim, "--hermes"], env=env,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        def window(w):
+            with open(os.path.join(home, "bromure-window"), "w") as f:
+                f.write(w + "\n")
+        out = {}
+        def call(i):
+            p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call"}) + "\n").encode())
+            p.stdin.flush()
+            box = []
+            t = threading.Thread(target=lambda: box.append(p.stdout.readline()), daemon=True)
+            t.start(); t.join(8)
+            return json.loads(box[0])["result"]["hello"] if box and box[0] else "TIMEOUT"
+        time.sleep(0.6); window("w3")
+        out["first"] = call(1)
+        window("w7")
+        out["moved"] = call(2)
+        out["again"] = call(3)
+        out["hellos"] = hellos
+        p.kill()
+        os.unlink(relay)
+        print(json.dumps(out))
+        """#
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.arguments = ["-c", harness, dir.path, shim.path]
+        let out = Pipe(); p.standardOutput = out
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let r = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                             Comment(rawValue: String(decoding: data, as: UTF8.self)))
+        #expect(r["first"] as? String == "w3", "the first dial waited for the window")
+        #expect(r["moved"] as? String == "w7", "the call that noticed the move is answered, as the new window")
+        #expect(r["again"] as? String == "w7")
+        #expect(r["hellos"] as? [String] == ["w3", "w7"])
+    }
+
     @Test("a board task's Hermes home gets the board server; a malformed task name gets nothing")
     func applyTaskBoard() throws {
         let home = try tempDir()

@@ -1760,13 +1760,26 @@ public final class SessionDisk {
         return out if out.startswith("w") and out[1:].isdigit() else ""
     HELLO = _hello()
     def refresh_hello():
+        # Hermes starts this as soon as a new home appears, a moment before
+        # the wrapper writes its window there: the first dial waits for it.
         global HELLO
         if HERMES:
             HELLO = _hello()
+            waited = 0
+            while not HELLO and waited < 25:
+                time.sleep(0.2)
+                waited += 1
+                HELLO = _hello()
     def redial_if_moved():
         if HERMES and _hello() != HELLO:
             s = current()
             if s is not None:
+                # shutdown, not just close: it wakes the reader blocked in
+                # recv on it, which then moves to the new connection.
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 drop(s)
     """
     static var automationMCPClaudeEntry: [String: Any] {
