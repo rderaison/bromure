@@ -21,7 +21,7 @@ var ctlRoutes = map[string][2]string{
 	"status":          {"GET", "/sidecar/status"},
 	"signin":          {"POST", "/sidecar/signin"},
 	"enroll":          {"POST", "/sidecar/enroll"},
-	"enroll-callback": {"POST", "/sidecar/enroll"},
+	"enroll-callback": {"POST", "/sidecar/enroll-callback"},
 	"signout":         {"POST", "/sidecar/signout"},
 	"servers":         {"GET", "/sidecar/servers"},
 	"attach":          {"POST", "/sidecar/attach"},

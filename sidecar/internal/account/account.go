@@ -186,21 +186,64 @@ var ErrNotALink = errors.New("That isn't an enrollment link or code.")
 // ErrNotOurs: a link whose state isn't the handoff we started (ignored).
 var ErrNotOurs = errors.New("ignored an enroll link this machine didn't start")
 
-// Complete redeems a handed-back link (or a pasted code), then serves as
-// the new device. Synchronous; Status().Enrolling is true meanwhile.
-func (a *Account) Complete(raw string) error {
+// CompleteHandoff redeems what the OS hands over through the URL scheme:
+// only the bromure-agent-host:// link that BeginSignIn's browser handoff
+// comes back with, carrying the state this machine wrote. Anything else
+// (no state, a stale or foreign one, a bare code, another scheme) is
+// refused: opening a crafted link must never enroll this machine into
+// someone else's account.
+func (a *Account) CompleteHandoff(raw string) error {
 	link, ok := identity.ParseLink(raw)
 	if !ok {
 		a.setError(ErrNotALink.Error())
 		return ErrNotALink
 	}
-	if state, has := identity.QueryValue(raw, "state"); has {
-		pending, _ := os.ReadFile(PendingStateFile())
-		if state != string(pending) {
-			logx.Printf("p2p: ignored an enroll link we didn't start")
-			return ErrNotOurs
-		}
+	if !isHandoffLink(raw) || !statePending(raw) {
+		logx.Printf("p2p: ignored an enroll link we didn't start")
+		return ErrNotOurs
 	}
+	return a.redeem(link)
+}
+
+// CompleteManual redeems a code or link the user deliberately pasted into
+// the Sidecar (the tray's Paste link, `ctl enroll`). A bromure-agent-host://
+// link is a handoff even when pasted, so it still needs its pending state;
+// a bare code or a bromure:// link doesn't carry one.
+func (a *Account) CompleteManual(raw string) error {
+	link, ok := identity.ParseLink(raw)
+	if !ok {
+		a.setError(ErrNotALink.Error())
+		return ErrNotALink
+	}
+	_, hasState := identity.QueryValue(raw, "state")
+	if (isHandoffLink(raw) || hasState) && !statePending(raw) {
+		logx.Printf("p2p: ignored an enroll link we didn't start")
+		return ErrNotOurs
+	}
+	return a.redeem(link)
+}
+
+// isHandoffLink: raw is a bromure-agent-host:// URL (the scheme only
+// bromure.io's handoff should open).
+func isHandoffLink(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && strings.EqualFold(u.Scheme, URLScheme)
+}
+
+// statePending: raw carries a non-empty state equal to the one
+// BeginSignIn wrote and that hasn't been redeemed yet.
+func statePending(raw string) bool {
+	state, has := identity.QueryValue(raw, "state")
+	if !has || state == "" {
+		return false
+	}
+	pending, err := os.ReadFile(PendingStateFile())
+	return err == nil && len(pending) > 0 && state == string(pending)
+}
+
+// redeem enrolls with link, then serves as the new device. Synchronous;
+// Status().Enrolling is true meanwhile.
+func (a *Account) redeem(link identity.Link) error {
 	_ = os.Remove(PendingStateFile())
 	// A re-enroll replaces the device: its channel goes first (while the
 	// record on disk is still the old one, so server mode goes off for the

@@ -84,13 +84,13 @@ func TestSignInSyncSignOut(t *testing.T) {
 	}
 
 	api := url.QueryEscape(cp.URL)
-	if err := a.Complete("bromure-agent-host://enroll?code=CODE-FROM-BROWSER&state=SOMEONE-ELSE&api=" + api); !errors.Is(err, ErrNotOurs) {
+	if err := a.CompleteHandoff("bromure-agent-host://enroll?code=CODE-FROM-BROWSER&state=SOMEONE-ELSE&api=" + api); !errors.Is(err, ErrNotOurs) {
 		t.Fatalf("foreign state: %v", err)
 	}
-	if err := a.Complete("not a link"); !errors.Is(err, ErrNotALink) || a.Status().LastError == "" {
+	if err := a.CompleteManual("not a link"); !errors.Is(err, ErrNotALink) || a.Status().LastError == "" {
 		t.Fatalf("bad link: %v", err)
 	}
-	if err := a.Complete("bromure-agent-host://enroll?code=CODE-FROM-BROWSER&state=" + state + "&api=" + api); err != nil {
+	if err := a.CompleteHandoff("bromure-agent-host://enroll?code=CODE-FROM-BROWSER&state=" + state + "&api=" + api); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(PendingStateFile()); !os.IsNotExist(err) {
@@ -152,7 +152,7 @@ func TestNotAgentHostPublishesNothing(t *testing.T) {
 		SetManagedKeys: keys.set})
 	defer a.Close()
 	defer identity.Erase()
-	if err := a.Complete("bromure://enroll?code=PASTED-CODE-0001&api=" + url.QueryEscape(cp.URL)); err != nil {
+	if err := a.CompleteManual("bromure://enroll?code=PASTED-CODE-0001&api=" + url.QueryEscape(cp.URL)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "lastError", func() bool { return strings.Contains(a.Status().LastError, "agent-host capability") })
@@ -181,7 +181,7 @@ func TestFailedReenrollKeepsServing(t *testing.T) {
 		SetManagedKeys: keys.set})
 	defer a.Close()
 	defer identity.Erase()
-	if err := a.Complete("bromure://enroll?code=PASTED-CODE-0001&api=" + url.QueryEscape(cp.URL)); err != nil {
+	if err := a.CompleteManual("bromure://enroll?code=PASTED-CODE-0001&api=" + url.QueryEscape(cp.URL)); err != nil {
 		t.Fatal(err)
 	}
 	id := a.Status().DeviceID
@@ -196,7 +196,7 @@ func TestFailedReenrollKeepsServing(t *testing.T) {
 	}
 	dead := "http://" + l.Addr().String()
 	l.Close()
-	if err := a.Complete("bromure://enroll?code=PASTED-CODE-0002&api=" + url.QueryEscape(dead)); err == nil {
+	if err := a.CompleteManual("bromure://enroll?code=PASTED-CODE-0002&api=" + url.QueryEscape(dead)); err == nil {
 		t.Fatal("enrolled against a dead control plane")
 	}
 	st := a.Status()
@@ -206,6 +206,84 @@ func TestFailedReenrollKeepsServing(t *testing.T) {
 	// The device channel comes back, server mode ends up on, keys sync again.
 	waitFor(t, "serving again", func() bool { return a.Status().Connected && cp.Online(id) && me.Server })
 	waitFor(t, "key sync again", func() bool { n, _, _ := keys.get(); return n > syncs })
+}
+
+// CWE-862: a bromure-agent-host:// link any page can open must not enroll
+// this machine into whatever account minted its code. The URL-scheme path
+// takes only the handoff this machine started (matching, non-empty state);
+// a pasted handoff link needs it too; a replayed one is refused.
+func TestEnrollLinkNeedsOurState(t *testing.T) {
+	settings.ResetForTest()
+	_ = settings.Remove(settings.P2PPublished)
+	defer settings.Remove(settings.P2PPublished)
+	cp := cptest.New()
+	defer cp.Close()
+	cp.EnrollCapability = "agent-host"
+	a := New(Config{SSHPort: 1, UserName: "you"})
+	defer a.Close()
+	defer identity.Erase()
+	api := "&api=" + url.QueryEscape(cp.URL)
+	notEnrolled := func(what string) {
+		t.Helper()
+		if _, res := identity.Load(); res != identity.NotEnrolled {
+			t.Fatalf("%s: enrolled", what)
+		}
+	}
+
+	// Nothing started here: even a well-formed handoff is refused.
+	_ = os.Remove(PendingStateFile())
+	for _, link := range []string{
+		"bromure-agent-host://enroll?code=ATTACKER-CODE-0001" + api,
+		"bromure-agent-host://enroll?code=ATTACKER-CODE-0001&state=" + api,
+		"BROMURE-AGENT-HOST://enroll?code=ATTACKER-CODE-0001" + api,
+	} {
+		if err := a.CompleteHandoff(link); !errors.Is(err, ErrNotOurs) {
+			t.Fatalf("handoff %q: %v", link, err)
+		}
+		if err := a.CompleteManual(link); !errors.Is(err, ErrNotOurs) {
+			t.Fatalf("pasted %q: %v", link, err)
+		}
+		notEnrolled(link)
+	}
+
+	u, err := a.BeginSignIn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pu, _ := url.Parse(u)
+	state := pu.Query().Get("state")
+	for _, link := range []string{
+		"bromure-agent-host://enroll?code=ATTACKER-CODE-0001" + api,              // no state
+		"bromure-agent-host://enroll?code=ATTACKER-CODE-0001&state=" + api,       // empty
+		"bromure-agent-host://enroll?code=ATTACKER-CODE-0001&state=GUESS" + api,  // wrong
+		"bromure://enroll?code=ATTACKER-CODE-0001&state=" + state + api,          // not the scheme
+		"https://bromure.io/enroll?code=ATTACKER-CODE-0001&state=" + state + api, // not the scheme
+		"ATTACKER-CODE-0001-BARE", // bare code
+	} {
+		if err := a.CompleteHandoff(link); !errors.Is(err, ErrNotOurs) {
+			t.Fatalf("handoff %q: %v", link, err)
+		}
+		notEnrolled(link)
+	}
+	if b, _ := os.ReadFile(PendingStateFile()); string(b) != state {
+		t.Fatal("a refused link used up the pending state")
+	}
+
+	// The real handoff still works, once.
+	good := "bromure-agent-host://enroll?code=CODE-FROM-BROWSER&state=" + state + api
+	if err := a.CompleteHandoff(good); err != nil {
+		t.Fatal(err)
+	}
+	id := a.Status().DeviceID
+	if id == "" {
+		t.Fatal("not enrolled")
+	}
+	if err := a.CompleteHandoff(good); !errors.Is(err, ErrNotOurs) {
+		t.Fatalf("replayed handoff: %v", err)
+	}
+	if a.Status().DeviceID != id {
+		t.Fatal("a replayed link re-enrolled")
+	}
 }
 
 func TestHelpers(t *testing.T) {

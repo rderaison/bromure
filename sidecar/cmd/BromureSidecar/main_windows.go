@@ -67,10 +67,12 @@ func main() {
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // forwardURL hands an enrollment link to the running daemon (starting it
-// first if needed) and exits: the second instance a browser launches.
+// first if needed) and exits: the second instance a browser launches. It
+// goes to enroll-callback, which accepts only the sign-in this machine
+// started — any page can open a bromure-agent-host:// link.
 func forwardURL(u string) int {
 	ensureDaemon()
-	status, r, err := ctlclient.JSON("POST", "/sidecar/enroll", map[string]any{"link": u}, 60*time.Second)
+	status, r, err := ctlclient.JSON("POST", "/sidecar/enroll-callback", map[string]any{"link": u}, 60*time.Second)
 	if err != nil || status != 200 {
 		msg := "The sign-in link couldn't be used."
 		if e, _ := r["error"].(string); e != "" {

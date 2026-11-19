@@ -30,10 +30,14 @@ func (x acct) SignOut()                     { x.a.SignOut() }
 func (x acct) RefreshServers()              { x.a.RefreshServers() }
 func (x acct) Stop()                        { x.a.Close() }
 
-// Complete enrolls with a handed-back link (it talks to bromure.io);
-// a link we didn't start is refused.
-func (x acct) Complete(raw string) error {
-	err := x.a.Complete(raw)
+// CompleteHandoff enrolls with the link the URL scheme handed over (it
+// talks to bromure.io); only the handoff this machine started is accepted.
+func (x acct) CompleteHandoff(raw string) error { return notOurs(x.a.CompleteHandoff(raw)) }
+
+// CompleteManual enrolls with a code or link the user pasted.
+func (x acct) CompleteManual(raw string) error { return notOurs(x.a.CompleteManual(raw)) }
+
+func notOurs(err error) error {
 	if errors.Is(err, account.ErrNotOurs) {
 		return errors.New("that sign-in link wasn't started here — sign in again from the menu")
 	}

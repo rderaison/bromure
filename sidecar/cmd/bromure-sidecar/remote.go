@@ -26,7 +26,8 @@ import (
 type accountAPI interface {
 	Status() map[string]any
 	BeginSignIn() (string, error)
-	Complete(raw string) error
+	CompleteHandoff(raw string) error // the URL scheme's link (enroll-callback)
+	CompleteManual(raw string) error  // a code or link the user pasted (enroll)
 	SignOut()
 	Servers() []map[string]any
 	RefreshServers()
@@ -160,7 +161,10 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 			return 400, errBody(err.Error())
 		}
 		return 200, map[string]any{"ok": true, "url": u}
-	case "enroll":
+	case "enroll", "enroll-callback":
+		// enroll: a code or link the user pasted. enroll-callback: what the
+		// bromure-agent-host:// URL scheme handed the tray, which must be
+		// the sign-in this machine started.
 		link, _ := b["link"].(string)
 		if link == "" {
 			link, _ = b["url"].(string)
@@ -168,7 +172,11 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 		if r.account == nil {
 			return 501, errBody("accounts aren't available in this build")
 		}
-		if err := r.account.Complete(link); err != nil {
+		complete := r.account.CompleteManual
+		if verb == "enroll-callback" {
+			complete = r.account.CompleteHandoff
+		}
+		if err := complete(link); err != nil {
 			return 400, errBody(err.Error())
 		}
 		return 200, map[string]any{"ok": true}
