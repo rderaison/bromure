@@ -37,6 +37,9 @@ SHARED = [
     "SessionModels.swift",
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
+    "HermesHook.swift",          # Hermes's status hook script + transcript mirror the .bashrc installs
+    "AgentConfigScan.swift",     # the config-import scan Profile.swift's Hermes import calls
+    "Mitm/SubscriptionFakeMint.swift",   # the stand-in tokens Profile.swift stages
     "CodingTasks.swift",
     "AgentScreen.swift",        # agent-screen shapes + per-agent wording (CodingTasks uses its menu regex)
     "ScheduledAutomations.swift",
