@@ -7748,13 +7748,28 @@ public final class ProfileStore {
         set -- "${_a[@]}"
         case "$_t" in wt/[a-z0-9]*) ;; *) _t="" ;; esac
         case "${_t#wt/}" in *[!a-z0-9-]*) _t="" ;; esac
+        # Only a home this tab just claimed gets its window: a chat's
+        # identity is never rewritten by a home another tab holds, nor by
+        # a command that isn't a chat (`hermes config`, `sessions`, …).
+        local _claimed=""
         if [ -n "$_t" ]; then
             local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
-            if [ -n "${TMUX_PANE:-}" ] && ! _bromure_hermes_claim "$HERMES_HOME"; then
-                echo "[bromure-ac] this task's Hermes is running in another tab; open it there." >&2
+            if [ -n "${TMUX_PANE:-}" ]; then
+                if ! _bromure_hermes_claim "$HERMES_HOME"; then
+                    echo "[bromure-ac] this task's Hermes is running in another tab; open it there." >&2
+                    return 1
+                fi
+                _claimed=1
+            fi
+        elif [ -n "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
+                && [ -n "${TMUX_PANE:-}" ] && _bromure_hermes_is_chat "$@"; then
+            # A home the user chose: still one tab's at a time.
+            if ! _bromure_hermes_claim "$HERMES_HOME"; then
+                echo "[bromure-ac] the Hermes home $HERMES_HOME is in use by another tab's Hermes; quit it there first." >&2
                 return 1
             fi
+            _claimed=1
         elif [ -z "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
                 && [ -n "${TMUX_PANE:-}" ] && _bromure_hermes_is_chat "$@"; then
             # Never the shared home instead: its gateway would give this
@@ -7766,11 +7781,12 @@ public final class ProfileStore {
                 return 1
             fi
             local -x HERMES_HOME="$_th"
+            _claimed=1
         fi
         _bromure_hermes_sync_auth
         # The window this home's chat runs in, for its delegation tools
         # (Hermes's MCP servers never see the tab's tmux pane).
-        if [ -n "${HERMES_HOME:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+        if [ -n "$_claimed" ] && [ -n "${HERMES_HOME:-}" ]; then
             local _win
             _win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
             case "$_win" in

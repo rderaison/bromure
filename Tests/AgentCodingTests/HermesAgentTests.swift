@@ -537,6 +537,68 @@ struct HermesAgentTests {
         #expect(rc.contains("printf 'w%s\\n' \"$_win\" > \"$HERMES_HOME/bromure-window.tmp\""))
     }
 
+    /// The wrapper itself, its helpers stubbed: a home the user exported is
+    /// claimed like a tab home before it's told this tab's window, and
+    /// only a chat that claimed its home rewrites that window.
+    @Test("an exported HERMES_HOME is claimed before its window is written; a non-chat never rewrites it")
+    func explicitHomeClaimed() throws {
+        let dir = try tempDir()
+        let bin = dir.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        for (name, body) in [("tmux", "echo 4"), ("hermes", "echo ran \"$@\" > \"$RAN\"")] {
+            let f = bin.appendingPathComponent(name)
+            try "#!/bin/sh\n\(body)\n".write(to: f, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+        }
+        let lines = try renderBashrc().components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.trimmingCharacters(in: .whitespaces) == "hermes() {" })
+        let end = try #require(lines[start...].firstIndex { $0 == "}" })
+        let wrapper = lines[start...end].joined(separator: "\n")
+        let stubs = """
+        _bromure_hermes_opt_ready() { :; }
+        _bromure_hermes_sync_auth() { :; }
+        _bromure_hermes_apply() { :; }
+        _bromure_hermes_resume_model() { return 1; }
+        _bromure_hermes_tab_home() { echo "$TABHOME"; }
+        _bromure_hermes_claim() { echo "$1" >> "$CLAIMS"; [ "$CLAIM" = ok ]; }
+        """
+        let fns = try bashFunctions(["_bromure_hermes_is_chat", "_bromure_hermes_resume_id"])
+        let home = dir.appendingPathComponent("chosen")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let window = home.appendingPathComponent("bromure-window")
+        let ran = dir.appendingPathComponent("ran"), claims = dir.appendingPathComponent("claims")
+        func run(_ args: String, claim: String) throws -> Int32 {
+            try? FileManager.default.removeItem(at: ran)
+            try? FileManager.default.removeItem(at: claims)
+            return try bash(fns + "\n" + wrapper + "\n" + stubs + "\nhermes " + args, env: [
+                "PATH": bin.path + ":/usr/bin:/bin", "HOME": dir.path, "TMUX_PANE": "%4",
+                "HERMES_HOME": home.path, "TABHOME": dir.appendingPathComponent("tab").path,
+                "CLAIM": claim, "RAN": ran.path, "CLAIMS": claims.path]).0
+        }
+        func written() -> String? { try? String(contentsOf: window, encoding: .utf8) }
+        let fm = FileManager.default
+        // Another tab holds the home: refused, its window left alone, Hermes not run.
+        try "w2\n".write(to: window, atomically: true, encoding: .utf8)
+        #expect(try run("", claim: "no") == 1)
+        #expect(written() == "w2\n")
+        #expect(!fm.fileExists(atPath: ran.path))
+        #expect((try? String(contentsOf: claims, encoding: .utf8)) == home.path + "\n",
+                "the exported home itself is claimed, not a tab home")
+        #expect(try run("chat", claim: "no") == 1)
+        #expect(written() == "w2\n")
+        // Not a chat (a subcommand, a chosen profile): never claimed, never rewritten.
+        #expect(try run("config set x y", claim: "no") == 0)
+        #expect(written() == "w2\n")
+        #expect(fm.fileExists(atPath: ran.path))
+        #expect(!fm.fileExists(atPath: claims.path))
+        #expect(try run("-p work", claim: "no") == 0)
+        #expect(written() == "w2\n")
+        // This tab claims it: told its window, then Hermes runs.
+        #expect(try run("", claim: "ok") == 0)
+        #expect(written() == "w4\n")
+        #expect(fm.fileExists(atPath: ran.path))
+    }
+
     /// The delegation shim in Hermes mode, run against a fake host: it names
     /// the window its home says, and redials when another tab takes the
     /// home over.
