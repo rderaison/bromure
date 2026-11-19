@@ -1703,6 +1703,12 @@ public final class SessionDisk {
                                   with: "import os, socket, subprocess, sys, threading, time")
             .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
                                   with: delegationMCPHelloBlock)
+            // Hermes: the window is re-read at each dial, and a change
+            // (another tab took this Hermes home over) redials.
+            .replacingOccurrences(of: "        existing = current()\n        if existing is not None:\n            return existing\n",
+                                  with: "        existing = current()\n        if existing is not None:\n            return existing\n        refresh_hello()\n")
+            .replacingOccurrences(of: "        line = sys.stdin.buffer.readline()\n        if not line:\n            break\n",
+                                  with: "        line = sys.stdin.buffer.readline()\n        if not line:\n            break\n        redial_if_moved()\n")
     }
     /// The Switchboard's MCP (SwitchboardMCPServer): the delegation shim — same
     /// window announcement, since the host checks the caller is the
@@ -1725,10 +1731,22 @@ public final class SessionDisk {
         return String(decoding: data, as: UTF8.self)
     }
     static let delegationMCPHelloBlock = """
+    HERMES = len(sys.argv) > 1 and sys.argv[1] == "--hermes"
     def _hello():
         # Who am I: the tmux window this agent runs in (its pane is in the
         # environment), so the host binds the connection to the session
         # shown there. An explicit argv[1] wins (tests).
+        if HERMES:
+            # Hermes starts its MCP servers from a gateway that serves every
+            # Hermes home, never from the tab: each tab chats in a home of its
+            # own, and the bashrc wrapper writes there which window that is.
+            home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+            try:
+                with open(os.path.join(home, "bromure-window")) as f:
+                    v = f.read(16).strip()
+            except OSError:
+                return ""
+            return v if v.startswith("w") and v[1:].isdigit() else ""
         if len(sys.argv) > 1 and sys.argv[1]:
             return sys.argv[1]
         pane = os.environ.get("TMUX_PANE", "")
@@ -1741,6 +1759,15 @@ public final class SessionDisk {
             return ""
         return out if out.startswith("w") and out[1:].isdigit() else ""
     HELLO = _hello()
+    def refresh_hello():
+        global HELLO
+        if HERMES:
+            HELLO = _hello()
+    def redial_if_moved():
+        if HERMES and _hello() != HELLO:
+            s = current()
+            if s is not None:
+                drop(s)
     """
     static var automationMCPClaudeEntry: [String: Any] {
         ["command": "python3", "args": [automationMCPShimGuestPath]]

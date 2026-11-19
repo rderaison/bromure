@@ -7263,11 +7263,11 @@ public final class ProfileStore {
             v = {"command": s["command"], "args": s.get("args") or []}
             if s.get("env"):
                 v["env"] = s["env"]
-            # The delegation tools know their tab from tmux; Hermes starts
-            # MCP servers with a filtered environment, so it's passed on
-            # (from the gateway, which a tab's own home starts from there).
+            # The delegation tools know their tab from tmux, which Hermes's
+            # MCP servers never see (a gateway serving every home starts
+            # them): the shim reads it from the home the wrapper wrote it to.
             if any(str(a).endswith("/bromure-delegation-mcp.py") for a in v["args"]):
-                v["env"] = dict(v.get("env") or {}, TMUX="${TMUX}", TMUX_PANE="${TMUX_PANE}")
+                v["args"] = [a for a in v["args"] if a != "--hermes"] + ["--hermes"]
         else:
             continue
         run("set", "mcp_servers." + esc(name), json.dumps(v))
@@ -7349,13 +7349,13 @@ public final class ProfileStore {
         printf '%s' "$HOME/.hermes/profiles/$_p"
     }
     #    A chat in a tab: its own Hermes profile, tab-<window> (cloned from
-    #    the user's on first use). Hermes runs every chat of a home in one
-    #    shared gateway, and the MCP servers it starts (the delegation
-    #    tools) know their tab only from the gateway's own environment --
-    #    whichever tab started it. One home per tab window, its gateway
-    #    started from that window, names the right tab. A resumed session
-    #    goes back to the home that holds it, when no other window's chat
-    #    is using that home. Prints the home; fails outside tmux.
+    #    the user's on first use). Hermes starts MCP servers from a gateway
+    #    that serves every home, never from the tab, so the delegation
+    #    shim can't see its tab's tmux pane: it reads its window from the
+    #    home (bromure-window, written by the wrapper), and a home is one
+    #    window's at a time. A resumed session goes back to the home that
+    #    holds it, when no other window's chat is using that home. Prints
+    #    the home; fails outside tmux.
     _bromure_hermes_tab_home() {
         local _sid="$1" _w _p _h _r="$HOME/.hermes" _f
         shift
@@ -7431,13 +7431,12 @@ public final class ProfileStore {
     BROMURE_HERMES_SESSION_HOME
     }
     #    Make home $1 this tab window's: fails when a chat from another
-    #    window is using it; otherwise a gateway another window started
-    #    (or a closed tab's, still idling) is stopped, so the next one
-    #    starts from here and its MCP servers name this window.
+    #    window is using it (one home, one window: its delegation tools
+    #    speak for the window the home names).
     _bromure_hermes_claim() {
         [ -n "$1" ] || return 1
         python3 - "$1" "${TMUX_PANE:-}" <<'BROMURE_HERMES_CLAIM' 2>/dev/null
-    import json, os, signal, subprocess, sys, time
+    import json, os, subprocess, sys
     home = os.path.realpath(sys.argv[1])
     pane = sys.argv[2]
     root = os.path.realpath(os.path.expanduser("~/.hermes"))
@@ -7483,8 +7482,7 @@ public final class ProfileStore {
     mine = window_of(pane)
     if not mine:
         sys.exit(1)
-    # Hermes's own record of the chats on this home (the hook reads it
-    # too): a live one from another window keeps the home.
+    # Hermes's own record of the chats on this home (the hook reads it too).
     try:
         with open(os.path.join(home, "runtime", "active_sessions.json")) as f:
             entries = json.load(f).get("entries") or []
@@ -7499,7 +7497,9 @@ public final class ProfileStore {
             continue
         if window_of(environ_of(pid).get("TMUX_PANE") or "") != mine:
             sys.exit(1)
-    stale = []
+    # And any chat process on it: the launcher (a script, or inline code),
+    # `-m hermes_cli.main`, the TUI's gateway child. A gateway is none of
+    # them: one serves every home.
     for d in os.listdir("/proc"):
         if not d.isdigit() or int(d) in me:
             continue
@@ -7512,39 +7512,17 @@ public final class ProfileStore {
             continue
         if not comm.startswith("python") and comm != "hermes":
             continue
-        gateway = "hermes_cli.main" in words and "gateway" in words and "run" in words
-        # A chat: the launcher (a script, or inline code), `-m hermes_cli.main`,
-        # or the TUI's own gateway child.
+        if "hermes_cli.main" in words and "gateway" in words:
+            continue
         cli = any(os.path.basename(w) == "hermes" for w in words[:3]) \\
             or ("-c" in words[:3] and any("hermes_bootstrap" in w for w in words[:4])) \\
             or "hermes_cli.main" in words or any("tui_gateway" in w for w in words)
-        if not (gateway or cli) or any("hermes-hook" in w for w in words):
+        if not cli or any("hermes-hook" in w for w in words):
             continue
         env = environ_of(int(d))
-        if home_of(words, env) != home:
-            continue
-        if window_of(env.get("TMUX_PANE") or "") == mine:
-            continue
-        if gateway:
-            stale.append(int(d))
-        else:
+        if home_of(words, env) == home and window_of(env.get("TMUX_PANE") or "") != mine:
             sys.exit(1)
-    # Stopped, and gone before the chat starts: Hermes would attach to a
-    # survivor, which names its own window.
-    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
-        for pid in stale:
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                pass
-        deadline = time.time() + wait
-        while stale and time.time() < deadline:
-            stale = [p for p in stale if os.path.exists("/proc/%d" % p)]
-            if stale:
-                time.sleep(0.2)
-        if not stale:
-            break
-    sys.exit(1 if stale else 0)
+    sys.exit(0)
     BROMURE_HERMES_CLAIM
     }
     #    A profile signs in with the user's own login: Hermes keeps it in
@@ -7787,6 +7765,17 @@ public final class ProfileStore {
             local -x HERMES_HOME="$_th"
         fi
         _bromure_hermes_sync_auth
+        # The window this home's chat runs in, for its delegation tools
+        # (Hermes's MCP servers never see the tab's tmux pane).
+        if [ -n "${HERMES_HOME:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+            local _win
+            _win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+            case "$_win" in
+                ''|*[!0-9]*) rm -f "$HERMES_HOME/bromure-window" ;;
+                *) printf 'w%s\\n' "$_win" > "$HERMES_HOME/bromure-window.tmp" \\
+                       && mv -f "$HERMES_HOME/bromure-window.tmp" "$HERMES_HOME/bromure-window" ;;
+            esac
+        fi
         # A sign-in machine only runs `hermes auth add nous`: the workspace
         # settings (provider, MCP servers, hooks) are a dozen `hermes config`
         # runs for nothing there, ahead of the sign-in page.

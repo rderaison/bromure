@@ -330,7 +330,7 @@ struct HermesAgentTests {
     /// identity here": Hermes starts its MCP servers from the home's shared
     /// gateway, with a filtered environment -- the delegation shim never saw
     /// its tab's tmux pane.
-    @Test("the delegation server gets the tab's tmux variables passed on; other servers don't")
+    @Test("the delegation server runs in its Hermes mode (its window from the home); other servers don't")
     func applyDelegationEnv() throws {
         let calls = try runApply(
             settings: ["model": ["provider": "nous"], "key_var": ""],
@@ -341,9 +341,9 @@ struct HermesAgentTests {
         let deleg = try #require(calls.first { $0.hasPrefix("config set mcp_servers.delegation ") })
         let json = try #require(deleg.split(separator: " ", maxSplits: 3).last.map(String.init))
         let v = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        #expect(v["env"] as? [String: String] == ["TMUX": "${TMUX}", "TMUX_PANE": "${TMUX_PANE}"])
+        #expect(v["args"] as? [String] == ["/mnt/bromure-meta/bromure-delegation-mcp.py", "--hermes"])
         let browser = try #require(calls.first { $0.hasPrefix("config set mcp_servers.browser ") })
-        #expect(!browser.contains("TMUX"))
+        #expect(!browser.contains("--hermes"))
     }
 
     private func bashFunctions(_ names: [String]) throws -> String {
@@ -467,28 +467,21 @@ struct HermesAgentTests {
         #expect(try tabHome("", pane: "%9").0 != 0)
     }
 
-    /// The claim's /proc scan, against a fake /proc (macOS has none); its
-    /// SIGTERM replaced with a print, so no real process can be signalled.
-    @Test("claiming a home stops a gateway another window started, and refuses one another window's chat uses")
+    /// The claim's /proc scan, against a fake /proc (macOS has none).
+    @Test("a home is one window's: another window's chat (by argv or Hermes's registry) keeps it; gateways don't count")
     func claimHome() throws {
         let dir = try tempDir()
         let proc = dir.appendingPathComponent("proc")
         let home = dir.appendingPathComponent("home")
-        let fake = try bashFunctions(["_bromure_hermes_claim"])
+        let fns = try bashFunctions(["_bromure_hermes_claim"])
             .replacingOccurrences(of: "\"/proc\"", with: "'\(proc.path)'")
             .replacingOccurrences(of: "\"/proc/%", with: "'\(proc.path)/%")
-            .replacingOccurrences(of: "%d\" % p)", with: "%d' % p)")
             .replacingOccurrences(of: "%d\" % pid)", with: "%d' % pid)")
             .replacingOccurrences(of: "%s/cmdline\" % d", with: "%s/cmdline' % d")
             .replacingOccurrences(of: "%s/comm\" % d", with: "%s/comm' % d")
             .replacingOccurrences(of: "%d/environ\" % pid", with: "%d/environ' % pid")
-            .replacingOccurrences(of: "10), (signal.SIGKILL, 3)", with: "0.3), (signal.SIGKILL, 0.3)")
-        #expect(!fake.contains("\"/proc"))
-        // Signals become a print; a gateway dies of it unless it's 666.
-        let fns = fake.replacingOccurrences(
-            of: "os.kill(pid, sig)",
-            with: "print(pid, sig.name); pid != 666 and __import__('shutil').rmtree('\(proc.path)/%d' % pid)")
-        #expect(!fns.contains("os.kill"))
+        #expect(!fns.contains("\"/proc"))
+        #expect(!fns.contains("os.kill"), "nothing is stopped: one gateway serves every home")
         let bin = dir.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         // Panes %1 and %2 are in window 1 (a split), %5 in window 5; %9 is gone.
@@ -497,7 +490,6 @@ struct HermesAgentTests {
         case "$4" in %1|%2) echo 1 ;; %5) echo 5 ;; *) exit 1 ;; esac
         """.write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("tmux").path)
-        let tab = home.path + "/.hermes/profiles/tab-1"
         func process(_ pid: Int, comm: String, argv: [String], env: [String: String]) throws {
             let d = proc.appendingPathComponent(String(pid))
             try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
@@ -505,57 +497,75 @@ struct HermesAgentTests {
             try Data((comm + "\n").utf8).write(to: d.appendingPathComponent("comm"))
             try Data(env.map { "\($0)=\($1)\0" }.joined().utf8).write(to: d.appendingPathComponent("environ"))
         }
-        let gateway = ["python3", "-m", "hermes_cli.main", "gateway", "run", "--quiet", "--idle-exit"]
-        func claim(_ h: String, pane: String = "%1") throws -> (Int32, String) {
+        func claim(_ h: String, pane: String = "%1") throws -> Int32 {
             try bash(fns + "\n_bromure_hermes_claim '\(h)'",
-                     env: ["HOME": home.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane])
+                     env: ["HOME": home.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane]).0
         }
-        // A gateway this window started (another pane of it): kept.
-        try process(101, comm: "python3", argv: gateway, env: ["HERMES_HOME": tab, "TMUX_PANE": "%2"])
-        // A closed tab's gateway, still idling (its pane gone): stopped.
-        try process(102, comm: "python3", argv: gateway, env: ["HERMES_HOME": tab, "TMUX_PANE": "%9"])
-        // Window 5's gateway, on another home: none of this one's business.
-        try process(103, comm: "python3", argv: gateway, env: ["HERMES_HOME": home.path + "/.hermes/profiles/tab-5",
-                                                               "TMUX_PANE": "%5"])
-        #expect(try claim(tab) == (0, "102 SIGTERM\n"))
-        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("101").path))
-        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("103").path))
-        // The user's own home: window 5's chat is on it, so window 1 can't
-        // have it, and its gateway is left running.
-        try process(201, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "--profile", "default",
-                                                 "gateway", "run"], env: ["TMUX_PANE": "%5"])
-        try process(202, comm: "python3", argv: ["python3", "-I", "/usr/local/bin/hermes", "chat"],
-                    env: ["TMUX_PANE": "%5"])
-        #expect(try claim(home.path + "/.hermes").0 == 1)
-        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("201").path))
-        // Window 5 itself may: the gateway is its own.
-        #expect(try claim(home.path + "/.hermes", pane: "%5") == (0, ""))
-        // Outside tmux: never.
-        #expect(try claim(tab, pane: "").0 == 1)
-        // A gateway that outlives SIGTERM gets SIGKILL; one that outlives
-        // that too fails the claim (the chat would attach to it).
-        let other = home.path + "/.hermes/profiles/tab-8"
-        try process(666, comm: "python3", argv: gateway, env: ["HERMES_HOME": other, "TMUX_PANE": "%9"])
-        #expect(try claim(other) == (1, "666 SIGTERM\n666 SIGKILL\n"))
-        // Another window's chat run as `python -m hermes_cli.main chat`:
-        // the home is taken, its gateway left alone.
-        let busy = home.path + "/.hermes/profiles/tab-6"
-        try process(301, comm: "python3", argv: gateway, env: ["HERMES_HOME": busy, "TMUX_PANE": "%5"])
-        try process(302, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "chat"],
-                    env: ["HERMES_HOME": busy, "TMUX_PANE": "%5"])
-        #expect(try claim(busy) == (1, ""))
-        // ...and one only Hermes's own registry names (its process not
-        // recognisable from argv).
-        let listed = home.path + "/.hermes/profiles/tab-7"
+        let root = home.path + "/.hermes"
+        let tab = root + "/profiles/tab-1"
+        // The gateway (started from window 5, serving every home): no claim on any.
+        try process(100, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "--profile", "default",
+                                                 "gateway", "run", "--idle-exit"], env: ["TMUX_PANE": "%5"])
+        #expect(try claim(tab) == 0)
+        #expect(try claim(root) == 0)
+        // This window's own chat (another pane of it): still this window's.
+        try process(101, comm: "python3", argv: ["python3", "-I", "/usr/local/bin/hermes", "chat"],
+                    env: ["HERMES_HOME": tab, "TMUX_PANE": "%2"])
+        #expect(try claim(tab) == 0)
+        // Window 5's chat on the user's home, run as `-m hermes_cli.main`.
+        try process(102, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "chat"], env: ["TMUX_PANE": "%5"])
+        #expect(try claim(root) == 1)
+        #expect(try claim(root, pane: "%5") == 0, "window 5 itself may")
+        // One only Hermes's own registry names.
+        let listed = root + "/profiles/tab-7"
         try FileManager.default.createDirectory(atPath: listed + "/runtime", withIntermediateDirectories: true)
         try #"{"entries": [{"pid": 401, "session_id": "local-x"}]}"#
             .write(toFile: listed + "/runtime/active_sessions.json", atomically: true, encoding: .utf8)
-        try process(401, comm: "node", argv: ["node", "ui-tui"], env: ["HERMES_HOME": listed, "TMUX_PANE": "%5"])
-        #expect(try claim(listed).0 == 1)
-        // The wrapper never falls back to the shared home in a tab.
+        try process(401, comm: "node", argv: ["node", "ui-tui"], env: ["TMUX_PANE": "%5"])
+        #expect(try claim(listed) == 1)
+        // Outside tmux, or a pane that's gone: never.
+        #expect(try claim(tab, pane: "") == 1)
+        #expect(try claim(tab, pane: "%9") == 1)
+        // The wrapper never falls back to the shared home in a tab, and
+        // tells the home which window it's in.
         let rc = try renderBashrc()
         #expect(rc.contains("couldn't give this tab its own Hermes home"))
         #expect(rc.contains("this task's Hermes is running in another tab"))
+        #expect(rc.contains("printf 'w%s\\n' \"$_win\" > \"$HERMES_HOME/bromure-window.tmp\""))
+    }
+
+    /// The delegation shim in Hermes mode, run against a fake host: it names
+    /// the window its home says, and redials when another tab takes the
+    /// home over.
+    @Test("the delegation shim's Hermes mode names the home's window, and follows it when it changes")
+    func delegationShimHermesMode() throws {
+        let script = SessionDisk.delegationMCPShimScript
+        #expect(script.contains("HERMES = len(sys.argv) > 1 and sys.argv[1] == \"--hermes\""))
+        #expect(script.components(separatedBy: "refresh_hello()").count == 3, "defined, and called at each dial")
+        #expect(script.components(separatedBy: "redial_if_moved()").count == 3, "defined, and called per request")
+        // Its hello, from the home: run the hello block alone.
+        let lines = script.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.hasPrefix("HERMES = ") })
+        let end = try #require(lines.firstIndex { $0 == "HELLO = _hello()" })
+        let block = "import os, subprocess, sys\n" + lines[start...end].joined(separator: "\n") + "\nprint(HELLO)\n"
+        let home = try tempDir()
+        func hello(_ content: String?, argv: [String] = ["--hermes"]) throws -> String {
+            let f = home.appendingPathComponent("bromure-window")
+            try? FileManager.default.removeItem(at: f)
+            if let content { try content.write(to: f, atomically: true, encoding: .utf8) }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            p.arguments = ["-c", block] + argv
+            p.environment = ["HERMES_HOME": home.path, "PATH": "/usr/bin:/bin"]
+            let out = Pipe(); p.standardOutput = out
+            try p.run(); p.waitUntilExit()
+            return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        #expect(try hello("w3\n") == "w3")
+        #expect(try hello(nil) == "")
+        #expect(try hello("w3; rm") == "", "only w<digits>")
+        #expect(try hello("w12", argv: ["w4"]) == "w4", "an explicit hello (tests) is still that")
     }
 
     @Test("a board task's Hermes home gets the board server; a malformed task name gets nothing")
