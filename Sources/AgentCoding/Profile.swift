@@ -8699,3 +8699,12 @@ public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
         }
     }
 }
+
+extension Profile {
+    /// Home-relative path of the Nous login's stand-ins the host seeds for a
+    /// Hermes on Nous Portal (`providers.nous`, never a real token). The
+    /// managed .bashrc merges it into Hermes's own `~/.hermes/auth.json`,
+    /// which also holds the user's other Hermes logins — so a seed (which
+    /// overwrites what it manages) never owns that file.
+    static let hermesNousSidecar = ".hermes/.bromure-nous.json"
+}

@@ -227,6 +227,7 @@ enum DemoMode {
             case "archived": s.endedAt = s.lastSeenAt; s.windowIndex = nil; s.archivedAt = s.lastSeenAt
             default:         s.windowIndex = nil   // asleep: its machine is off
             }
+            s.demoBucket = buckets[s.id]?.rawValue
             d.agentSessionStore.upsert(s)
             if let t = e.transcript {
                 let data = try Data(contentsOf: dir.appendingPathComponent(t))

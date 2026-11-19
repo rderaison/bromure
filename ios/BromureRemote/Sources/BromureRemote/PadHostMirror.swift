@@ -388,6 +388,9 @@ struct PadHostMirror: View {
             selection = .room(id); return
         }
         if env["BROMURE_DEBUG_NEW_SESSION"] == "1" { selection = .newSession; return }
+        if let board = env["BROMURE_DEBUG_OPEN_BOARD"] {
+            selection = board == "automations" ? .automations : .coding; return
+        }
         #endif
         if let s = SessionHome.initialSession(in: controller.sessionStore,
                                               model: controller.listModel, remembered: nil) {
