@@ -1921,11 +1921,23 @@ enum PaneTypeGuard {
         case .agent:
             cmd = prelude(target) + menuFunction + confirmFunctions
                 + "if _bg; then if _bm; then echo \(heldMarker); "
-                + "else \(send) && _bsettle && "
+                + "else _bpre=$(_bcap); \(send) && _bsettle && \(pasteUnstick) && "
                 + "if _bg; then if _bm; then echo \(heldMarker); else \(confirmedEnter); fi; fi; fi; fi"
         }
         if let staged, isStagePath(staged) { cmd += "; rm -f \(quote(staged))" }
         return cmd
+    }
+
+    /// Hermes (prompt_toolkit) takes everything after a paste's start mark
+    /// as pasted until it sees the end mark — Bromure's Enter too — and
+    /// only gives up on a lost end mark when the NEXT byte comes in: the
+    /// message sat unseen until the user pressed a key in the tab, and
+    /// that key went into it. A paste that left Hermes's screen as it was
+    /// gets its end mark again (ESC[201~), closing it as sent. Never when
+    /// the text showed: a stray end mark would be typed.
+    nonisolated static var pasteUnstick: String {
+        "{ [ \"$_ba\" != hermes ] || [ \"$(_bcap)\" != \"$_bpre\" ] "
+            + "|| { tmux send-keys -H -t \"$_bt\" 1b 5b 32 30 31 7e && _bsettle; }; }"
     }
 
     /// What a guarded type prints when the text went in but its Enter never
