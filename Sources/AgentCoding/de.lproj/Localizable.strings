@@ -4362,3 +4362,11 @@
 "Couldn't suspend “%@”: the disk is almost full." = "„%@“ konnte nicht angehalten werden: Das Volume ist fast voll.";
 "The workspace is still running." = "Der Arbeitsbereich läuft weiter.";
 "Restart Browser" = "Browser neu starten";
+
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "Vertraut dem exakten Zertifikat eines selbstsignierten Servers, damit Zugangsdaten ihn trotzdem erreichen.";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "Für einen internen Server mit selbstsigniertem Zertifikat oder privater CA, der trotzdem echte Zugangsdaten erhalten soll. Geben Sie seinen Hostnamen und den SHA-256-Fingerabdruck des vorgelegten Zertifikats ein (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256` oder der Fingerabdruck, den die Zertifikatsansicht eines Browsers zeigt). Legt dieser Host genau dieses Zertifikat vor, vertraut Bromure ihm wie jedem gültigen Zertifikat und tauscht und injiziert Zugangsdaten wie gewohnt. Jedes andere Zertifikat wird normal geprüft. Prüfen Sie den Fingerabdruck am Server selbst, bevor Sie ihn anheften: Nur Sie können einen Pin hinzufügen, niemals der Agent. Wirkt sofort.";
+"Trusted upstream certificates" = "Vertrauenswürdige Upstream-Zertifikate";
+"SHA-256 fingerprint" = "SHA-256-Fingerabdruck";
+"Add certificate" = "Zertifikat hinzufügen";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Benötigt einen Hostnamen und einen 64-stelligen SHA-256-Fingerabdruck; bis dahin ignoriert.";

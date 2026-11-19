@@ -4594,6 +4594,8 @@ struct ProfileEditorView: View {
                         Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
                                isOn: $draft.guardrails.allowInsecureBypass)
                     }
+
+                    trustedCertificatesEditor
                 }
             }
             .padding(.bottom, 8)
@@ -4628,6 +4630,50 @@ struct ProfileEditorView: View {
 
             }
             .padding(.bottom, 8)
+        }
+    }
+
+    /// Guardrails → Trusted upstream certificates: user-pinned leaf
+    /// certificates for self-signed / private endpoints. Unlike the
+    /// `X-bromure-insecure` header, a pinned host keeps credential injection —
+    /// and only the user can add a pin here, never the guest (GitHub #65).
+    @ViewBuilder
+    private var trustedCertificatesEditor: some View {
+        settingRow(caption: "Trusts a self-signed server's exact certificate, so credentials still reach it.",
+                   info: "For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live.") {
+            Text("Trusted upstream certificates")
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach($draft.guardrails.trustedCertificates) { $cert in
+                HStack(spacing: 6) {
+                    TextField("internal.example.com", text: $cert.host)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .frame(width: 180)
+                    TextField("SHA-256 fingerprint", text: $cert.sha256)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .font(.system(.caption, design: .monospaced))
+                    if cert.normalizedHost == nil
+                        || TrustedUpstreamCertificate.normalizeFingerprint(cert.sha256) == nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .help(Text("Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then."))
+                    }
+                    Button {
+                        draft.guardrails.trustedCertificates.removeAll { $0.id == cert.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            Button {
+                draft.guardrails.trustedCertificates.append(
+                    TrustedUpstreamCertificate(host: "", sha256: ""))
+            } label: {
+                Label("Add certificate", systemImage: "plus")
+            }
         }
     }
 

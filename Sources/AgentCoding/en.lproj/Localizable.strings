@@ -4396,3 +4396,11 @@
 "Couldn't suspend “%@”: the disk is almost full." = "Couldn't suspend “%@”: the disk is almost full.";
 "The workspace is still running." = "The workspace is still running.";
 "Restart Browser" = "Restart Browser";
+
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "Trusts a self-signed server's exact certificate, so credentials still reach it.";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live.";
+"Trusted upstream certificates" = "Trusted upstream certificates";
+"SHA-256 fingerprint" = "SHA-256 fingerprint";
+"Add certificate" = "Add certificate";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then.";

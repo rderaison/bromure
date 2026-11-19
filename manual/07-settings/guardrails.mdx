@@ -133,6 +133,18 @@ A narrower escape hatch for self-signed or private-CA servers. When a request to
 
 On by default: it only acts when the VM explicitly sends the header. Turn it off to refuse the header outright.
 
+### Trusted upstream certificates
+
+Use this for an internal server with a self-signed or private-CA certificate that needs real credentials. The insecure header never sends them. Click **Add certificate** and enter the server's hostname and the SHA-256 fingerprint of the certificate it presents. The fingerprint can be copied from a browser's certificate viewer or printed with:
+
+```bash
+openssl s_client -connect internal.example.com:443 </dev/null | openssl x509 -noout -fingerprint -sha256
+```
+
+When that host presents exactly this certificate, Bromure trusts it like any valid one. Credentials are swapped and injected as usual, and every other guardrail still applies. Any other certificate from the host is checked normally, so a forged or rotated certificate fails as before. Colons, spaces, case and the `sha256 Fingerprint=` prefix are ignored. An entry missing a hostname, or without a 64-character fingerprint, shows a warning and pins nothing. Changes apply live.
+
+Only you can add a pin; the agent can't. When a request fails certificate validation, the error the agent receives includes the SHA-256 fingerprint of the certificate it was shown and tells it to ask you. Before you pin that fingerprint, check it against the server itself: the agent only reports what it was shown, which could be an impostor's certificate.
+
 ## What the agent sees when a call is blocked
 
 A blocked call returns an ordinary error in the service's own format — a Kubernetes `Status`, an AWS `AccessDeniedException`, a registry `DENIED` — whose message ends "blocked by Bromure Guardrails". The agent sees a clean failure it can report, not a hung connection. (Supply-chain blocks use HTTP 451 instead, so the two are easy to tell apart — see [Supply Chain](supply-chain.mdx).)
@@ -155,6 +167,7 @@ A blocked call returns an ordinary error in the service's own format — a Kuber
 | **Only allow credentials Bromure injects (strict mode)** | Toggle | Off |
 | **Disable transparent interception** | Toggle | Off |
 | **Allow per-request insecure bypass (X-bromure-insecure)** | Toggle | On |
+| **Trusted upstream certificates** | List of hostname + SHA-256 fingerprint | Empty |
 
 ## Related chapters
 
