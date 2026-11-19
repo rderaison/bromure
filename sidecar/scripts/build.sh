@@ -29,14 +29,7 @@ for target in windows/amd64 windows/arm64 darwin/arm64 linux/amd64; do
     GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags -H windowsgui" -o "$dir/BromureSidecar.exe" ./cmd/BromureSidecar
   fi
 done
-# Optional Authenticode signing: skipped unless a certificate is configured
-# (SIGN_CERT = a .pfx path, SIGN_PASS its password; signtool on PATH).
-if [ -n "${SIGN_CERT:-}" ] && command -v signtool >/dev/null 2>&1; then
-  for f in "$out"/windows-*/*.exe; do
-    signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$SIGN_CERT" /p "${SIGN_PASS:-}" "$f"
-  done
-else
-  echo "(signing skipped: no SIGN_CERT)"
-fi
+# Unsigned: scripts/installer.ps1 signs the Windows executables on Windows
+# (and updates their lines in SHA256SUMS).
 ( cd "$out" && find . -type f -name 'bromure-sidecar*' -o -type f -name 'BromureSidecar.exe' | sort | xargs sha256sum > SHA256SUMS )
 echo "built $version into $out/"

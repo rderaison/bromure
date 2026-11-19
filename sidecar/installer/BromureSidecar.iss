@@ -4,9 +4,13 @@
 ;   ISCC.exe /DAppVersion=1.2.3 /DArch=x64   installer\BromureSidecar.iss
 ;   ISCC.exe /DAppVersion=1.2.3 /DArch=arm64 installer\BromureSidecar.iss
 ; It expects the binaries in dist\windows-amd64\ (or windows-arm64), as
-; scripts/build.sh lays them out. Signing: add /DSign and define the sign
-; tool on the command line, e.g.
-;   /Ssigntool="signtool.exe sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p ... $f"
+; scripts/build.sh lays them out. Signing (installer.ps1 does it with the
+; ESIGNER_* variables set): add /DSign and define the sign tool on the
+; command line; it signs the setup and the uninstaller it embeds, e.g.
+;   /Ssigntool="java -jar jsign-7.6.jar --storetype ESIGNER --storepass env:JSIGN_STOREPASS
+;     --keypass env:ESIGNER_TOTP_SECRET --alias <credential id> --alg SHA-256
+;     --tsaurl http://ts.ssl.com --tsmode RFC3161 --replace $f"
+; (one line; the secrets stay in the environment, out of ISCC's log).
 ;
 ; Upgrades: the tray and the daemon are stopped before the files are
 ; replaced and started again after (silent updates included). The pane host

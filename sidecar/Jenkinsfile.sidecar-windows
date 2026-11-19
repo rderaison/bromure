@@ -14,10 +14,14 @@
 //   macosx-builder  Go (any 1.21+: go.mod's toolchain line fetches 1.27.3),
 //                   git, node (Release).
 //   windows-builder Windows 10/11 with PowerShell 7 and winget (Inno Setup
-//                   is installed per-user on first use); for SIGN, the
-//                   Windows SDK's signtool on the PATH.
+//                   is installed per-user on first use); for SIGN, a JDK
+//                   11+ (java on the PATH, or JAVA) and jsign 7.6
+//                   (JSIGN_JAR, default C:\Users\renaud\tools\jsign\jsign-7.6.jar),
+//                   plus the Windows SDK (its signtool verifies signatures;
+//                   Get-AuthenticodeSignature otherwise).
 // Credentials (only when used):
-//   WINDOWS_CODESIGN  a certificate credential (.pfx + password) — SIGN
+//   ESIGNER_USERNAME / ESIGNER_PASSWORD / ESIGNER_CREDENTIAL_ID /
+//   ESIGNER_TOTP_SECRET  secret-text credentials, SSL.com eSigner — SIGN
 //   DO_SPACES_KEY / DO_SPACES_SECRET — PUSH_RELEASE
 pipeline {
     agent none
@@ -26,7 +30,7 @@ pipeline {
         booleanParam(
             name: 'SIGN',
             defaultValue: false,
-            description: 'Authenticode-sign the executables, the installers and the uninstaller (WINDOWS_CODESIGN).'
+            description: 'Authenticode-sign the executables, the installers and the uninstaller (SSL.com eSigner via jsign; ESIGNER_* credentials).'
         )
         booleanParam(
             name: 'PUSH_RELEASE',
@@ -88,10 +92,15 @@ pipeline {
                 '''
                 script {
                     if (params.SIGN) {
-                        withCredentials([certificate(credentialsId: 'WINDOWS_CODESIGN',
-                                                     keystoreVariable: 'SIGN_CERT',
-                                                     passwordVariable: 'SIGN_PASS')]) {
-                            pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION'
+                        // installer.ps1 hands these to jsign through the
+                        // environment only (never argv or the log).
+                        withCredentials([
+                            string(credentialsId: 'ESIGNER_USERNAME',      variable: 'ESIGNER_USERNAME'),
+                            string(credentialsId: 'ESIGNER_PASSWORD',      variable: 'ESIGNER_PASSWORD'),
+                            string(credentialsId: 'ESIGNER_CREDENTIAL_ID', variable: 'ESIGNER_CREDENTIAL_ID'),
+                            string(credentialsId: 'ESIGNER_TOTP_SECRET',   variable: 'ESIGNER_TOTP_SECRET')
+                        ]) {
+                            pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION -RequireSign'
                         }
                     } else {
                         pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION'
