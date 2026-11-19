@@ -810,6 +810,13 @@ final class AgentSessionStore {
         save()
     }
 
+    /// Whether a workspace is gone for good (deleted, by any path), for the
+    /// sessions it leaves behind: they stay archived — no resume, no
+    /// unarchive brings back a session there is no machine to run — and
+    /// out of every peer's reach. The app sets it (the loaded workspaces
+    /// and their directories); never gone until then.
+    @ObservationIgnored var workspaceGone: (UUID) -> Bool = { _ in false }
+
     /// Archive the sessions of workspaces that are gone (deleted, by any
     /// path): "Paused" says a message carries on, but there's no machine
     /// left to wake, and peers shouldn't be offered them (the delegation

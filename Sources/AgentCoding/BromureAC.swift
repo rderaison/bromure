@@ -1543,9 +1543,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // deleted before this ran. Gone = not loaded AND no directory:
             // a load that came back short archives nothing.
             let loaded = Set(profiles.map(\.id))
-            agentSessionStore.archiveSessions(ofGoneWorkspaces: { [store] id in
-                !loaded.contains(id) && !store.hasDirectory(id)
-            })
+            let gone: (UUID) -> Bool = { [store] id in !loaded.contains(id) && !store.hasDirectory(id) }
+            // Asked again by resume, unarchive and the delegation tools: a
+            // session archived here stays so, and unreachable.
+            agentSessionStore.workspaceGone = gone
+            agentSessionStore.archiveSessions(ofGoneWorkspaces: gone)
         }
     }
 

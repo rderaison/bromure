@@ -3397,8 +3397,10 @@ final class CodingTaskEngine {
         // the new tab — the one task-resume opens under the same name —
         // instead of a stranger being minted, or the archived record
         // ending the new tab as "archived … is back".
+        // Never one whose workspace was deleted: that stays archived.
         if let sid = store.task(taskID)?.sessionID,
-           let s = delegate.agentSessionStore.session(sid), s.isArchived {
+           let s = delegate.agentSessionStore.session(sid), s.isArchived,
+           !delegate.agentSessionStore.workspaceGone(s.profileID) {
             delegate.agentSessionStore.unbind(sid)
             delegate.agentSessionStore.setArchived(sid, false)
         }

@@ -86,6 +86,13 @@ struct DelegationSessions {
         return local.session(profileID: profileID, windowIndex: windowIndex)
     }
 
+    /// One of ours whose workspace was deleted: as good as archived — no
+    /// peer reaches it, nothing an agent or the board sends wakes it.
+    /// (A host's sessions are its host's to judge.)
+    func isOrphan(_ s: AgentSession) -> Bool {
+        local.session(s.id) != nil && local.workspaceGone(s.profileID)
+    }
+
     func host(for profileID: UUID) -> AgentHostLink? {
         hosts.first { $0.agentHostID == profileID }
     }
@@ -351,7 +358,7 @@ final class DelegationEngine {
     func reachableSessions(from me: AgentSession) -> [AgentSession] {
         sessions.sessions.filter { s in
             s.id != me.id && !s.isArchived && !s.isDeleted && s.folderMissing != true
-                && canReach(from: me.profileID, to: s.profileID)
+                && !sessions.isOrphan(s) && canReach(from: me.profileID, to: s.profileID)
         }
     }
 
@@ -368,7 +375,9 @@ final class DelegationEngine {
         }
         if let nick, let other = sessions.sessions.first(where: { $0.nickname?.lowercased() == nick && !$0.isDeleted }) {
             if other.id == me.id { throw DelegationRefusal("@\(other.nickname ?? nick) is you.") }
-            if other.isArchived { throw DelegationRefusal("@\(other.nickname ?? nick) is archived — the user has to bring it back first.") }
+            if other.isArchived || sessions.isOrphan(other) {
+                throw DelegationRefusal("@\(other.nickname ?? nick) is archived — the user has to bring it back first.")
+            }
             throw DelegationRefusal("@\(other.nickname ?? nick) is in workspace “\(workspaceName(other.profileID))”, which isn't reachable from this workspace. "
                 + Self.howToReach(workspaceName(other.profileID), from: workspaceName(me.profileID)))
         }
@@ -614,6 +623,9 @@ final class DelegationEngine {
         guard let peer = sessions.session(peerID), !peer.isDeleted else {
             throw DelegationRefusal("That session no longer exists.")
         }
+        guard !sessions.isOrphan(peer) else {
+            throw DelegationRefusal("That session's workspace was deleted.")
+        }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DelegationRefusal("Nothing to ask.") }
         if let snippet = await scan(text) {
@@ -743,7 +755,9 @@ final class DelegationEngine {
     func requestFromRemote(parentSessionID: UUID, parent: RemoteParty, to key: String, text: String) async throws -> Delegation {
         let raw = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let nick = DelegationNotice.normalizeNickname(raw)?.lowercased()
-        let candidates = sessions.sessions.filter { !$0.isArchived && !$0.isDeleted && $0.folderMissing != true }
+        let candidates = sessions.sessions.filter {
+            !$0.isArchived && !$0.isDeleted && $0.folderMissing != true && !sessions.isOrphan($0)
+        }
         var peer = candidates.first { nick != nil && $0.nickname?.lowercased() == nick }
         if peer == nil, raw.count >= 6 {
             let hits = candidates.filter { $0.id.uuidString.lowercased().hasPrefix(raw.lowercased()) }
@@ -1075,7 +1089,7 @@ final class DelegationEngine {
         // A cancel is still recorded — it asks nothing of it.
         if kind != .cancel, kind != .note,
            let recipient = sessions.session(to == .parent ? d.parentSessionID : d.childSessionID),
-           recipient.isArchived || recipient.isDeleted {
+           recipient.isArchived || recipient.isDeleted || sessions.isOrphan(recipient) {
             let name = recipient.nickname.map { "@" + $0 } ?? "“\(recipient.title)”"
             throw DelegationRefusal("\(name) is \(recipient.isDeleted ? "deleted" : "archived") — the user has to bring it back first.")
         }
