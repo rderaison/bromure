@@ -7378,9 +7378,28 @@ public final class ProfileStore {
             # Hermes starts the new home's MCP servers as it appears: its
             # window now, not after the settings step (seconds later).
             printf 'w%s\\n' "$_w" > "$_h/bromure-window"
-            for _f in shell-hooks-allowlist.json .bromure-applied; do
-                if [ -e "$_r/$_f" ] && [ ! -e "$_h/$_f" ]; then cp -p "$_r/$_f" "$_h/$_f"; fi
+            # What the clone carries, copied where it's missing: Hermes's
+            # gateway reopens every home it ever served, a deleted one too,
+            # as a bare folder `profile create` then refuses. Plus what the
+            # settings step reads back (the MCP servers it set, the hooks
+            # it approved, the catalog its Nous default comes from).
+            for _f in config.yaml .env SOUL.md shell-hooks-allowlist.json \\
+                      .bromure-mcp.json cache/model_catalog.json; do
+                if [ -e "$_r/$_f" ] && [ ! -e "$_h/$_f" ]; then
+                    mkdir -p "$(dirname "$_h/$_f")" && cp -p "$_r/$_f" "$_h/$_f"
+                fi
             done
+            if [ -d "$_r/memories" ] && [ -z "$(ls -A "$_h/memories" 2>/dev/null)" ]; then
+                mkdir -p "$_h/memories" && cp -Rp "$_r/memories/." "$_h/memories/"
+            fi
+            # The user's settings are applied (their stamp is current), so
+            # the clone's are too: stamped as such -- no second settings
+            # step, a dozen seconds, in every new tab. Not when the user's
+            # step failed: the tab's own then tries.
+            if [ -s "$_r/.bromure-applied" ] \\
+                    && [ "$(cat "$_r/.bromure-applied")" = "$(HERMES_HOME= _bromure_hermes_stamp)" ]; then
+                HERMES_HOME="$_h" _bromure_hermes_stamp > "$_h/.bromure-applied"
+            fi
         fi
         _bromure_hermes_claim "$_h" || return 1
         printf '%s' "$_h"

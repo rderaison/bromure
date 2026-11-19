@@ -427,9 +427,11 @@ struct HermesAgentTests {
         let log = dir.appendingPathComponent("calls.log")
         for (name, body) in [
             ("hermes", "printf 'hermes %s\\n' \"$*\" >> '\(log.path)'\n"
-                + "[ \"$1 $2\" = \"profile create\" ] && mkdir -p \"$HOME/.hermes/profiles/$3\" "
-                + "&& cp \"$HOME/.hermes/config.yaml\" \"$HOME/.hermes/profiles/$3/\"\nexit 0"),
-            ("tmux", "[ \"$4\" = '%7' ] && echo 4 && exit 0\nexit 1"),
+                // Hermes refuses a profile whose folder is already there.
+                + "if [ \"$1 $2\" = \"profile create\" ]; then [ -e \"$HOME/.hermes/profiles/$3\" ] && exit 1; "
+                + "mkdir -p \"$HOME/.hermes/profiles/$3\" "
+                + "&& cp \"$HOME/.hermes/config.yaml\" \"$HOME/.hermes/profiles/$3/\"; fi\nexit 0"),
+            ("tmux", "[ \"$4\" = '%7' ] && echo 4 && exit 0\n[ \"$4\" = '%5' ] && echo 5 && exit 0\nexit 1"),
         ] {
             let url = bin.appendingPathComponent(name)
             try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -443,11 +445,14 @@ struct HermesAgentTests {
         _bromure_hermes_apply() { printf 'apply %s\\n' "${HERMES_HOME:-root}" >> '\(log.path)'; }
         _bromure_hermes_claim() { printf 'claim %s\\n' "$1" >> '\(log.path)'; [ "$1" != "$BUSY" ]; }
         _bromure_hermes_session_home() { [ "$1" = local-old ] && printf '%s' "$HOME/.hermes"; }
+        _bromure_hermes_stamp() { printf '%s' "${ROOTSTAMP:-stamp}"; [ -z "$HERMES_HOME" ] || printf ' %s' "${HERMES_HOME##*/}"; }
         """
-        func tabHome(_ sid: String, pane: String = "%7", busy: String = "") throws -> (Int32, String) {
+        func tabHome(_ sid: String, pane: String = "%7", busy: String = "", rootStamp: String = "stamp") throws -> (Int32, String) {
             try bash(fns + "\n" + stubs + "\n_bromure_hermes_tab_home '\(sid)' -u OPENAI_API_KEY",
-                     env: ["HOME": dir.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane, "BUSY": busy])
+                     env: ["HOME": dir.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane, "BUSY": busy,
+                           "ROOTSTAMP": rootStamp])
         }
+        func read(_ path: String) -> String? { try? String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8) }
         func calls() -> [String] {
             ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
@@ -457,14 +462,31 @@ struct HermesAgentTests {
         // Its window is written as soon as the home exists (Hermes starts
         // its MCP servers then).
         #expect((try? String(contentsOf: URL(fileURLWithPath: tab + "/bromure-window"), encoding: .utf8)) == "w4\n")
-        // The clone carries the applied settings' stamp: no second apply.
-        #expect((try? String(contentsOf: URL(fileURLWithPath: tab + "/.bromure-applied"), encoding: .utf8)) == "stamp\n")
+        // The user's settings are applied, so the clone's are: stamped for
+        // its own home, no second settings step.
+        #expect(read(tab + "/.bromure-applied") == "stamp tab-4")
         #expect(try tabHome("") == (0, tab))
         #expect(calls().filter { $0.hasPrefix("hermes profile create") }.count == 1, "cloned once")
         // A resume goes back to the home holding the session, if it's free...
         #expect(try tabHome("local-old") == (0, root.path))
         // ...else this tab's own (Hermes then says the session isn't there).
         #expect(try tabHome("local-old", busy: root.path) == (0, tab))
+        // A bare folder Hermes's gateway left (a deleted home it reopened):
+        // `profile create` refuses it, so the clone's files are copied in.
+        // The user's step didn't take (its stamp is stale): no stamp, the
+        // tab's own step runs.
+        let ghost = root.path + "/profiles/tab-5"
+        try FileManager.default.createDirectory(atPath: ghost + "/memories", withIntermediateDirectories: true)
+        try "".write(toFile: ghost + "/gateway.lock", atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("memories"), withIntermediateDirectories: true)
+        try "remember\n".write(to: root.appendingPathComponent("memories/MEMORY.md"), atomically: true, encoding: .utf8)
+        try "soul\n".write(to: root.appendingPathComponent("SOUL.md"), atomically: true, encoding: .utf8)
+        #expect(try tabHome("", pane: "%5", rootStamp: "changed") == (0, ghost))
+        #expect(read(ghost + "/config.yaml") == "model: {}\n")
+        #expect(read(ghost + "/SOUL.md") == "soul\n")
+        #expect(read(ghost + "/memories/MEMORY.md") == "remember\n")
+        #expect(read(ghost + "/bromure-window") == "w5\n")
+        #expect(read(ghost + "/.bromure-applied") == nil)
         // Not in tmux, or a pane tmux doesn't know: no home of its own.
         #expect(try tabHome("", pane: "").0 != 0)
         #expect(try tabHome("", pane: "%9").0 != 0)
