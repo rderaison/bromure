@@ -5736,11 +5736,17 @@ struct LocalModelsSettingsView: View {
                         Label(String(format: NSLocalizedString("Connected — %d model(s) available", comment: "custom engine probe ok"), n),
                               systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
-                    case .failed(let why):
-                        Label(why, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.red)
-                            .lineLimit(2)
+                    case .failed:
+                        EmptyView()
                     }
+                }
+                // Its own row, wrapped in full: the server's reason is the
+                // part that matters, and beside the button it was cut off.
+                if case .failed(let why) = engineProbe {
+                    Label(why, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
         } footer: {

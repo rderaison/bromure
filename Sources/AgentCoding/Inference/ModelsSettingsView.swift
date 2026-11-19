@@ -384,15 +384,20 @@ struct ModelsSettingsView: View {
                         .disabled(URL(string: resolved.localServer?.baseURL ?? "") == nil
                                   || localServerProbe == .probing)
                     switch localServerProbe {
-                    case .idle:    EmptyView()
+                    case .idle, .failed: EmptyView()
                     case .probing: ProgressView().controlSize(.small)
                     case .ok(let n):
                         Label(String(format: NSLocalizedString("%d model(s)", comment: "probe ok"), n),
                               systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
-                    case .failed(let why):
-                        Label(why, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.red).lineLimit(2)
                     }
+                }
+                // Its own row, wrapped in full: the server's reason is the
+                // part that matters, and beside the button it was cut off.
+                if case .failed(let why) = localServerProbe {
+                    Label(why, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
         }
