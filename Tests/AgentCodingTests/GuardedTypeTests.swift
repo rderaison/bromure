@@ -185,6 +185,73 @@ struct GuardedTypeTests {
         #expect(pane(0).contains("QH1-Q2: hi"))
     }
 
+    /// A stand-in for Hermes's input: bracketed paste on, and the first
+    /// paste's end mark lost (as Hermes sees it when the mark goes missing):
+    /// everything after stays pasted, Enter included, until an end mark
+    /// comes. Its box and each submitted line are on screen.
+    private static let stuckPasteAgent = #"""
+    import os, sys, tty
+    tty.setraw(0)
+    out = sys.stdout
+    out.write("\x1b[?2004h> "); out.flush()
+    acc, box, paste, lost = "", "", None, False
+    def show(): out.write("\r\x1b[K> " + box); out.flush()
+    while True:
+        acc += os.read(0, 4096).decode("utf-8", "replace")
+        while acc:
+            if paste is not None:
+                i = acc.find("\x1b[201~")
+                if i < 0:
+                    paste += acc; acc = ""
+                elif not lost:
+                    lost = True; paste += acc[:i]; acc = acc[i + 6:]
+                else:
+                    box += paste + acc[:i]; acc = acc[i + 6:]; paste = None; show()
+            elif acc.startswith("\x1b[200~"):
+                paste, acc = "", acc[6:]
+            elif acc.startswith("\x1b"):
+                if len(acc) < 6: break
+                acc = acc[1:]
+            elif acc[0] == "\r":
+                out.write("\r\nSUBMIT:" + box + "\r\n"); box = ""; acc = acc[1:]; show()
+            else:
+                box += acc[0]; acc = acc[1:]; show()
+    """#
+
+    @Test("Live tmux: a paste Hermes never saw end gets its end mark again, then its Enter submits it")
+    func hermesStuckPaste() throws {
+        guard let tmux = Self.tmuxPath() else { return }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hp-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Named for the agent (its path is what the guard sees: python
+        // re-execs, so `exec -a` would not show).
+        for name in ["hermes", "kimi"] {
+            try Self.stuckPasteAgent.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let bin = (tmux as NSString).deletingLastPathComponent
+        let env = ["TMUX_TMPDIR": dir.path, "PATH": "\(bin):/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
+        defer { Self.sh("tmux kill-server", env: env) }
+        // Window 0 is Hermes; window 1 the same input under another agent's name.
+        Self.sh("tmux new-session -d -s bromure -x 100 -y 20 \"python3 \(dir.path)/hermes\" "
+                + "&& tmux new-window -t bromure:1 \"python3 \(dir.path)/kimi\"", env: env)
+        Thread.sleep(forTimeInterval: 0.8)
+        func pane(_ i: Int) -> String { Self.sh("tmux capture-pane -p -t bromure:\(i)", env: env) }
+
+        let out = Self.sh(PaneTypeGuard.typeCommand(target: .index(0), text: "what is 2+2"), env: env)
+        #expect(PaneTypeGuard.typed(in: out), Comment(rawValue: out))
+        #expect(pane(0).contains("SUBMIT:what is 2+2"))
+        // Its end mark goes once, for the stuck paste only: the next one
+        // shows at once, and gets none (Hermes would type a stray one).
+        let again = Self.sh(PaneTypeGuard.typeCommand(target: .index(0), text: "and 3+3"), env: env)
+        #expect(PaneTypeGuard.typed(in: again))
+        #expect(pane(0).contains("SUBMIT:and 3+3"))
+        // Another agent gets no end mark of Bromure's: its paste stays stuck.
+        let other = Self.sh(PaneTypeGuard.typeCommand(target: .index(1), text: "hello"), env: env)
+        #expect(!PaneTypeGuard.typed(in: other))
+        #expect(!pane(1).contains("SUBMIT:"))
+    }
+
     // MARK: P2 — a message arrives whole: one paste, any size, CRLF or not
 
     @Test("Large text is staged in pieces under the argv cap; the type pastes it from the file")
