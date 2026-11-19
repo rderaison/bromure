@@ -99,6 +99,52 @@ struct TrustedUpstreamCertificateTests {
         #expect(!PinnedUpstreamCertificate.matches(t, fingerprints: [], host: "internal.example"))
     }
 
+    /// A protection space carrying a given server trust (the system's own
+    /// only gets one from a real handshake).
+    private final class TrustSpace: URLProtectionSpace, @unchecked Sendable {
+        let trust: SecTrust
+        init(host: String, port: Int, trust: SecTrust) {
+            self.trust = trust
+            super.init(host: host, port: port, protocol: NSURLProtectionSpaceHTTPS,
+                       realm: nil, authenticationMethod: NSURLAuthenticationMethodServerTrust)
+        }
+        required init?(coder: NSCoder) { nil }
+        override var serverTrust: SecTrust? { trust }
+    }
+    private final class NoSender: NSObject, URLAuthenticationChallengeSender {
+        func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+        func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+        func cancel(_ challenge: URLAuthenticationChallenge) {}
+    }
+
+    /// A redirect the session follows is challenged on the same delegate:
+    /// the pin is the original endpoint's only, even when the redirected
+    /// server presents the very same certificate.
+    @Test("A pin trusts only its own host and port; a redirect elsewhere gets the system's handling")
+    func pinScopedToOriginalEndpoint() throws {
+        let der = try #require(try Self.selfSignedDER())
+        let cert = try #require(SecCertificateCreateWithData(nil, der as CFData))
+        var trust: SecTrust?
+        _ = SecTrustCreateWithCertificates(cert, SecPolicyCreateBasicX509(), &trust)
+        let t = try #require(trust)
+        let delegate = ClientCertChallengeDelegate(
+            identityRegistry: ClientIdentityRegistry(), caRegistry: ClusterCATrustRegistry(),
+            consent: ConsentBroker(), profileID: UUID(), host: "internal.example", port: 443,
+            pinnedFingerprints: [TrustedUpstreamCertificate.fingerprint(ofDER: der)])
+        func disposition(_ host: String, _ port: Int) -> URLSession.AuthChallengeDisposition? {
+            let challenge = URLAuthenticationChallenge(
+                protectionSpace: TrustSpace(host: host, port: port, trust: t), proposedCredential: nil,
+                previousFailureCount: 0, failureResponse: nil, error: nil, sender: NoSender())
+            var got: URLSession.AuthChallengeDisposition?
+            delegate.urlSession(URLSession.shared, didReceive: challenge) { d, _ in got = d }
+            return got
+        }
+        #expect(disposition("internal.example", 443) == .useCredential)
+        #expect(disposition("INTERNAL.example.", 443) == .useCredential)
+        #expect(disposition("elsewhere.example", 443) == .performDefaultHandling)
+        #expect(disposition("internal.example", 8443) == .performDefaultHandling)
+    }
+
     @Test("A trust failure tells the agent the user can pin the certificate, and names its fingerprint")
     func pinHintInUpstreamError() throws {
         let plain = describeUpstreamError(NSError(domain: NSURLErrorDomain,

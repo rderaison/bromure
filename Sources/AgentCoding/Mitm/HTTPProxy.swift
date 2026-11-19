@@ -5937,7 +5937,7 @@ private final class RefusedUpstreamProtocol: URLProtocol {
 /// evaluation against it instead of the system trust store. The CA
 /// override is what lets us reach private k8s API servers whose cert
 /// chains don't appear in macOS's roots.
-private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegate {
+final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegate {
     let identityRegistry: ClientIdentityRegistry
     let caRegistry: ClusterCATrustRegistry
     let consent: ConsentBroker
@@ -5981,6 +5981,17 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
         completionHandler(request)
     }
 
+    /// Whether a challenge is for the endpoint this session was made for
+    /// (host compared case-, bracket- and trailing-dot-insensitively).
+    static func isOriginalEndpoint(_ space: URLProtectionSpace, host: String, port: Int) -> Bool {
+        func norm(_ h: String) -> String {
+            var h = h.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            if h.hasSuffix(".") { h.removeLast() }
+            return h
+        }
+        return norm(space.host) == norm(host) && space.port == port
+    }
+
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
@@ -6001,9 +6012,18 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
                                                   URLCredential?) -> Void) {
         let method = challenge.protectionSpace.authenticationMethod
+        // Everything this session holds for `host:port` — the user's
+        // certificate pins, its cluster CA, its client identity — is that
+        // endpoint's alone. A redirect this session followed elsewhere
+        // (`willPerformHTTPRedirection`) is challenged here too: it gets
+        // the system's own handling, never the original's trust or
+        // identity (Finding: "Redirected HTTPS requests reuse the original
+        // host's certificate pin").
+        let original = Self.isOriginalEndpoint(challenge.protectionSpace, host: host, port: port)
         switch method {
         case NSURLAuthenticationMethodClientCertificate:
-            guard let entry = identityRegistry.entry(for: host, port: port, profileID: profileID) else {
+            guard original,
+                  let entry = identityRegistry.entry(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
@@ -6058,6 +6078,10 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
             // User-pinned certificate: the leaf is exactly the one the user
             // vouched for in the host's settings (the guest can't add a pin).
             // No match falls through to the cluster CA / system trust below.
+            guard original else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
             if let trust = challenge.protectionSpace.serverTrust,
                PinnedUpstreamCertificate.matches(trust, fingerprints: pinnedFingerprints, host: host) {
                 completionHandler(.useCredential, URLCredential(trust: trust))
