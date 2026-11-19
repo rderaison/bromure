@@ -7433,6 +7433,27 @@ public final class ProfileStore {
             continue
     BROMURE_HERMES_SESSION_HOME
     }
+    #    Hold home $1 for this tab window until its chat ends: an exclusive
+    #    flock(2) on $1/.bromure-lease, kept on the shell's fd 197 (never
+    #    passed on to Hermes; `hermes()` lets go once its chat exits, the
+    #    kernel when the tab's shell dies), naming the window that holds
+    #    it. Another pane of the holder's window may share the home, as
+    #    the claim allows; any other window is refused.
+    _bromure_hermes_lease() {
+        local _w _o
+        [ -n "$1" ] || return 1
+        _w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+        case "$_w" in ''|*[!0-9]*) return 1 ;; esac
+        exec 197<>"$1/.bromure-lease" || return 1
+        if python3 -c 'import fcntl; fcntl.flock(197, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
+            printf 'w%s\\n' "$_w" > "$1/.bromure-lease"
+            _lease=1
+            return 0
+        fi
+        exec 197>&-
+        _o=$(head -c 16 "$1/.bromure-lease" 2>/dev/null)
+        [ "$_o" = "w$_w" ]
+    }
     #    Make home $1 this tab window's: fails when a chat from another
     #    window is using it (one home, one window: its delegation tools
     #    speak for the window the home names).
@@ -7784,9 +7805,22 @@ public final class ProfileStore {
             _claimed=1
         fi
         _bromure_hermes_sync_auth
+        # A sign-in machine only runs `hermes auth add nous`: the workspace
+        # settings (provider, MCP servers, hooks) are a dozen `hermes config`
+        # runs for nothing there, ahead of the sign-in page.
+        [ "${BROMURE_AC_REGISTER:-}" = 1 ] || _bromure_hermes_apply "${_u[@]}"
         # The window this home's chat runs in, for its delegation tools
-        # (Hermes's MCP servers never see the tab's tmux pane).
+        # (Hermes's MCP servers never see the tab's tmux pane) -- under the
+        # home's lease, held until the chat ends: the claim above only sees
+        # chats already running, and two tabs resuming one session at once
+        # both passed it. After the settings step, so nothing it starts
+        # inherits the lease.
+        local _lease=""
         if [ -n "$_claimed" ] && [ -n "${HERMES_HOME:-}" ]; then
+            if ! _bromure_hermes_lease "$HERMES_HOME"; then
+                echo "[bromure-ac] the Hermes home $HERMES_HOME is being opened by another tab's Hermes; quit it there first." >&2
+                return 1
+            fi
             local _win
             _win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
             case "$_win" in
@@ -7795,10 +7829,6 @@ public final class ProfileStore {
                        && mv -f "$HERMES_HOME/bromure-window.tmp" "$HERMES_HOME/bromure-window" ;;
             esac
         fi
-        # A sign-in machine only runs `hermes auth add nous`: the workspace
-        # settings (provider, MCP servers, hooks) are a dozen `hermes config`
-        # runs for nothing there, ahead of the sign-in page.
-        [ "${BROMURE_AC_REGISTER:-}" = 1 ] || _bromure_hermes_apply "${_u[@]}"
         # A resumed session runs on the model it was stored with, not
         # config.yaml's, and Hermes refuses --provider / -m on a resume. A
         # session begun on another provider (a local model, before the
@@ -7812,14 +7842,23 @@ public final class ProfileStore {
         local _rm
         if [ -n "${TMUX_PANE:-}" ] && [ -t 0 ] \
                 && _rm=$(_bromure_hermes_resume_model "$@"); then
-            ( _bromure_hermes_type_model "$TMUX_PANE" "$_rm" </dev/null >/dev/null 2>&1 & )
+            ( exec 197>&-; _bromure_hermes_type_model "$TMUX_PANE" "$_rm" </dev/null >/dev/null 2>&1 & )
         fi
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
+        # Hermes never holds the lease (fd 197): the gateway it may start
+        # outlives the chat and would keep the home leased for good.
+        local _rc
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
-            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@" 197>&-
         else
-            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@"
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@" 197>&-
         fi
+        _rc=$?
+        if [ -n "$_lease" ]; then
+            : > "$HERMES_HOME/.bromure-lease"
+            exec 197>&-
+        fi
+        return $_rc
     }
 
     #  • The Nous Portal sign-in (RegistrationLaunch.nousLoginCommand). The

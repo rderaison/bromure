@@ -545,7 +545,8 @@ struct HermesAgentTests {
         let dir = try tempDir()
         let bin = dir.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        for (name, body) in [("tmux", "echo 4"), ("hermes", "echo ran \"$@\" > \"$RAN\"")] {
+        for (name, body) in [("tmux", "echo 4"),
+                             ("hermes", "echo ran \"$@\" > \"$RAN\"; [ -e /dev/fd/197 ] && echo leased >> \"$RAN\"; true")] {
             let f = bin.appendingPathComponent(name)
             try "#!/bin/sh\n\(body)\n".write(to: f, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
@@ -562,7 +563,7 @@ struct HermesAgentTests {
         _bromure_hermes_tab_home() { echo "$TABHOME"; }
         _bromure_hermes_claim() { echo "$1" >> "$CLAIMS"; [ "$CLAIM" = ok ]; }
         """
-        let fns = try bashFunctions(["_bromure_hermes_is_chat", "_bromure_hermes_resume_id"])
+        let fns = try bashFunctions(["_bromure_hermes_is_chat", "_bromure_hermes_resume_id", "_bromure_hermes_lease"])
         let home = dir.appendingPathComponent("chosen")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let window = home.appendingPathComponent("bromure-window")
@@ -596,7 +597,47 @@ struct HermesAgentTests {
         // This tab claims it: told its window, then Hermes runs.
         #expect(try run("", claim: "ok") == 0)
         #expect(written() == "w4\n")
-        #expect(fm.fileExists(atPath: ran.path))
+        #expect((try? String(contentsOf: ran, encoding: .utf8)) == "ran\n", "Hermes never inherits the lease")
+        #expect((try? String(contentsOf: home.appendingPathComponent(".bromure-lease"), encoding: .utf8)) == "",
+                "let go once the chat ends")
+    }
+
+    /// The claim only sees chats already running: the lease is what keeps
+    /// two tabs opening one home at once (two resumes of one session) apart.
+    @Test("a home's lease: one window holds it until it lets go; another pane of that window may share it")
+    func leaseHome() throws {
+        let dir = try tempDir()
+        let bin = dir.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let tmux = bin.appendingPathComponent("tmux")
+        try "#!/bin/sh\necho \"$WIN\"\n".write(to: tmux, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmux.path)
+        let home = dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let fns = try bashFunctions(["_bromure_hermes_lease"])
+        // Window 1 takes it; window 5 (its own shell, as another tab is) is
+        // refused while it's held, and gets it once window 1 lets go.
+        let script = fns + #"""
+
+        other() { WIN=$1 bash -c "$(declare -f _bromure_hermes_lease)"'
+            _lease=""; _bromure_hermes_lease "$0" && echo "w$WIN:${_lease:-shared}" || echo "w$WIN:refused"' "$H" 197>&-; }
+        _lease=""
+        WIN=1 _bromure_hermes_lease "$H" && echo "w1:${_lease}"
+        cat "$H/.bromure-lease"
+        other 5; other 1
+        exec 197>&-
+        other 5
+        _lease=""; WIN=1 _bromure_hermes_lease "" || echo "nohome:refused"
+        """#
+        let (rc, out) = try bash(script, env: ["PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": "%1", "H": home.path])
+        #expect(rc == 0)
+        #expect(out == "w1:1\nw1\nw5:refused\nw1:shared\nw5:1\nnohome:refused\n")
+        // The wrapper takes it before writing the window, and never hands it to Hermes.
+        let rc2 = try renderBashrc()
+        let lease = try #require(rc2.range(of: "_bromure_hermes_lease \"$HERMES_HOME\""))
+        let write = try #require(rc2.range(of: "> \"$HERMES_HOME/bromure-window.tmp\""))
+        #expect(lease.lowerBound < write.lowerBound)
+        #expect(rc2.contains("BROMURE_HERMES_API_KEY hermes \"$@\" 197>&-"))
     }
 
     /// The delegation shim in Hermes mode, run against a fake host: it names
