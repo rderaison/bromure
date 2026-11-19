@@ -490,6 +490,7 @@ struct HermesAgentTests {
             ("hermes", "printf 'hermes %s\\n' \"$*\" >> '\(log.path)'\n"
                 // Hermes refuses a profile whose folder is already there.
                 + "if [ \"$1 $2\" = \"profile create\" ]; then [ -e \"$HOME/.hermes/profiles/$3\" ] && exit 1; "
+                + "[ -n \"$FAILCREATE\" ] && exit 1; "
                 + "mkdir -p \"$HOME/.hermes/profiles/$3\" "
                 + "&& cp \"$HOME/.hermes/config.yaml\" \"$HOME/.hermes/profiles/$3/\"; fi\nexit 0"),
             ("tmux", "[ \"$4\" = '%7' ] && echo 4 && exit 0\n[ \"$4\" = '%5' ] && echo 5 && exit 0\nexit 1"),
@@ -508,10 +509,11 @@ struct HermesAgentTests {
         _bromure_hermes_session_home() { [ "$1" = local-old ] && printf '%s' "$HOME/.hermes"; }
         _bromure_hermes_stamp() { printf '%s' "${ROOTSTAMP:-stamp}"; [ -z "$HERMES_HOME" ] || printf ' %s' "${HERMES_HOME##*/}"; }
         """
-        func tabHome(_ sid: String, pane: String = "%7", busy: String = "", rootStamp: String = "stamp") throws -> (Int32, String) {
+        func tabHome(_ sid: String, pane: String = "%7", busy: String = "", rootStamp: String = "stamp",
+                     failCreate: Bool = false) throws -> (Int32, String) {
             try bash(fns + "\n" + stubs + "\n_bromure_hermes_tab_home '\(sid)' -u OPENAI_API_KEY",
                      env: ["HOME": dir.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane, "BUSY": busy,
-                           "ROOTSTAMP": rootStamp])
+                           "ROOTSTAMP": rootStamp, "FAILCREATE": failCreate ? "1" : ""])
         }
         func read(_ path: String) -> String? { try? String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8) }
         func calls() -> [String] {
@@ -532,22 +534,46 @@ struct HermesAgentTests {
         #expect(try tabHome("local-old") == (0, root.path))
         // ...else this tab's own (Hermes then says the session isn't there).
         #expect(try tabHome("local-old", busy: root.path) == (0, tab))
-        // A bare folder Hermes's gateway left (a deleted home it reopened):
-        // `profile create` refuses it, so the clone's files are copied in.
-        // The user's step didn't take (its stamp is stale): no stamp, the
-        // tab's own step runs.
-        let ghost = root.path + "/profiles/tab-5"
+        // A bare folder Hermes's gateway left (a deleted home it reopened,
+        // with a lock and a stock SOUL.md): `profile create` refuses it, so
+        // it's moved aside (hidden, kept) and Hermes's own clone -- the one
+        // that strips the user's messaging channels -- makes the profile.
+        // The user's step didn't take (its stamp is stale): no stamp.
+        let profiles = root.path + "/profiles"
+        let ghost = profiles + "/tab-5"
         try FileManager.default.createDirectory(atPath: ghost + "/memories", withIntermediateDirectories: true)
         try "".write(toFile: ghost + "/gateway.lock", atomically: true, encoding: .utf8)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("memories"), withIntermediateDirectories: true)
-        try "remember\n".write(to: root.appendingPathComponent("memories/MEMORY.md"), atomically: true, encoding: .utf8)
-        try "soul\n".write(to: root.appendingPathComponent("SOUL.md"), atomically: true, encoding: .utf8)
+        try "stock\n".write(toFile: ghost + "/SOUL.md", atomically: true, encoding: .utf8)
+        // The user's own bot, in their .env and config: never copied by hand.
+        try "TELEGRAM_BOT_TOKEN=123:secret\n".write(to: root.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
         #expect(try tabHome("", pane: "%5", rootStamp: "changed") == (0, ghost))
-        #expect(read(ghost + "/config.yaml") == "model: {}\n")
-        #expect(read(ghost + "/SOUL.md") == "soul\n")
-        #expect(read(ghost + "/memories/MEMORY.md") == "remember\n")
+        #expect(read(ghost + "/config.yaml") == "model: {}\n", "Hermes's clone")
+        #expect(read(ghost + "/.env") == nil)
+        #expect(read(ghost + "/gateway.lock") == nil && read(ghost + "/SOUL.md") == nil)
+        let aside = try FileManager.default.contentsOfDirectory(atPath: profiles).filter { $0.hasPrefix(".bromure-stale-tab-5-") }
+        #expect(aside.count == 1)
+        #expect(read(profiles + "/" + (aside.first ?? "") + "/gateway.lock") == "")
         #expect(read(ghost + "/bromure-window") == "w5\n")
         #expect(read(ghost + "/.bromure-applied") == nil)
+        // Hermes can't clone (and the user's settings ARE applied): a bare
+        // home, nothing of the user's copied in, and never stamped -- the
+        // tab's own settings step runs on it.
+        try FileManager.default.removeItem(atPath: ghost)
+        let failed = try tabHome("", pane: "%5", failCreate: true)
+        #expect(failed == (0, ghost))
+        #expect(read(ghost + "/config.yaml") == nil && read(ghost + "/.env") == nil)
+        #expect(read(ghost + "/.bromure-applied") == nil)
+        #expect(read(ghost + "/bromure-window") == "w5\n")
+        // A folder holding anything of the user's (their conversations) is
+        // never moved: Hermes's refusal stands, the home stays as it is.
+        try FileManager.default.removeItem(atPath: ghost)
+        try FileManager.default.createDirectory(atPath: ghost, withIntermediateDirectories: true)
+        try "db".write(toFile: ghost + "/state.db", atomically: true, encoding: .utf8)
+        #expect(try tabHome("", pane: "%5") == (0, ghost))
+        #expect(read(ghost + "/state.db") == "db")
+        #expect(read(ghost + "/config.yaml") == nil && read(ghost + "/.env") == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: profiles)
+            .filter { $0.hasPrefix(".bromure-stale-tab-5-") }.count == 1)
         // Not in tmux, or a pane tmux doesn't know: no home of its own.
         #expect(try tabHome("", pane: "").0 != 0)
         #expect(try tabHome("", pane: "%9").0 != 0)

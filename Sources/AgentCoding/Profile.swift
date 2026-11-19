@@ -7430,7 +7430,7 @@ public final class ProfileStore {
     #    holds it, when no other window's chat is using that home. Prints
     #    the home; fails outside tmux.
     _bromure_hermes_tab_home() {
-        local _sid="$1" _w _p _h _r="$HOME/.hermes" _f
+        local _sid="$1" _w _p _h _r="$HOME/.hermes" _f _cloned=""
         shift
         [ -n "${TMUX_PANE:-}" ] || return 1
         if [ -n "$_sid" ] && _h=$(_bromure_hermes_session_home "$_sid") && [ -n "$_h" ] \\
@@ -7446,30 +7446,43 @@ public final class ProfileStore {
             # The user's own settings applied first, so the clone has them
             # (and, with the same files, the same stamp: no second apply).
             _bromure_hermes_apply "$@" >/dev/null 2>&1
-            command env "$@" -u BROMURE_HERMES_API_KEY hermes profile create "$_p" --clone >/dev/null 2>&1 \\
-                || mkdir -p "$_h"
+            # A bare folder in its place -- Hermes's gateway reopens every
+            # home it ever served, a deleted one too, with a log, a lock, a
+            # stock SOUL.md -- is one `profile create` refuses. Moved aside
+            # (hidden: no gateway serves a dot-name; kept: Hermes never
+            # deletes one) so Hermes's own clone makes the profile. Never
+            # one with anything of the user's: its config, keys, login or
+            # conversations.
+            if [ -d "$_h" ] && [ ! -e "$_h/.env" ] && [ ! -e "$_h/auth.json" ] && [ ! -e "$_h/state.db" ]; then
+                mv "$_h" "$_r/profiles/.bromure-stale-$_p-$(date +%s)-$$" 2>/dev/null
+            fi
+            if command env "$@" -u BROMURE_HERMES_API_KEY hermes profile create "$_p" --clone >/dev/null 2>&1 \\
+                    && [ -e "$_h/config.yaml" ]; then
+                _cloned=1
+            else
+                mkdir -p "$_h"
+            fi
             # Hermes starts the new home's MCP servers as it appears: its
             # window now, not after the settings step (seconds later).
             printf 'w%s\\n' "$_w" > "$_h/bromure-window"
-            # What the clone carries, copied where it's missing: Hermes's
-            # gateway reopens every home it ever served, a deleted one too,
-            # as a bare folder `profile create` then refuses. Plus what the
-            # settings step reads back (the MCP servers it set, the hooks
-            # it approved, the catalog its Nous default comes from).
-            for _f in config.yaml .env SOUL.md shell-hooks-allowlist.json \\
-                      .bromure-mcp.json cache/model_catalog.json; do
+            # Bromure's own files the settings step reads back (the MCP
+            # servers it set, the hooks it approved, the catalog its Nous
+            # default comes from). Never the user's config.yaml or .env by
+            # hand: Hermes's clone strips their messaging channels (bot
+            # tokens, allowlists, platform sections) -- a raw copy would hand
+            # this tab's gateway the user's bots. A home Hermes didn't clone
+            # gets the settings step instead.
+            for _f in shell-hooks-allowlist.json .bromure-mcp.json cache/model_catalog.json; do
                 if [ -e "$_r/$_f" ] && [ ! -e "$_h/$_f" ]; then
                     mkdir -p "$(dirname "$_h/$_f")" && cp -p "$_r/$_f" "$_h/$_f"
                 fi
             done
-            if [ -d "$_r/memories" ] && [ -z "$(ls -A "$_h/memories" 2>/dev/null)" ]; then
-                mkdir -p "$_h/memories" && cp -Rp "$_r/memories/." "$_h/memories/"
-            fi
-            # The user's settings are applied (their stamp is current), so
-            # the clone's are too: stamped as such -- no second settings
-            # step, a dozen seconds, in every new tab. Not when the user's
-            # step failed: the tab's own then tries.
-            if [ -s "$_r/.bromure-applied" ] \\
+            # Hermes cloned the user's settings and they're applied (their
+            # stamp is current): so are the clone's -- stamped as such, no
+            # second settings step (a dozen seconds) in every new tab. Not
+            # when the user's step failed, nor for a home Hermes didn't
+            # clone: the tab's own step then runs.
+            if [ -n "$_cloned" ] && [ -s "$_r/.bromure-applied" ] \\
                     && [ "$(cat "$_r/.bromure-applied")" = "$(HERMES_HOME= _bromure_hermes_stamp)" ]; then
                 HERMES_HOME="$_h" _bromure_hermes_stamp > "$_h/.bromure-applied"
             fi
