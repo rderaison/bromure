@@ -7173,7 +7173,7 @@ public final class ProfileStore {
         command env "$@" -u BROMURE_HERMES_API_KEY \\
             BROMURE_HERMES_NOUS_DEFAULT="$(_bromure_hermes_catalog_default)" \\
             python3 - <<'BROMURE_HERMES_APPLY' || return 0
-    import datetime, json, os, re, subprocess, sys
+    import datetime, json, os, re, subprocess, sys, tempfile, textwrap
     home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     os.makedirs(home, exist_ok=True)
     meta = os.environ.get("BROMURE_META_DIR") or "/mnt/bromure-meta"
@@ -7192,14 +7192,87 @@ public final class ProfileStore {
     except Exception:
         before = set()
     ok = True
+    # Every `hermes config` run is a whole Hermes start (~1 s; an apply
+    # makes a dozen or more): they're queued, then run in ONE Hermes
+    # process -- Hermes's own `config_command`, as `hermes config` runs
+    # it, on the interpreter and imports its launcher sets up (the command
+    # it prints for --print-runtime-command, its last step swapped for
+    # this worker). A `hermes config` run each again if that can't start.
+    pending = []
+    BATCH_MARK = "@@BROMURE-HERMES-BATCH@@"
+    WORKER = '''
+    import argparse, contextlib, io, json, sys
+    from hermes_cli.config import config_command
+    out = []
+    for op in json.load(sys.stdin):
+        flags = op[2:] if op[0] == "get" else []
+        ns = argparse.Namespace(config_command=op[0], key=op[1], force=False,
+                                value=op[2] if op[0] == "set" else None,
+                                json="--json" in flags, raw="--raw" in flags)
+        o, e, rc = io.StringIO(), io.StringIO(), 0
+        try:
+            with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+                config_command(ns)
+        except SystemExit as x:
+            rc = x.code if isinstance(x.code, int) else (0 if x.code is None else 1)
+        except RuntimeError as x:
+            e.write("Error: %s" % x)
+            rc = 1
+        except Exception as x:
+            e.write("%s: %s" % (type(x).__name__, x))
+            rc = 1
+        out.append([rc, o.getvalue(), e.getvalue()])
+    sys.__stdout__.write(BATCH_MARK + json.dumps(out) + chr(10))
+    sys.__stdout__.flush()
+    '''.replace("BATCH_MARK", repr(BATCH_MARK))
+    def in_hermes(ops):
+        worker = None
+        try:
+            r = subprocess.run(["hermes", "--print-runtime-command", "config", "get", "model"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
+            argv = json.loads(r.stdout)
+            i = argv.index("-c")
+            tail = "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+            if not argv[i + 1].endswith(tail):
+                return None
+            fd, worker = tempfile.mkstemp(prefix="bromure-hermes-", suffix=".py")
+            with os.fdopen(fd, "w") as f:
+                f.write(textwrap.dedent(WORKER))
+            argv = argv[:i] + ["-c", argv[i + 1][:-len(tail)] + "runpy.run_path(sys.argv[1], run_name='__main__')", worker]
+            r = subprocess.run(argv, input=json.dumps(ops), stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, timeout=300)
+            if BATCH_MARK not in r.stdout:
+                return None
+            res = json.loads(r.stdout.rsplit(BATCH_MARK, 1)[1].splitlines()[0])
+            return res if isinstance(res, list) and len(res) == len(ops) else None
+        except Exception:
+            return None
+        finally:
+            if worker:
+                try:
+                    os.unlink(worker)
+                except OSError:
+                    pass
+    def one(args):
+        r = subprocess.run(["hermes", "config", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return [r.returncode, r.stdout, r.stderr]
     def run(*args):
+        pending.append([str(a) for a in args])
+    def flush(*get):
+        # The queued runs (and a `config get`, last), in order; their results.
         global ok
-        r = subprocess.run(["hermes", "config", *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        # Unsetting a key that isn't there is Hermes's "Config key not
-        # set" (exit 1): already the state wanted.
-        if r.returncode != 0 and not (args[0] == "unset" and "not set" in r.stderr):
-            ok = False
-            sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), r.stderr.strip()[-300:]))
+        ops = pending[:] + ([list(get)] if get else [])
+        del pending[:]
+        if not ops:
+            return []
+        res = in_hermes(ops) or [one(o) for o in ops]
+        for args, (rc, _, err) in zip(ops, res):
+            # Unsetting a key that isn't there is Hermes's "Config key not
+            # set" (exit 1): already the state wanted.
+            if args[0] != "get" and rc != 0 and not (args[0] == "unset" and "not set" in err):
+                ok = False
+                sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), err.strip()[-300:]))
+        return res
     # A Bromure stand-in for a key Hermes must not see, left in its .env
     # (which overrides the environment): dropped. A key the user put
     # there themselves is theirs.
@@ -7290,10 +7363,9 @@ public final class ProfileStore {
     hooks = settings.get("hooks") or {}
     hook, events = hooks.get("command") or "", hooks.get("events") or []
     if hook:
-        r = subprocess.run(["hermes", "config", "get", "hooks", "--json", "--raw"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        rc, got, _ = flush("get", "hooks", "--json", "--raw")[-1]
         try:
-            current = json.loads(r.stdout) if r.returncode == 0 else {}
+            current = json.loads(got) if rc == 0 else {}
         except ValueError:
             current = {}
         if not isinstance(current, dict):
@@ -7327,6 +7399,7 @@ public final class ProfileStore {
                 json.dump(allow, f, indent=2)
             os.chmod(tmp, 0o600)
             os.replace(tmp, allow_path)
+    flush()
     sys.exit(0 if ok else 3)
     BROMURE_HERMES_APPLY
         # Stamped with config.yaml and .env as the apply left them.

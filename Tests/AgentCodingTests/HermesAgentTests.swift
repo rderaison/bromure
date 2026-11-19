@@ -69,6 +69,7 @@ struct HermesAgentTests {
                           home: URL, failing: Bool = false, hidden: [String] = [],
                           hooks: Any? = nil, env extra: [String: String] = [:],
                           meta metaOut: ((URL) -> Void)? = nil,
+                          batch: Bool = true, starts: ((Int) -> Void)? = nil,
                           status expected: Int32 = 0) throws -> [String] {
         let rc = try renderBashrc()
         let lines = rc.components(separatedBy: "\n")
@@ -92,11 +93,48 @@ struct HermesAgentTests {
         let bin = dir.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let log = dir.appendingPathComponent("calls.log")
+        let startsLog = dir.appendingPathComponent("starts.log")
         let fake = bin.appendingPathComponent("hermes")
+        // Hermes in one process: its launcher's runtime command, onto a
+        // stand-in `hermes_cli.config` that logs each call as the CLI does.
+        let pkg = dir.appendingPathComponent("fakehermes/hermes_cli")
+        try FileManager.default.createDirectory(at: pkg, withIntermediateDirectories: true)
+        try "".write(to: pkg.appendingPathComponent("__init__.py"), atomically: true, encoding: .utf8)
+        try """
+        import os, sys
+        open(\(String(reflecting: startsLog.path)), "a").write("start\\n")
+        def config_command(ns):
+            words = ["config", ns.config_command, ns.key]
+            if ns.config_command == "set":
+                words.append(ns.value)
+            if ns.config_command == "get":
+                words += (["--json"] if ns.json else []) + (["--raw"] if ns.raw else [])
+            open(\(String(reflecting: log.path)), "a").write(" ".join(words) + "\\n")
+            if \(failing ? "True" : "False"):
+                sys.exit(1)
+            if ns.config_command == "unset":
+                print("Config key not set: " + ns.key, file=sys.stderr)
+                sys.exit(1)
+            if ns.config_command == "get":
+                if not os.path.exists(\(String(reflecting: hooksFile.path))):
+                    print("Config key not set: " + ns.key, file=sys.stderr)
+                    sys.exit(1)
+                print(open(\(String(reflecting: hooksFile.path))).read())
+        """.write(to: pkg.appendingPathComponent("config.py"), atomically: true, encoding: .utf8)
+        let runtime = ["/usr/bin/python3", "-I", "-c",
+                       "import os, sys, runpy; sys.path.insert(0, \(String(reflecting: pkg.deletingLastPathComponent().path))); "
+                       + "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)",
+                       "config", "get", "model"]
+        let runtimeFile = dir.appendingPathComponent("runtime.json")
+        try JSONSerialization.data(withJSONObject: runtime).write(to: runtimeFile)
         // `config unset` of an absent key fails as Hermes's does; `config get
         // hooks` answers with `hooks` (absent: "Config key not set").
         try """
         #!/bin/sh
+        if [ "$1" = --print-runtime-command ]; then
+            \(batch ? "cat '\(runtimeFile.path)'; exit 0" : "echo 'hermes: unknown option' >&2; exit 2")
+        fi
+        printf 'start\\n' >> '\(startsLog.path)'
         printf '%s\\n' "$*" >> '\(log.path)'
         \(failing ? "exit 1" : "")
         if [ "$2" = unset ]; then echo "Config key not set: $3" >&2; exit 1; fi
@@ -112,8 +150,31 @@ struct HermesAgentTests {
         for (k, v) in extra { env[k] = v }
         let (status, diag) = try run("/usr/bin/python3", ["-c", script], env: env)
         #expect(status == expected, Comment(rawValue: diag))
+        starts?(((try? String(contentsOf: startsLog, encoding: .utf8)) ?? "").split(separator: "\n").count)
         return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
             .split(separator: "\n").map(String.init)
+    }
+
+    /// A `hermes config` run is a whole Hermes start (~1 s): the step's
+    /// dozen-plus run in one Hermes process (two when it then sets hooks),
+    /// with the very calls one process each made — still what it does when
+    /// the launcher can't give its runtime command.
+    @Test("the settings step runs in one Hermes process, the same calls as one `hermes config` each")
+    func applyBatched() throws {
+        let settings: [String: Any] = [
+            "model": ["provider": "nous", "default": "openai/gpt-5.5"],
+            "hooks": ["command": "/x/hermes-hook.py", "events": ["on_session_start", "post_llm_call"]]]
+        let servers: [String: Any] = ["browser": ["command": "python3", "args": ["/b.py"]]]
+        var batched = 0, single = 0
+        let one = try runApply(settings: settings, servers: servers, home: try tempDir(), starts: { batched = $0 })
+        let each = try runApply(settings: settings, servers: servers, home: try tempDir(),
+                                batch: false, starts: { single = $0 })
+        #expect(one == each)
+        #expect(one.count > 8)
+        #expect(batched == 2, "the settings, then the hooks they read back")
+        #expect(single == each.count)
+        // A failing call still fails the step, batched too.
+        _ = try runApply(settings: settings, servers: servers, home: try tempDir(), failing: true, status: 3)
     }
 
     @Test("the settings step sets the provider, turns off borrowed logins, mirrors the MCP servers, drops stale ones")
