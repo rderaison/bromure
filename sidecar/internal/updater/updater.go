@@ -125,7 +125,7 @@ func Install(ctx context.Context, r *Release) error {
 	if err != nil {
 		return err
 	}
-	return exec.Command(dst, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART").Start()
+	return exec.Command(dst, "/S").Start() // NSIS: silent (installer/BromureSidecar.nsi)
 }
 
 // Download fetches the installer to a temporary folder and checks its

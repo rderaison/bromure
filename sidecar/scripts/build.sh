@@ -29,7 +29,8 @@ for target in windows/amd64 windows/arm64 darwin/arm64 linux/amd64; do
     GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags -H windowsgui" -o "$dir/BromureSidecar.exe" ./cmd/BromureSidecar
   fi
 done
-# Unsigned: scripts/installer.ps1 signs the Windows executables on Windows
-# (and updates their lines in SHA256SUMS).
-( cd "$out" && find . -type f -name 'bromure-sidecar*' -o -type f -name 'BromureSidecar.exe' | sort | xargs sha256sum > SHA256SUMS )
+# Unsigned: scripts/installer.sh signs the Windows executables (and updates
+# their lines in SHA256SUMS). macOS has shasum, not always sha256sum.
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+( cd "$out" && find . -type f \( -name 'bromure-sidecar*' -o -name 'BromureSidecar.exe' \) | sort | while read -r f; do sha256 "$f"; done > SHA256SUMS )
 echo "built $version into $out/"

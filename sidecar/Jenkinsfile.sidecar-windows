@@ -1,7 +1,8 @@
-// Bromure Sidecar for Windows (sidecar/, Go). Tests and cross-compiles on
-// the Mac builder, packages the per-user installers (x64, arm64) on a
-// Windows agent, and optionally publishes them to DO Spaces with the update
-// feed the Sidecar's updater reads:
+// Bromure Sidecar for Windows (sidecar/, Go), built entirely on the Mac
+// builder: tests, cross-compile, the per-user NSIS installers (x64, arm64),
+// Authenticode signing (SSL.com eSigner through jsign), and optionally
+// publishing them to DO Spaces with the update feed the Sidecar's updater
+// reads:
 //
 //   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-x64.exe     (stable link)
 //   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-arm64.exe
@@ -10,21 +11,17 @@
 // The version is sidecar/VERSION (X.Y.Z); bump it to release. No secrets
 // live here: signing and upload use Jenkins credentials by id.
 //
-// Agents:
-//   macosx-builder  Go (any 1.21+: go.mod's toolchain line fetches 1.27.3),
-//                   git, node (Release).
-//   windows-builder Windows 10/11 with PowerShell 7 and winget (Inno Setup
-//                   is installed per-user on first use); for SIGN, a JDK
-//                   11+ (java on the PATH, or JAVA) and jsign 7.6
-//                   (JSIGN_JAR, default C:\Users\renaud\tools\jsign\jsign-7.6.jar),
-//                   plus the Windows SDK (its signtool verifies signatures;
-//                   Get-AuthenticodeSignature otherwise).
+// Agent macosx-builder: Go (any 1.21+: go.mod's toolchain line fetches
+// 1.27.4), git, node (Release) and Homebrew. scripts/installer.sh installs
+// what it misses: makensis, and for SIGN openjdk, osslsigncode and jsign 7.6
+// (downloaded once, SHA-256 checked). It runs on Linux too (apt), should
+// the job move to a Linux builder.
 // Credentials (only when used):
 //   ESIGNER_USERNAME / ESIGNER_PASSWORD / ESIGNER_CREDENTIAL_ID /
 //   ESIGNER_TOTP_SECRET  secret-text credentials, SSL.com eSigner — SIGN
 //   DO_SPACES_KEY / DO_SPACES_SECRET — PUSH_RELEASE
 pipeline {
-    agent none
+    agent { label 'macosx-builder' }
 
     parameters {
         booleanParam(
@@ -44,13 +41,13 @@ pipeline {
         disableConcurrentBuilds()
     }
 
+    environment {
+        CGO_ENABLED = '0'
+        GOTOOLCHAIN = 'auto'
+    }
+
     stages {
         stage('Test & build') {
-            agent { label 'macosx-builder' }
-            environment {
-                CGO_ENABLED = '0'
-                GOTOOLCHAIN = 'auto'
-            }
             steps {
                 script {
                     env.SIDECAR_WIN_VERSION = readFile('sidecar/VERSION').trim()
@@ -69,51 +66,46 @@ pipeline {
                         GOOS=windows GOARCH=amd64 go vet ./...
                         GOOS=windows GOARCH=arm64 go vet ./...
                         # Includes the tmux contract test, which reads ../Sources/AgentCoding.
-                        go test ./...
+                        # On failure, repeat the failing tests at the end of the log.
+                        go test -count=1 ./... 2>&1 | tee go-test.log || {
+                            echo "===== go test failures ====="
+                            grep -E -B2 -A25 '^(--- FAIL|panic:|FAIL[[:space:]])' go-test.log || true
+                            exit 1
+                        }
                         go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-                        scripts/build.sh "$SIDECAR_WIN_VERSION"
+                        bash scripts/build.sh "$SIDECAR_WIN_VERSION"
                     '''
                 }
-                stash name: 'win-binaries', includes: 'sidecar/dist/windows-*/**'
-                archiveArtifacts artifacts: 'sidecar/dist/**', fingerprint: true
             }
         }
 
         stage('Installers') {
-            agent { label 'windows-builder' }
             steps {
-                unstash 'win-binaries'
-                pwsh '''
-                    $ErrorActionPreference = "Stop"
-                    $iscc = "$env:LOCALAPPDATA\\Programs\\Inno Setup 6\\ISCC.exe"
-                    if (-not (Test-Path $iscc) -and -not (Test-Path "${env:ProgramFiles(x86)}\\Inno Setup 6\\ISCC.exe")) {
-                        winget install --id JRSoftware.InnoSetup -e --scope user --accept-source-agreements --accept-package-agreements --disable-interactivity
-                    }
-                '''
                 script {
-                    if (params.SIGN) {
-                        // installer.ps1 hands these to jsign through the
-                        // environment only (never argv or the log).
-                        withCredentials([
-                            string(credentialsId: 'ESIGNER_USERNAME',      variable: 'ESIGNER_USERNAME'),
-                            string(credentialsId: 'ESIGNER_PASSWORD',      variable: 'ESIGNER_PASSWORD'),
-                            string(credentialsId: 'ESIGNER_CREDENTIAL_ID', variable: 'ESIGNER_CREDENTIAL_ID'),
-                            string(credentialsId: 'ESIGNER_TOTP_SECRET',   variable: 'ESIGNER_TOTP_SECRET')
-                        ]) {
-                            pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION -RequireSign'
+                    // Homebrew's prefixes (Apple silicon, Intel) for makensis & co.
+                    withEnv(["PATH+BREW=/opt/homebrew/bin:/usr/local/bin"]) {
+                        if (params.SIGN) {
+                            // installer.sh hands these to jsign through the
+                            // environment only (never argv or the log).
+                            withCredentials([
+                                string(credentialsId: 'ESIGNER_USERNAME',      variable: 'ESIGNER_USERNAME'),
+                                string(credentialsId: 'ESIGNER_PASSWORD',      variable: 'ESIGNER_PASSWORD'),
+                                string(credentialsId: 'ESIGNER_CREDENTIAL_ID', variable: 'ESIGNER_CREDENTIAL_ID'),
+                                string(credentialsId: 'ESIGNER_TOTP_SECRET',   variable: 'ESIGNER_TOTP_SECRET')
+                            ]) {
+                                sh 'bash sidecar/scripts/installer.sh --require-sign "$SIDECAR_WIN_VERSION"'
+                            }
+                        } else {
+                            sh 'bash sidecar/scripts/installer.sh "$SIDECAR_WIN_VERSION"'
                         }
-                    } else {
-                        pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION'
                     }
                 }
-                stash name: 'win-installers', includes: "sidecar/dist/BromureSidecar-${env.SIDECAR_WIN_VERSION}-*.exe,sidecar/dist/latest-${env.SIDECAR_WIN_VERSION}.json,sidecar/dist/installers-SHA256SUMS"
-                archiveArtifacts artifacts: "sidecar/dist/BromureSidecar-${env.SIDECAR_WIN_VERSION}-*.exe,sidecar/dist/latest-${env.SIDECAR_WIN_VERSION}.json,sidecar/dist/installers-SHA256SUMS", fingerprint: true
+                archiveArtifacts artifacts: 'sidecar/dist/**', fingerprint: true
             }
         }
 
         stage('Release') {
             when { expression { return params.PUSH_RELEASE } }
-            agent { label 'macosx-builder' }
             environment {
                 DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
                 DO_SPACES_REGION      = 'nyc3'
@@ -121,7 +113,6 @@ pipeline {
                 DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
             }
             steps {
-                unstash 'win-installers'
                 withCredentials([
                     string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
                     string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET')
