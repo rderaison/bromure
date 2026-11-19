@@ -3609,6 +3609,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                       databases: databases,
                                       egressPolicy: profile.resolvedEgressPolicy,
                                       allowInsecureBypass: g.allowInsecureBypass)
+        config.pinnedCertificates = g.pinnedCertificateFingerprints
         config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
         config.strictCredentials = profile.effectiveStrictCredentials
         return config

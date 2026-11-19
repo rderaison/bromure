@@ -4404,3 +4404,10 @@
 "%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "此机器上尚未为 %@ 设置模型。请在机器的设置 › 模型 中选择一个。";
 "No model set up (settings › Models)" = "未设置模型（设置 › 模型）";
 "Base unknown" = "基础映像未知";
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "信任自签名服务器的特定证书，使凭据仍能送达。";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "适用于使用自签名或私有 CA 证书、但仍需获得真实凭据的内部服务器。输入其主机名以及它所出示证书的 SHA-256 指纹（`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`，或浏览器证书查看器中显示的指纹）。当该主机出示的正是此证书时，Bromure 会像对待任何有效证书一样信任它，并照常替换和注入凭据。其他任何证书都按常规校验。固定之前请在服务器本身上核对指纹：只有你可以添加固定，代理永远不能。即时生效。";
+"Trusted upstream certificates" = "受信任的上游证书";
+"SHA-256 fingerprint" = "SHA-256 指纹";
+"Add certificate" = "添加证书";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "需要主机名和 64 个字符的 SHA-256 指纹；在此之前将被忽略。";

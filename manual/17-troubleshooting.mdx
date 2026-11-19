@@ -325,7 +325,7 @@ For **Kimi Code**, Bromure signs in against Kimi's international service (kimi.a
 2. For a Docker container that needs to reach the network, use the **Run a new container** sheet's **Inherit HTTP proxy settings** toggle so `http_proxy`/`https_proxy` (the in-guest proxy at `127.0.0.1:65534`) propagate, and mount or install the CA where the container's tools look for it.
 3. If certificate errors appear only *after* you deleted or rotated the CA (below), restart affected machines so the new CA is re-staged.
 
-For a host that pins its certificate, the machine's **Guardrails** pane can bypass interception for a single request (`X-bromure-insecure`) — see [Guardrails settings](07-settings/guardrails.mdx).
+For a host that pins its certificate, the machine's **Guardrails** pane can bypass interception for a single request (`X-bromure-insecure`) — see [Guardrails settings](07-settings/guardrails.mdx). For an internal server with a self-signed certificate that needs real credentials, pin its certificate under **Trusted upstream certificates** in the same pane. The insecure header never sends credentials.
 
 ### Rotating the root CA
 

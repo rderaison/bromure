@@ -3049,7 +3049,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 ? PlaintextClientStream(fd: upstreamFD)
                 : try TLSClientStream(fd: upstreamFD, peerName: host,
                                       clientIdentity: clientIdentity,
-                                      pinnedCA: pinnedCA)
+                                      pinnedCA: pinnedCA,
+                                      pinnedFingerprints: guardrailsProvider()?.pinnedFingerprints(for: host) ?? [])
             try upstreamTLS.handshake()
         } catch {
             FileHandle.standardError.write(Data(
@@ -4101,7 +4102,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
             consent: consent,
-            profileID: profileID, host: host, port: port, insecure: insecure)
+            profileID: profileID, host: host, port: port, insecure: insecure,
+            pinnedFingerprints: guardrailsProvider()?.pinnedFingerprints(for: host) ?? [])
         let cfg = URLSessionConfiguration.ephemeral
         // `timeoutIntervalForRequest` is an IDLE timer — it fires when no byte
         // arrives from upstream for this long, NOT a wall-clock cap on the
@@ -5451,6 +5453,28 @@ func describeUpstreamError(_ error: Error, host: String, dialerFailure: String? 
         running Bromure AC — add it to the login or System keychain and mark it \
         "Always Trust" — then retry.
         """
+        // Self-signed / private endpoint the user wants credentials to reach:
+        // the user (not the agent — it's a host-side setting) can pin the
+        // exact certificate. Name the one presented so they can compare it
+        // against the server's real fingerprint out of band.
+        let presented = ns.userInfo[NSURLErrorFailingURLPeerTrustErrorKey]
+            .flatMap { value -> SecTrust? in
+                let ref = value as CFTypeRef
+                return CFGetTypeID(ref) == SecTrustGetTypeID() ? (ref as! SecTrust) : nil
+            }
+            .flatMap(PinnedUpstreamCertificate.leafFingerprint)
+        body += """
+        \n
+        Or ask the user to pin \(host)'s certificate in Bromure (the workspace's \
+        settings → Guardrails → Trusted upstream certificates). A pinned \
+        certificate is trusted like any valid one, so credentials are injected \
+        as usual. Only the user can add a pin; they should first check the \
+        fingerprint against the server itself.
+        """
+        if let presented {
+            body += "\nThe certificate \(host) presented has SHA-256 fingerprint "
+                + TrustedUpstreamCertificate.displayFingerprint(presented) + "."
+        }
         if allowInsecureHint {
             body += """
             \n
@@ -5926,6 +5950,10 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
     /// upstream cert validation — accept any server trust. See
     /// `GuardrailsPolicy.allowInsecureBypass`.
     let insecure: Bool
+    /// SHA-256 leaf fingerprints the user pinned for this host (Guardrails →
+    /// Trusted upstream certificates). A matching server certificate is
+    /// trusted outright; credentials still flow, as for any trusted upstream.
+    let pinnedFingerprints: Set<String>
     /// The pinned loopback dialer this session's connections go through
     /// (OpenShell mode); closed when the session is invalidated.
     var dialer: PinnedUpstreamDialer?
@@ -5956,7 +5984,8 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         profileID: UUID, host: String, port: Int, insecure: Bool = false) {
+         profileID: UUID, host: String, port: Int, insecure: Bool = false,
+         pinnedFingerprints: Set<String> = []) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
         self.consent = consent
@@ -5964,6 +5993,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
         self.host = host
         self.port = port
         self.insecure = insecure
+        self.pinnedFingerprints = pinnedFingerprints
     }
 
     func urlSession(_ session: URLSession,
@@ -6022,6 +6052,14 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
             // proxy skipped the swap + auth injection), so an impostor here
             // gets only the guest's fakes.
             if insecure, let trust = challenge.protectionSpace.serverTrust {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+                return
+            }
+            // User-pinned certificate: the leaf is exactly the one the user
+            // vouched for in the host's settings (the guest can't add a pin).
+            // No match falls through to the cluster CA / system trust below.
+            if let trust = challenge.protectionSpace.serverTrust,
+               PinnedUpstreamCertificate.matches(trust, fingerprints: pinnedFingerprints, host: host) {
                 completionHandler(.useCredential, URLCredential(trust: trust))
                 return
             }
