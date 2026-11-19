@@ -313,6 +313,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// resumed. Archiving ends the agent (a running one, or one found
     /// running later).
     var archivedAt: Date?
+    /// Screenshots only (`DemoMode.seed`): the state a fixture session
+    /// shows (a `SessionBucket` raw value), carried in the record so a
+    /// remote client's mirror shows it too. Never set otherwise.
+    var demoBucket: Int?
     /// The user deleted it. Hidden everywhere at once; the record itself
     /// stays until its tab is gone from the roster (killed now, or when
     /// the machine wakes), so the dying tab isn't adopted as a stranger.
@@ -2057,6 +2061,9 @@ enum SessionHome {
 
     @MainActor
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
+        // Manual / App Store screenshots: a fixture session's state, here
+        // and in a remote client's mirror.
+        if let raw = s.demoBucket, let demo = SessionBucket(rawValue: raw) { return demo }
         if isGone(s, in: model) { return .ended }
         #if os(macOS)
         if let demo = DemoMode.bucket(for: s.id) { return demo }   // manual screenshots
