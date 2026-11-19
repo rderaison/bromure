@@ -26,7 +26,7 @@ $dist = Join-Path $root "dist"
 
 # --- What signing needs ----------------------------------------------------
 $signVars = @("ESIGNER_USERNAME", "ESIGNER_PASSWORD", "ESIGNER_CREDENTIAL_ID", "ESIGNER_TOTP_SECRET")
-$present = @($signVars | Where-Object { -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_)) })
+$present = @($signVars | Where-Object { -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
 $missing = @($signVars | Where-Object { $present -notcontains $_ })
 if ($present.Count -gt 0 -and $missing.Count -gt 0) {
     throw "signing is half-configured: $($missing -join ', ') not set (set all of $($signVars -join ', '), or none for an unsigned build)"
@@ -35,6 +35,16 @@ $sign = $present.Count -eq $signVars.Count
 if (-not $sign -and $RequireSign) {
     throw "-RequireSign: signing isn't configured (set $($signVars -join ', '))"
 }
+# jsign takes the eSigner login as one "<username>|<password>" storepass and
+# splits it on the first "|" (7.6: storepass.split("\\|", 2)), so the
+# password may contain "|" but the username can't.
+if ($sign -and $env:ESIGNER_USERNAME.Contains("|")) {
+    throw "ESIGNER_USERNAME contains '|', which jsign uses to separate it from the password"
+}
+# A sandbox keystore (https://cs-try.ssl.com) signs with test certificates
+# that don't chain to a trusted root; only there is that accepted.
+$sandbox = $sign -and $env:ESIGNER_KEYSTORE -match '(?i)cs-try\.'
+if ($sandbox) { Write-Warning "SANDBOX build ($env:ESIGNER_KEYSTORE): test signatures, not for release" }
 
 $iscc = @(
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
@@ -54,17 +64,26 @@ function Find-SignTool {
         Select-Object -First 1 -ExpandProperty FullName
 }
 
-function Assert-Signed([string[]]$Files) {
-    $signtool = Find-SignTool
+# Every file needs a signature that verifies and a timestamp (signtool's
+# /pa alone accepts an untimestamped one). In a sandbox build an untrusted
+# root is tolerated, but a signature and a timestamp must still be there.
+function Assert-Signed([string[]]$Files, [bool]$Sandbox) {
+    $signtool = if ($Sandbox) { $null } else { Find-SignTool }
     foreach ($f in $Files) {
+        $s = Get-AuthenticodeSignature -FilePath $f
         if ($signtool) {
             & $signtool verify /pa /v $f
             if ($LASTEXITCODE -ne 0) { throw "signature check failed: $f" }
-        } else {
-            $s = Get-AuthenticodeSignature -FilePath $f
-            if ($s.Status -ne "Valid") { throw "signature check failed: $f ($($s.Status): $($s.StatusMessage))" }
-            Write-Host "verified: $f ($($s.SignerCertificate.Subject))"
+        } elseif ($Sandbox) {
+            # Only an untrusted root is tolerated, never a tampered or unsigned file.
+            if (-not $s.SignerCertificate -or $s.Status -in @("HashMismatch", "NotSigned")) {
+                throw "signature check failed: $f ($($s.Status): $($s.StatusMessage))"
+            }
+        } elseif ($s.Status -ne "Valid") {
+            throw "signature check failed: $f ($($s.Status): $($s.StatusMessage))"
         }
+        if (-not $s.TimeStamperCertificate) { throw "signature check failed: $f has no timestamp" }
+        Write-Host "verified: $f ($($s.SignerCertificate.Subject); $($s.Status); timestamped by $($s.TimeStamperCertificate.Subject))"
     }
 }
 
@@ -92,7 +111,6 @@ if ($sign) {
         "--replace"
     )
     if ($env:ESIGNER_KEYSTORE) { $jsignFlags += @("--keystore", $env:ESIGNER_KEYSTORE) }
-    $env:JSIGN_STOREPASS = "$env:ESIGNER_USERNAME|$env:ESIGNER_PASSWORD"
 
     # Inno's SignTool: $q is a quote, $f the file it signs (quoted by Inno).
     $quoted = $jsignFlags | ForEach-Object { if ($_ -match '[\s"]') { '$q' + $_ + '$q' } else { $_ } }
@@ -101,6 +119,10 @@ if ($sign) {
 
 try {
     if ($sign) {
+        # Set here so the finally always removes it.
+        $env:JSIGN_STOREPASS = "$env:ESIGNER_USERNAME|$env:ESIGNER_PASSWORD"
+        # SSL.com accepted 8 back-to-back signatures on one OTP window
+        # (2026-11-19); if it starts rejecting, space the jsign calls 30s apart.
         foreach ($b in $binaries) {
             Write-Host "signing $($b.FullName)"
             & $java -jar $JsignJar @jsignFlags $b.FullName
@@ -122,7 +144,7 @@ try {
 }
 
 if ($sign) {
-    Assert-Signed (@($binaries.FullName) + $installers)
+    Assert-Signed (@($binaries.FullName) + $installers) $sandbox
 }
 
 # --- Checksums, after signing ------------------------------------------------
