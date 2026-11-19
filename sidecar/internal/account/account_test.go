@@ -2,6 +2,7 @@ package account
 
 import (
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"reflect"
@@ -161,6 +162,50 @@ func TestNotAgentHostPublishesNothing(t *testing.T) {
 	if d := cp.Device(a.Status().DeviceID); d == nil || d.SSHKey != "" {
 		t.Fatal("published a key")
 	}
+}
+
+// A re-enroll that fails (here: an unreachable control plane) keeps the
+// existing device serving and syncing keys, instead of leaving it signed in
+// but offline until the daemon restarts.
+func TestFailedReenrollKeepsServing(t *testing.T) {
+	settings.ResetForTest()
+	// The fake hands out the same device ids every run: a published marker
+	// left on disk by an earlier run would skip the upload this test waits on.
+	_ = settings.Remove(settings.P2PPublished)
+	defer settings.Remove(settings.P2PPublished)
+	cp := cptest.New()
+	defer cp.Close()
+	cp.EnrollCapability = "agent-host"
+	keys := &keySink{}
+	a := New(Config{SSHPort: 1, UserName: "you", ClientPublicKey: func() (string, error) { return clientLine, nil },
+		SetManagedKeys: keys.set})
+	defer a.Close()
+	defer identity.Erase()
+	if err := a.Complete("bromure://enroll?code=PASTED-CODE-0001&api=" + url.QueryEscape(cp.URL)); err != nil {
+		t.Fatal(err)
+	}
+	id := a.Status().DeviceID
+	me := cp.Device(id)
+	waitFor(t, "serving", func() bool { return cp.Online(id) && me.Server && a.Status().Connected })
+	waitFor(t, "key sync", func() bool { n, _, _ := keys.get(); return n > 0 })
+	syncs, _, _ := keys.get()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "http://" + l.Addr().String()
+	l.Close()
+	if err := a.Complete("bromure://enroll?code=PASTED-CODE-0002&api=" + url.QueryEscape(dead)); err == nil {
+		t.Fatal("enrolled against a dead control plane")
+	}
+	st := a.Status()
+	if !st.SignedIn || st.DeviceID != id || !st.Serving || !strings.HasPrefix(st.LastError, "Sign-in failed") {
+		t.Fatalf("status after the failed re-enroll %+v", st)
+	}
+	// The device channel comes back, server mode ends up on, keys sync again.
+	waitFor(t, "serving again", func() bool { return a.Status().Connected && cp.Online(id) && me.Server })
+	waitFor(t, "key sync again", func() bool { n, _, _ := keys.get(); return n > syncs })
 }
 
 func TestHelpers(t *testing.T) {

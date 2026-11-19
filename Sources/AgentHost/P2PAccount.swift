@@ -92,6 +92,10 @@ final class P2PAccount {
             case .failure(let e):
                 lastError = "Sign-in failed: \(e)"
                 AgentHostLog.log("p2p: enroll failed: \(e)")
+                // Enrollment stores a record only on success: an already
+                // enrolled machine still is, so serve it again rather than
+                // staying offline until the next launch.
+                if isEnrolled && sshPort != 0 { start(sshPort: sshPort) }
             }
             NotificationCenter.default.post(name: SessionEngine.didChange, object: nil)
         }

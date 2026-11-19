@@ -202,7 +202,11 @@ func (a *Account) Complete(raw string) error {
 		}
 	}
 	_ = os.Remove(PendingStateFile())
-	// A re-enroll replaces the device: its channel goes first.
+	// A re-enroll replaces the device: its channel goes first (while the
+	// record on disk is still the old one, so server mode goes off for the
+	// old device, not the new). Enroll only stores a record on success, so a
+	// failed attempt leaves the old one, and that one is served again below.
+	wasServing := a.broker.Serving()
 	a.broker.StopServing()
 	a.stopKeySync()
 	a.mu.Lock()
@@ -222,6 +226,10 @@ func (a *Account) Complete(raw string) error {
 	if err != nil {
 		a.setError("Sign-in failed: " + err.Error())
 		logx.Printf("p2p: enroll failed: %v", err)
+		if wasServing {
+			logx.Printf("p2p: still enrolled as before: serving again")
+			a.Start()
+		}
 		return err
 	}
 	a.setError("")

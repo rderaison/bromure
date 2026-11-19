@@ -118,6 +118,11 @@ type Broker struct {
 	lastPathReset time.Time
 	monitor       *netmon.Monitor
 	lastSig       string
+	// modeSeq numbers the server-mode requests per device token, so a stop
+	// immediately followed by a start (a failed re-enroll restoring the
+	// old device) can't land on the control plane in the wrong order.
+	modeSeq map[string]uint64
+	modeMu  sync.Mutex // one server-mode request in flight at a time
 }
 
 // NewBroker is a relay-only broker (the Sidecar never listens publicly).
@@ -256,16 +261,44 @@ func (b *Broker) StartServing(sshPort int) {
 	if was {
 		return
 	}
+	seq := b.nextModeSeq(id.Bearer)
 	go func() {
-		if c, err := b.client(id); err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			if _, err := c.SetServerMode(ctx, id.Bearer, true); err != nil {
-				logx.Printf("p2p: server-mode on failed: %v", err)
-			}
-			cancel()
-		}
+		b.sendServerMode(id, true, seq)
 		b.ensureChannel(id)
 	}()
+}
+
+func (b *Broker) nextModeSeq(bearer string) uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.modeSeq == nil {
+		b.modeSeq = map[string]uint64{}
+	}
+	b.modeSeq[bearer]++
+	return b.modeSeq[bearer]
+}
+
+// sendServerMode sets p2p_server for id unless a later request for the same
+// device was issued meanwhile (that one wins, whatever order the goroutines
+// run in).
+func (b *Broker) sendServerMode(id identity.Identity, on bool, seq uint64) {
+	b.modeMu.Lock()
+	defer b.modeMu.Unlock()
+	b.mu.Lock()
+	latest := b.modeSeq[id.Bearer] == seq
+	b.mu.Unlock()
+	if !latest {
+		return
+	}
+	c, err := b.client(id)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := c.SetServerMode(ctx, id.Bearer, on); err != nil && on {
+		logx.Printf("p2p: server-mode on failed: %v", err)
+	}
 }
 
 // StopServing clears p2p_server, drops the channel and every relay.
@@ -288,13 +321,8 @@ func (b *Broker) StopServing() {
 	}
 	if was {
 		if id, ok := b.Identity(); ok {
-			if c, err := b.client(id); err == nil {
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					defer cancel()
-					_, _ = c.SetServerMode(ctx, id.Bearer, false)
-				}()
-			}
+			seq := b.nextModeSeq(id.Bearer)
+			go b.sendServerMode(id, false, seq)
 		}
 	}
 }
