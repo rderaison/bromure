@@ -104,14 +104,28 @@ func waitCapture(t *testing.T, c Client, idx int, s string) string {
 	return ""
 }
 
+// gitBash is a bash with bracketed paste (readline 7, bash 4.4+): Git
+// Bash on Windows; elsewhere Homebrew's or the PATH's, skipping when only
+// an older one is there (macOS's /bin/bash is 3.2, which never sends
+// ESC[?2004h).
 func gitBash(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
-		p, err := exec.LookPath("bash")
-		if err != nil {
-			t.Skip("no bash")
+		cands := []string{"/opt/homebrew/bin/bash", "/usr/local/bin/bash"}
+		if p, err := exec.LookPath("bash"); err == nil {
+			cands = append(cands, p)
 		}
-		return p
+		for _, p := range cands {
+			out, err := exec.Command(p, "-c", `echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"`).Output()
+			if err != nil {
+				continue
+			}
+			var major, minor int
+			if _, err := fmt.Sscan(string(out), &major, &minor); err == nil && (major > 4 || major == 4 && minor >= 4) {
+				return p
+			}
+		}
+		t.Skip("no bash 4.4+ (bracketed paste needs readline 7)")
 	}
 	for _, p := range []string{`C:\Program Files\Git\bin\bash.exe`, `C:\Program Files\Git\usr\bin\bash.exe`} {
 		if _, err := os.Stat(p); err == nil {
