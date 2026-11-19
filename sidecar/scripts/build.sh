@@ -5,12 +5,19 @@
 # Linux get the console binary only (the tray is Windows-only).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version="${1:-$(git describe --tags --always 2>/dev/null || echo dev)}"
+# A release passes X.Y.Z (the updater compares it); a local build is "dev"
+# (it never offers updates).
+version="${1:-dev}"
 ldflags="-s -w -X main.version=${version}"
 out=dist
 rm -rf "$out"
 mkdir -p "$out"
 export CGO_ENABLED=0
+# The version in the executables' resources (Explorer's Details tab, the
+# installer); the committed objects say 0.0.0 again afterwards.
+resver="$version"; [ "$resver" = dev ] && resver=0.0.0
+go run ./tools/mkicons -syso-only -version "$resver" >/dev/null
+trap 'go run ./tools/mkicons -syso-only -version 0.0.0 >/dev/null' EXIT
 for target in windows/amd64 windows/arm64 darwin/arm64 linux/amd64; do
   os="${target%/*}"; arch="${target#*/}"
   dir="$out/$os-$arch"

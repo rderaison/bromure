@@ -1,55 +1,140 @@
-// Bromure Sidecar for Windows (Go) — skeleton.
-// Cross-compiles on the existing Mac agent; the Inno Setup installer needs a
-// Windows agent (manual for now). Uploads go through the existing
-// `release-upload` job: no credentials live in this repository.
+// Bromure Sidecar for Windows (sidecar/, Go). Tests and cross-compiles on
+// the Mac builder, packages the per-user installers (x64, arm64) on a
+// Windows agent, and optionally publishes them to DO Spaces with the update
+// feed the Sidecar's updater reads:
+//
+//   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-x64.exe     (stable link)
+//   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-arm64.exe
+//   https://dl.bromure.io/releases-sidecar-windows/latest.json                (update feed)
+//
+// The version is sidecar/VERSION (X.Y.Z); bump it to release. No secrets
+// live here: signing and upload use Jenkins credentials by id.
+//
+// Agents:
+//   macosx-builder  Go (any 1.21+: go.mod's toolchain line fetches 1.27.3),
+//                   git, node (Release).
+//   windows-builder Windows 10/11 with PowerShell 7 and winget (Inno Setup
+//                   is installed per-user on first use); for SIGN, the
+//                   Windows SDK's signtool on the PATH.
+// Credentials (only when used):
+//   WINDOWS_CODESIGN  a certificate credential (.pfx + password) — SIGN
+//   DO_SPACES_KEY / DO_SPACES_SECRET — PUSH_RELEASE
 pipeline {
-    agent { label 'mac' }
-    options { timestamps(); disableConcurrentBuilds() }
+    agent none
+
     parameters {
-        string(name: 'VERSION', defaultValue: '', description: 'Version (default: git describe)')
-        booleanParam(name: 'UPLOAD', defaultValue: false, description: 'Hand the build to release-upload')
+        booleanParam(
+            name: 'SIGN',
+            defaultValue: false,
+            description: 'Authenticode-sign the executables, the installers and the uninstaller (WINDOWS_CODESIGN).'
+        )
+        booleanParam(
+            name: 'PUSH_RELEASE',
+            defaultValue: false,
+            description: 'Upload the installers and the update feed to DigitalOcean Spaces (releases-sidecar-windows/). Installed Sidecars offer the update within 12 hours.'
+        )
     }
-    environment { CGO_ENABLED = '0' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
     stages {
-        stage('Test') {
+        stage('Test & build') {
+            agent { label 'macosx-builder' }
+            environment {
+                CGO_ENABLED = '0'
+                GOTOOLCHAIN = 'auto'
+            }
             steps {
-                dir('sidecar') {
-                    sh 'go version'
-                    sh 'go vet ./...'
-                    sh 'GOOS=windows go vet ./...'
-                    // Includes the tmux contract test (internal/shims), which
-                    // reads ../Sources/AgentCoding.
-                    sh 'go test ./...'
-                    sh 'go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...'
+                script {
+                    env.SIDECAR_WIN_VERSION = readFile('sidecar/VERSION').trim()
+                    if (!(env.SIDECAR_WIN_VERSION ==~ /^\d+\.\d+\.\d+$/)) {
+                        error("sidecar/VERSION must be X.Y.Z, got '${env.SIDECAR_WIN_VERSION}'")
+                    }
+                    echo "Building Bromure Sidecar for Windows ${env.SIDECAR_WIN_VERSION}"
                 }
+                dir('sidecar') {
+                    sh '''
+                        set -euo pipefail
+                        command -v go >/dev/null || { echo "ERROR: go is not on PATH" >&2; exit 1; }
+                        go version
+                        test -z "$(gofmt -l .)" || { gofmt -l .; echo "ERROR: gofmt" >&2; exit 1; }
+                        go vet ./...
+                        GOOS=windows GOARCH=amd64 go vet ./...
+                        GOOS=windows GOARCH=arm64 go vet ./...
+                        # Includes the tmux contract test, which reads ../Sources/AgentCoding.
+                        go test ./...
+                        go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+                        scripts/build.sh "$SIDECAR_WIN_VERSION"
+                    '''
+                }
+                stash name: 'win-binaries', includes: 'sidecar/dist/windows-*/**'
+                archiveArtifacts artifacts: 'sidecar/dist/**', fingerprint: true
             }
         }
-        stage('Build') {
+
+        stage('Installers') {
+            agent { label 'windows-builder' }
             steps {
-                dir('sidecar') {
-                    sh "scripts/build.sh ${params.VERSION}"
-                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
+                unstash 'win-binaries'
+                pwsh '''
+                    $ErrorActionPreference = "Stop"
+                    $iscc = "$env:LOCALAPPDATA\\Programs\\Inno Setup 6\\ISCC.exe"
+                    if (-not (Test-Path $iscc) -and -not (Test-Path "${env:ProgramFiles(x86)}\\Inno Setup 6\\ISCC.exe")) {
+                        winget install --id JRSoftware.InnoSetup -e --scope user --accept-source-agreements --accept-package-agreements --disable-interactivity
+                    }
+                '''
+                script {
+                    if (params.SIGN) {
+                        withCredentials([certificate(credentialsId: 'WINDOWS_CODESIGN',
+                                                     keystoreVariable: 'SIGN_CERT',
+                                                     passwordVariable: 'SIGN_PASS')]) {
+                            pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION'
+                        }
+                    } else {
+                        pwsh 'sidecar/scripts/installer.ps1 -Version $env:SIDECAR_WIN_VERSION'
+                    }
                 }
+                stash name: 'win-installers', includes: "sidecar/dist/BromureSidecar-${env.SIDECAR_WIN_VERSION}-*.exe,sidecar/dist/latest-${env.SIDECAR_WIN_VERSION}.json,sidecar/dist/installers-SHA256SUMS"
+                archiveArtifacts artifacts: "sidecar/dist/BromureSidecar-${env.SIDECAR_WIN_VERSION}-*.exe,sidecar/dist/latest-${env.SIDECAR_WIN_VERSION}.json,sidecar/dist/installers-SHA256SUMS", fingerprint: true
             }
         }
-        stage('Installer (Windows agent)') {
-            when { expression { false } } // enable once a Windows agent exists
-            agent { label 'windows' }
-            steps {
-                dir('sidecar') {
-                    bat 'ISCC.exe /DAppVersion=%VERSION% /DArch=x64 installer\\BromureSidecar.iss'
-                    bat 'ISCC.exe /DAppVersion=%VERSION% /DArch=arm64 installer\\BromureSidecar.iss'
-                }
+
+        stage('Release') {
+            when { expression { return params.PUSH_RELEASE } }
+            agent { label 'macosx-builder' }
+            environment {
+                DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+                DO_SPACES_REGION      = 'nyc3'
+                DO_SPACES_BUCKET      = 'bromure-dl'
+                DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
             }
-        }
-        stage('Upload') {
-            when { expression { params.UPLOAD } }
             steps {
-                // Product bromure-sidecar-windows: the feed path is an infra change.
-                build job: 'release-upload', parameters: [
-                    string(name: 'PRODUCT', value: 'bromure-sidecar-windows'),
-                    string(name: 'UPSTREAM_BUILD', value: env.BUILD_NUMBER),
-                ]
+                unstash 'win-installers'
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        (cd tools && if [ -f package-lock.json ]; then \
+                                        npx --yes @socketsecurity/cli npm ci --silent; \
+                                     else \
+                                        npx --yes @socketsecurity/cli npm install --silent; \
+                                     fi)
+                        v="$SIDECAR_WIN_VERSION"
+                        # The installers first: the feed must never name a file
+                        # that isn't there yet.
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-x64 \
+                            --file "sidecar/dist/BromureSidecar-$v-x64.exe" --version "$v"
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-arm64 \
+                            --file "sidecar/dist/BromureSidecar-$v-arm64.exe" --version "$v"
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-feed \
+                            --file "sidecar/dist/latest-$v.json" --version "$v"
+                    '''
+                }
             }
         }
     }

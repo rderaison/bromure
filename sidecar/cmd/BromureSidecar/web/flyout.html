@@ -68,6 +68,15 @@
       <button class="btn sm" id="btnGit">Install</button>
     </div>
 
+    <div id="updBanner" class="card banner" hidden style="border-color:color-mix(in srgb, var(--accent) 35%, transparent)">
+      <span class="ic" id="updIc" style="color:var(--accent)"></span>
+      <div class="col grow">
+        <div class="title" style="font-size:13px" id="updTitle">Update available</div>
+        <div class="sub small">Agents keep running while it installs.</div>
+      </div>
+      <button class="btn sm primary" id="btnUpd">Update</button>
+    </div>
+
     <div id="conn" class="card conn"></div>
 
     <div class="section-head">
@@ -143,6 +152,7 @@ $("mark").outerHTML = markTile();
 $("btnAgents").innerHTML = ICON.grid;
 $("btnMore").innerHTML = ICON.more;
 $("warnIc").innerHTML = ICON.warn;
+$("updIc").innerHTML = ICON.up;
 $("btnNew").innerHTML = ICON.plus + "New";
 $("btnUp").innerHTML = ICON.up;
 $("btnFp").innerHTML = ICON.copy;
@@ -160,6 +170,7 @@ async function refresh() {
   try {
     const [status, state] = await Promise.all([api("GET", "/sidecar/status"), api("GET", "/state")]);
     S.status = status; S.state = state;
+    try { S.update = await api("GET", "/sidecar/update-status"); } catch (e) { S.update = null; }
     // The attach target is stored the Swift way: {"device":{id,name,user}}.
     const att = status.attach || {};
     if (att.target && att.target.device) att.target = att.target.device;
@@ -189,6 +200,9 @@ function render() {
   $("statusDot").className = "dot " + cls;
   $("statusText").textContent = text;
   $("gitBanner").hidden = !(S.state && S.state.shell === "missing");
+  const up = S.update || {};
+  $("updBanner").hidden = !up.available;
+  if (up.available) $("updTitle").textContent = "Bromure Sidecar " + up.version + " is available";
   renderConn();
   renderSessions();
 }
@@ -371,6 +385,11 @@ $("btnSignOut").onclick = async () => { await api("POST", "/sidecar/signout", {}
 // --- footer -------------------------------------------------------------------------
 $("btnAgents").onclick = $("btnAgents2").onclick = () => window.sidecarOpenAgents();
 $("btnGit").onclick = () => window.sidecarInstallGit();
+$("btnUpd").onclick = async () => {
+  $("btnUpd").disabled = true;
+  try { await api("POST", "/sidecar/update-install", {}); toast("Installing the update…", 4000); }
+  catch (e) { toast(e.message, 4000); $("btnUpd").disabled = false; }
+};
 $("btnQuit").onclick = () => window.sidecarQuit((S.status && S.status.agentsRunning) || 0);
 document.addEventListener("keydown", e => { if (e.key === "Escape") window.sidecarHide(); });
 

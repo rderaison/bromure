@@ -2,16 +2,17 @@
 // (Resources/BromureSidecarIcon.icns, the mark in Sidecar blue): the exe's
 // multi-size app.ico, and the tray's variants — normal, idle (not
 // attached: greyed) and badged (an agent wants the user: a dot cut beside
-// the mark, as the Mac menu bar draws it).
+// the mark, as the Mac menu bar draws it). Then the .syso resource objects
+// both executables link: that icon, the manifest and the version.
 //
-//	go run ./tools/mkicons            (from sidecar/; writes cmd/BromureSidecar/assets/)
-//
-// Run scripts/winres.sh afterwards to embed app.ico in the executables.
+//	go run ./tools/mkicons                      icons + .syso (version 0.0.0)
+//	go run ./tools/mkicons -syso-only -version 1.2.3   .syso only (a release build)
 package main
 
 import (
 	"bytes"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -23,11 +24,18 @@ import (
 )
 
 func main() {
-	icns := filepath.Join("..", "Resources", "BromureSidecarIcon.icns")
+	icns := flag.String("icns", filepath.Join("..", "Resources", "BromureSidecarIcon.icns"), "the macOS icon")
+	version := flag.String("version", "0.0.0", "the version stamped in the executables")
+	sysoOnly := flag.Bool("syso-only", false, "only (re)write the .syso objects from the existing app.ico")
+	flag.Parse()
 	out := filepath.Join("cmd", "BromureSidecar", "assets")
-	if len(os.Args) > 1 {
-		icns = os.Args[1]
+	if !*sysoOnly {
+		makeIcons(*icns, out)
 	}
+	writeSyso(out, *version)
+}
+
+func makeIcons(icns, out string) {
 	srcs, err := readICNS(icns)
 	if err != nil {
 		fail(err)
@@ -62,22 +70,34 @@ func main() {
 	write("tray-dark-badge.ico", tray, func(img *image.NRGBA) { tint(0x93, 0xAE, 0xFF)(img); badge(img) })
 	write("tray-idle.ico", tray, tint(0x8A, 0x8D, 0x99))
 	write("tray-dark-idle.ico", tray, tint(0xA8, 0xAB, 0xB4))
-	// The resource objects both executables link: icon + manifest.
-	ico, _ := os.ReadFile(filepath.Join(out, "app.ico"))
-	res := append(iconResources(ico, 1), resource{typ: rtManifest, id: 1, data: []byte(manifest)})
-	for _, pkg := range []string{filepath.Join("cmd", "BromureSidecar"), filepath.Join("cmd", "bromure-sidecar")} {
+	// A PNG of the mark for the UI's window icon fallbacks.
+	f, _ := os.Create(filepath.Join(out, "mark-256.png"))
+	png.Encode(f, scaleFrom(srcs, 256))
+	f.Close()
+}
+
+// writeSyso writes the resource objects both executables link: icon,
+// manifest, version.
+func writeSyso(assets, version string) {
+	ico, err := os.ReadFile(filepath.Join(assets, "app.ico"))
+	if err != nil {
+		fail(err)
+	}
+	for _, exe := range []struct{ pkg, file, desc string }{
+		{filepath.Join("cmd", "BromureSidecar"), "BromureSidecar.exe", "Bromure Sidecar"},
+		{filepath.Join("cmd", "bromure-sidecar"), "bromure-sidecar.exe", "Bromure Sidecar (daemon and tools)"},
+	} {
+		res := append(iconResources(ico, 1),
+			resource{typ: rtManifest, id: 1, data: []byte(manifest)},
+			versionResource(version, exe.file, exe.desc))
 		for arch, m := range map[string]uint16{"amd64": machineAMD64, "arm64": machineARM64} {
-			p := filepath.Join(pkg, "rsrc_windows_"+arch+".syso")
+			p := filepath.Join(exe.pkg, "rsrc_windows_"+arch+".syso")
 			if err := os.WriteFile(p, syso(m, res), 0o644); err != nil {
 				fail(err)
 			}
 			fmt.Println("wrote", p)
 		}
 	}
-	// A PNG of the mark for the UI's window icon fallbacks.
-	f, _ := os.Create(filepath.Join(out, "mark-256.png"))
-	png.Encode(f, scaleFrom(srcs, 256))
-	f.Close()
 }
 
 func fail(err error) {

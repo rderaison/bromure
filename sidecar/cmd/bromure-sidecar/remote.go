@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rderaison/bromure/sidecar/internal/agents"
 	"github.com/rderaison/bromure/sidecar/internal/control"
@@ -137,6 +138,10 @@ type sidecarAPI struct {
 	engine *sessions.Engine
 	remote *remote
 	mu     sync.Mutex
+	// The last update check (updateLoop).
+	update    *updater.Release
+	checkedAt time.Time
+	updateErr string
 }
 
 func errBody(msg string) map[string]any { return map[string]any{"error": msg} }
@@ -302,23 +307,22 @@ func (s *sidecarAPI) Handle(verb string, b map[string]any) (int, map[string]any)
 			return 409, errBody(err.Error())
 		}
 		return 200, map[string]any{"ok": true}
+	case "update-status":
+		return 200, s.updateState()
 	case "update-check":
-		rel, err := updater.Check(context.Background(), version)
-		if err != nil {
-			return 502, errBody(err.Error())
-		}
-		if rel == nil {
-			return 200, map[string]any{"available": false, "version": version}
-		}
-		return 200, map[string]any{"available": true, "version": rel.Version}
+		s.checkUpdate()
+		return 200, s.updateState()
 	case "update-install":
-		rel, err := updater.Check(context.Background(), version)
-		if err != nil || rel == nil {
+		s.mu.Lock()
+		rel := s.update
+		s.mu.Unlock()
+		if rel == nil {
 			return 409, errBody("no update available")
 		}
 		if err := updater.Install(context.Background(), rel); err != nil {
 			return 502, errBody(err.Error())
 		}
+		// The installer stops the tray and this daemon, and starts them again.
 		return 200, map[string]any{"ok": true, "version": rel.Version}
 	case "quit":
 		select {
@@ -372,4 +376,55 @@ func (s *sidecarAPI) status() map[string]any {
 func anyList(v any) []any {
 	l, _ := v.([]any)
 	return l
+}
+
+// updateLoop checks the update feed two minutes after start, then every
+// 12 hours; the flyout offers what it found (update-status).
+func (s *sidecarAPI) updateLoop(stop <-chan struct{}) {
+	t := time.NewTimer(2 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
+		s.checkUpdate()
+		t.Reset(12 * time.Hour)
+	}
+}
+
+func (s *sidecarAPI) checkUpdate() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rel, err := updater.Check(ctx, version)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkedAt = time.Now()
+	s.updateErr = ""
+	if err != nil {
+		s.updateErr = err.Error()
+		logx.Printf("update: check failed: %v", err)
+		return
+	}
+	s.update = rel
+	if rel != nil {
+		logx.Printf("update: %s is available (this is %s)", rel.Version, version)
+	}
+}
+
+func (s *sidecarAPI) updateState() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := map[string]any{"available": s.update != nil, "current": version}
+	if s.update != nil {
+		st["version"] = s.update.Version
+	}
+	if !s.checkedAt.IsZero() {
+		st["checkedAt"] = s.checkedAt.Unix()
+	}
+	if s.updateErr != "" {
+		st["error"] = s.updateErr
+	}
+	return st
 }

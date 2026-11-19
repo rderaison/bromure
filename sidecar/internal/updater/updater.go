@@ -31,7 +31,10 @@ import (
 )
 
 // DefaultFeed is where release-upload publishes the feed.
-const DefaultFeed = "https://bromure.io/downloads/bromure-sidecar-windows/latest.json"
+const DefaultFeed = "https://dl.bromure.io/releases-sidecar-windows/latest.json"
+
+// Client is what fetches the feed and the installer (tests swap it).
+var Client = http.DefaultClient
 
 // FeedKey overrides the feed URL (an empty string disables updates).
 const FeedKey = "updateFeed"
@@ -55,7 +58,7 @@ func Check(ctx context.Context, current string) (*Release, error) {
 		return nil, nil
 	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -118,36 +121,45 @@ func parts(v string) []int {
 // Install downloads the release, checks its SHA-256 and runs the
 // installer silently (it stops the tray and daemon and starts them again).
 func Install(ctx context.Context, r *Release) error {
+	dst, err := Download(ctx, r)
+	if err != nil {
+		return err
+	}
+	return exec.Command(dst, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART").Start()
+}
+
+// Download fetches the installer to a temporary folder and checks its
+// SHA-256; its path.
+func Download(ctx context.Context, r *Release) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", r.URL, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
 	dir, err := os.MkdirTemp("", "bromure-sidecar-update-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	dst := filepath.Join(dir, "BromureSidecar-setup.exe")
 	f, err := os.Create(dst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	h := sha256.New()
 	_, err = io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, 512<<20))
 	f.Close()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, r.SHA256) {
 		os.RemoveAll(dir)
-		return fmt.Errorf("download: SHA-256 mismatch (%s)", got)
+		return "", fmt.Errorf("download: SHA-256 mismatch (%s)", got)
 	}
-	cmd := exec.Command(dst, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
-	return cmd.Start()
+	return dst, nil
 }

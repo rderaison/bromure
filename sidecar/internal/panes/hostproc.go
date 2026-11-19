@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/signal"
@@ -92,7 +93,7 @@ func EnsureHost() (Client, error) {
 	if err := paths.Ensure(); err != nil {
 		return nil, err
 	}
-	if err := spawnHost(paths.Executable()); err != nil {
+	if err := spawnHost(hostExecutable()); err != nil {
 		return nil, fmt.Errorf("panes: starting the pane host: %w", err)
 	}
 	deadline := time.Now().Add(8 * time.Second)
@@ -159,4 +160,43 @@ func RunHost() int {
 	}
 	logx.Printf("panes: pane host exiting (%d windows closed)", n)
 	return 0
+}
+
+// hostExecutable is the binary the pane host runs from. On Windows a
+// running executable can't be replaced, and the pane host outlives every
+// update while agents run in it: it runs from its own copy in the data
+// folder (bin/panehost-v<protocol>-<build>.exe), so an installer only ever
+// replaces files nothing long-lived holds. Copies no host runs any more
+// are removed. Elsewhere it is this binary.
+func hostExecutable() string {
+	self := paths.Executable()
+	if runtime.GOOS != "windows" {
+		return self
+	}
+	st, err := os.Stat(self)
+	if err != nil {
+		return self
+	}
+	h := fnv.New32a()
+	fmt.Fprintf(h, "%d-%d", st.Size(), st.ModTime().UnixNano())
+	name := fmt.Sprintf("panehost-v%d-%08x.exe", HostVersion, h.Sum32())
+	dst := filepath.Join(paths.BinDir(), name)
+	if _, err := os.Stat(dst); err != nil {
+		data, err := os.ReadFile(self)
+		if err != nil {
+			return self
+		}
+		tmp := dst + ".tmp"
+		if os.WriteFile(tmp, data, 0o755) != nil || os.Rename(tmp, dst) != nil {
+			os.Remove(tmp)
+			return self
+		}
+	}
+	old, _ := filepath.Glob(filepath.Join(paths.BinDir(), "panehost-v*.exe"))
+	for _, o := range old {
+		if o != dst {
+			_ = os.Remove(o) // fails while a host still runs from it: kept
+		}
+	}
+	return dst
 }

@@ -95,7 +95,9 @@ func serve(args []string) int {
 
 	rem := startRemote(engine, srv)
 	api.Keys = rem.keys
-	api.Sidecar = &sidecarAPI{engine: engine, remote: rem}
+	sc := &sidecarAPI{engine: engine, remote: rem}
+	api.Sidecar = sc
+	go sc.updateLoop(stopLoops)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
