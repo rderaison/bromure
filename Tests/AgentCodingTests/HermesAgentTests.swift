@@ -230,7 +230,7 @@ struct HermesAgentTests {
         let stampEnd = try #require(rc.range(of: "_bromure_hermes_apply() {", range: stamp.upperBound..<rc.endIndex))
         let body = String(rc[stamp.upperBound..<stampEnd.lowerBound])
         #expect(body.contains("_bromure_hermes_catalog_default | sha256sum"))
-        #expect(body.contains("printf 'apply-3 '"))
+        #expect(body.contains("printf 'apply-4 '"))
         #expect(rc.contains("BROMURE_HERMES_NOUS_DEFAULT=\"$(_bromure_hermes_catalog_default)\""))
     }
 
@@ -322,6 +322,211 @@ struct HermesAgentTests {
         #expect(!again.contains { $0.hasPrefix("config set hooks.") || $0.hasPrefix("config unset hooks.") })
         let allow2 = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: allowURL)) as? [String: Any])
         #expect((allow2["approvals"] as? [Any])?.count == 2)
+    }
+
+    // MARK: - One Hermes home per tab (delegation identity)
+
+    /// "This agent isn't running in a Bromure session tab, so it has no
+    /// identity here": Hermes starts its MCP servers from the home's shared
+    /// gateway, with a filtered environment -- the delegation shim never saw
+    /// its tab's tmux pane.
+    @Test("the delegation server gets the tab's tmux variables passed on; other servers don't")
+    func applyDelegationEnv() throws {
+        let calls = try runApply(
+            settings: ["model": ["provider": "nous"], "key_var": ""],
+            servers: ["delegation": ["command": "python3", "args": ["/mnt/bromure-meta/bromure-delegation-mcp.py"]],
+                      "browser": ["command": "python3", "args": ["/mnt/bromure-meta/bromure-browser-mcp.py"],
+                                  "env": ["A": "1"]]],
+            home: try tempDir())
+        let deleg = try #require(calls.first { $0.hasPrefix("config set mcp_servers.delegation ") })
+        let json = try #require(deleg.split(separator: " ", maxSplits: 3).last.map(String.init))
+        let v = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(v["env"] as? [String: String] == ["TMUX": "${TMUX}", "TMUX_PANE": "${TMUX_PANE}"])
+        let browser = try #require(calls.first { $0.hasPrefix("config set mcp_servers.browser ") })
+        #expect(!browser.contains("TMUX"))
+    }
+
+    private func bashFunctions(_ names: [String]) throws -> String {
+        let lines = try renderBashrc().components(separatedBy: "\n")
+        return try names.map { name in
+            let start = try #require(lines.firstIndex { $0.hasSuffix(name + "() {") })
+            let end = try #require(lines[start...].firstIndex { $0 == "}" })
+            return lines[start...end].joined(separator: "\n")
+        }.joined(separator: "\n")
+    }
+
+    private func bash(_ script: String, env: [String: String]) throws -> (Int32, String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", script]
+        proc.environment = env
+        let out = Pipe(); proc.standardOutput = out
+        proc.standardError = Pipe()
+        try proc.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return (proc.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    @Test("only a chat goes to the tab's home: subcommands and a chosen profile stay the user's; a resume names its id")
+    func tabChatAndResume() throws {
+        let fns = try bashFunctions(["_bromure_hermes_is_chat", "_bromure_hermes_resume_id"])
+        func isChat(_ args: String) throws -> Bool {
+            try bash(fns + "\n_bromure_hermes_is_chat \(args)", env: ["PATH": "/usr/bin:/bin"]).0 == 0
+        }
+        #expect(try isChat(""))
+        #expect(try isChat("chat --query=hi"))
+        #expect(try isChat("--resume local-ab12 --yolo"))
+        #expect(try isChat("-c"))
+        #expect(try !isChat("auth add nous --type oauth"))
+        #expect(try !isChat("config set x y"))
+        #expect(try !isChat("sessions list"))
+        #expect(try !isChat("-p work"))
+        #expect(try !isChat("chat --profile=work"))
+        func resumeID(_ args: String) throws -> String {
+            try bash(fns + "\n_bromure_hermes_resume_id \(args)", env: ["PATH": "/usr/bin:/bin"]).1
+        }
+        #expect(try resumeID("--resume local-ab12 --yolo") == "local-ab12")
+        #expect(try resumeID("-r 20261117_140352_ab12cd") == "20261117_140352_ab12cd")
+        #expect(try resumeID("--resume=local-x.1") == "local-x.1")
+        #expect(try resumeID("-c") == "")
+        #expect(try resumeID("--resume ../etc") == "", "never a path")
+        #expect(try resumeID("--resume 'a;rm'") == "")
+    }
+
+    @Test("a resumed session goes back to the home holding it: the user's, or a profile's")
+    func sessionHome() throws {
+        let fns = try bashFunctions(["_bromure_hermes_session_home"])
+        let home = try tempDir()
+        func db(_ dir: String, _ ids: [String]) throws {
+            let d = home.appendingPathComponent(dir)
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            let sql = "CREATE TABLE sessions (id TEXT PRIMARY KEY);"
+                + ids.map { "INSERT INTO sessions VALUES ('\($0)');" }.joined()
+            try run("/usr/bin/sqlite3", [d.appendingPathComponent("state.db").path, sql])
+        }
+        try db(".hermes", ["local-root"])
+        try db(".hermes/profiles/tab-3", ["local-three"])
+        try db(".hermes/profiles/bt-x", ["local-task"])
+        func find(_ sid: String) throws -> String {
+            try bash(fns + "\n_bromure_hermes_session_home '\(sid)'", env: ["HOME": home.path, "PATH": "/usr/bin:/bin"]).1
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        #expect(try find("local-root") == home.path + "/.hermes")
+        #expect(try find("local-three") == home.path + "/.hermes/profiles/tab-3")
+        #expect(try find("local-task") == home.path + "/.hermes/profiles/bt-x")
+        #expect(try find("local-none") == "")
+    }
+
+    @Test("a tab's chat runs in tab-<window>, cloned once with the user's applied settings; a resume returns to its own home")
+    func tabHome() throws {
+        let fns = try bashFunctions(["_bromure_hermes_tab_home"])
+        let dir = try tempDir()
+        let bin = dir.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let log = dir.appendingPathComponent("calls.log")
+        for (name, body) in [
+            ("hermes", "printf 'hermes %s\\n' \"$*\" >> '\(log.path)'\n"
+                + "[ \"$1 $2\" = \"profile create\" ] && mkdir -p \"$HOME/.hermes/profiles/$3\" "
+                + "&& cp \"$HOME/.hermes/config.yaml\" \"$HOME/.hermes/profiles/$3/\"\nexit 0"),
+            ("tmux", "[ \"$4\" = '%7' ] && echo 4 && exit 0\nexit 1"),
+        ] {
+            let url = bin.appendingPathComponent(name)
+            try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+        let root = dir.appendingPathComponent(".hermes")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "model: {}\n".write(to: root.appendingPathComponent("config.yaml"), atomically: true, encoding: .utf8)
+        try "stamp\n".write(to: root.appendingPathComponent(".bromure-applied"), atomically: true, encoding: .utf8)
+        let stubs = """
+        _bromure_hermes_apply() { printf 'apply %s\\n' "${HERMES_HOME:-root}" >> '\(log.path)'; }
+        _bromure_hermes_claim() { printf 'claim %s\\n' "$1" >> '\(log.path)'; [ "$1" != "$BUSY" ]; }
+        _bromure_hermes_session_home() { [ "$1" = local-old ] && printf '%s' "$HOME/.hermes"; }
+        """
+        func tabHome(_ sid: String, pane: String = "%7", busy: String = "") throws -> (Int32, String) {
+            try bash(fns + "\n" + stubs + "\n_bromure_hermes_tab_home '\(sid)' -u OPENAI_API_KEY",
+                     env: ["HOME": dir.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane, "BUSY": busy])
+        }
+        func calls() -> [String] {
+            ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        }
+        let tab = root.path + "/profiles/tab-4"
+        #expect(try tabHome("") == (0, tab))
+        #expect(calls() == ["apply root", "hermes profile create tab-4 --clone", "claim " + tab])
+        // The clone carries the applied settings' stamp: no second apply.
+        #expect((try? String(contentsOf: URL(fileURLWithPath: tab + "/.bromure-applied"), encoding: .utf8)) == "stamp\n")
+        #expect(try tabHome("") == (0, tab))
+        #expect(calls().filter { $0.hasPrefix("hermes profile create") }.count == 1, "cloned once")
+        // A resume goes back to the home holding the session, if it's free...
+        #expect(try tabHome("local-old") == (0, root.path))
+        // ...else this tab's own (Hermes then says the session isn't there).
+        #expect(try tabHome("local-old", busy: root.path) == (0, tab))
+        // Not in tmux, or a pane tmux doesn't know: no home of its own.
+        #expect(try tabHome("", pane: "").0 != 0)
+        #expect(try tabHome("", pane: "%9").0 != 0)
+    }
+
+    /// The claim's /proc scan, against a fake /proc (macOS has none); its
+    /// SIGTERM replaced with a print, so no real process can be signalled.
+    @Test("claiming a home stops a gateway another window started, and refuses one another window's chat uses")
+    func claimHome() throws {
+        let dir = try tempDir()
+        let proc = dir.appendingPathComponent("proc")
+        let home = dir.appendingPathComponent("home")
+        let fns = try bashFunctions(["_bromure_hermes_claim"])
+            .replacingOccurrences(of: "\"/proc\"", with: "'\(proc.path)'")
+            .replacingOccurrences(of: "\"/proc/%", with: "'\(proc.path)/%")
+            .replacingOccurrences(of: "%d\" % p)", with: "%d' % p)")
+            .replacingOccurrences(of: "%s/cmdline\" % d", with: "%s/cmdline' % d")
+            .replacingOccurrences(of: "%s/comm\" % d", with: "%s/comm' % d")
+            .replacingOccurrences(of: "%d/environ\" % pid", with: "%d/environ' % pid")
+            .replacingOccurrences(of: "os.kill(pid, signal.SIGTERM)",
+                                  with: "print(pid); __import__('shutil').rmtree('\(proc.path)/%d' % pid)")
+        #expect(!fns.contains("os.kill"))
+        let bin = dir.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        // Panes %1 and %2 are in window 1 (a split), %5 in window 5; %9 is gone.
+        try """
+        #!/bin/sh
+        case "$4" in %1|%2) echo 1 ;; %5) echo 5 ;; *) exit 1 ;; esac
+        """.write(to: bin.appendingPathComponent("tmux"), atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("tmux").path)
+        let tab = home.path + "/.hermes/profiles/tab-1"
+        func process(_ pid: Int, comm: String, argv: [String], env: [String: String]) throws {
+            let d = proc.appendingPathComponent(String(pid))
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            try Data((argv.joined(separator: "\0") + "\0").utf8).write(to: d.appendingPathComponent("cmdline"))
+            try Data((comm + "\n").utf8).write(to: d.appendingPathComponent("comm"))
+            try Data(env.map { "\($0)=\($1)\0" }.joined().utf8).write(to: d.appendingPathComponent("environ"))
+        }
+        let gateway = ["python3", "-m", "hermes_cli.main", "gateway", "run", "--quiet", "--idle-exit"]
+        func claim(_ h: String, pane: String = "%1") throws -> (Int32, String) {
+            try bash(fns + "\n_bromure_hermes_claim '\(h)'",
+                     env: ["HOME": home.path, "PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": pane])
+        }
+        // A gateway this window started (another pane of it): kept.
+        try process(101, comm: "python3", argv: gateway, env: ["HERMES_HOME": tab, "TMUX_PANE": "%2"])
+        // A closed tab's gateway, still idling (its pane gone): stopped.
+        try process(102, comm: "python3", argv: gateway, env: ["HERMES_HOME": tab, "TMUX_PANE": "%9"])
+        // Window 5's gateway, on another home: none of this one's business.
+        try process(103, comm: "python3", argv: gateway, env: ["HERMES_HOME": home.path + "/.hermes/profiles/tab-5",
+                                                               "TMUX_PANE": "%5"])
+        #expect(try claim(tab) == (0, "102\n"))
+        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("101").path))
+        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("103").path))
+        // The user's own home: window 5's chat is on it, so window 1 can't
+        // have it, and its gateway is left running.
+        try process(201, comm: "python3", argv: ["python3", "-m", "hermes_cli.main", "--profile", "default",
+                                                 "gateway", "run"], env: ["TMUX_PANE": "%5"])
+        try process(202, comm: "python3", argv: ["python3", "-I", "/usr/local/bin/hermes", "chat"],
+                    env: ["TMUX_PANE": "%5"])
+        #expect(try claim(home.path + "/.hermes").0 == 1)
+        #expect(FileManager.default.fileExists(atPath: proc.appendingPathComponent("201").path))
+        // Window 5 itself may: the gateway is its own.
+        #expect(try claim(home.path + "/.hermes", pane: "%5") == (0, ""))
+        // Outside tmux: never.
+        #expect(try claim(tab, pane: "").0 == 1)
     }
 
     @Test("a board task's Hermes home gets the board server; a malformed task name gets nothing")
