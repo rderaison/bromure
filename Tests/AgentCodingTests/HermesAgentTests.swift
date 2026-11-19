@@ -604,7 +604,9 @@ struct HermesAgentTests {
 
     /// The claim only sees chats already running: the lease is what keeps
     /// two tabs opening one home at once (two resumes of one session) apart.
-    @Test("a home's lease: one window holds it until it lets go; another pane of that window may share it")
+    /// Every chat holds its own: one let in beside the holder (another pane
+    /// of its window) without one was unguarded once the holder exited.
+    @Test("a home's lease: one chat holds it until it lets go; any other is refused, another pane of its window too")
     func leaseHome() throws {
         let dir = try tempDir()
         let bin = dir.appendingPathComponent("bin")
@@ -615,15 +617,15 @@ struct HermesAgentTests {
         let home = dir.appendingPathComponent("home")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let fns = try bashFunctions(["_bromure_hermes_lease"])
-        // Window 1 takes it; window 5 (its own shell, as another tab is) is
-        // refused while it's held, and gets it once window 1 lets go.
+        // Window 1 takes it. Window 5, and another pane of window 1 (each
+        // its own shell, as another tab or pane is), are refused while it's
+        // held; once window 1 lets go, window 5 gets it and holds it.
         let script = fns + #"""
 
         other() { WIN=$1 bash -c "$(declare -f _bromure_hermes_lease)"'
-            _lease=""; _bromure_hermes_lease "$0" && echo "w$WIN:${_lease:-shared}" || echo "w$WIN:refused"' "$H" 197>&-; }
+            _lease=""; _bromure_hermes_lease "$0" && echo "w$WIN:${_lease:-unleased}" || echo "w$WIN:refused"' "$H" 197>&-; }
         _lease=""
         WIN=1 _bromure_hermes_lease "$H" && echo "w1:${_lease}"
-        cat "$H/.bromure-lease"
         other 5; other 1
         exec 197>&-
         other 5
@@ -631,7 +633,10 @@ struct HermesAgentTests {
         """#
         let (rc, out) = try bash(script, env: ["PATH": bin.path + ":/usr/bin:/bin", "TMUX_PANE": "%1", "H": home.path])
         #expect(rc == 0)
-        #expect(out == "w1:1\nw1\nw5:refused\nw1:shared\nw5:1\nnohome:refused\n")
+        #expect(out == "w1:1\nw5:refused\nw1:refused\nw5:1\nnohome:refused\n")
+        // No way in without the lease: a refusal is the only other outcome.
+        let fn = try bashFunctions(["_bromure_hermes_lease"])
+        #expect(fn.components(separatedBy: "return 0").count == 2)
         // The wrapper takes it before writing the window, and never hands it to Hermes.
         let rc2 = try renderBashrc()
         let lease = try #require(rc2.range(of: "_bromure_hermes_lease \"$HERMES_HOME\""))

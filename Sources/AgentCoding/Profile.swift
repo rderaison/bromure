@@ -7433,26 +7433,23 @@ public final class ProfileStore {
             continue
     BROMURE_HERMES_SESSION_HOME
     }
-    #    Hold home $1 for this tab window until its chat ends: an exclusive
-    #    flock(2) on $1/.bromure-lease, kept on the shell's fd 197 (never
-    #    passed on to Hermes; `hermes()` lets go once its chat exits, the
-    #    kernel when the tab's shell dies), naming the window that holds
-    #    it. Another pane of the holder's window may share the home, as
-    #    the claim allows; any other window is refused.
+    #    Hold home $1 until this chat ends: an exclusive flock(2) on
+    #    $1/.bromure-lease, kept on the shell's fd 197 (never passed on to
+    #    Hermes; `hermes()` lets go once its chat exits, the kernel when
+    #    the tab's shell dies). Every chat Bromure lets run holds it, so
+    #    one home is one chat at a time -- another pane of the same window
+    #    too: a chat let in beside the holder without a lease of its own
+    #    was unguarded once the holder exited, and another window could
+    #    take the home from under it.
     _bromure_hermes_lease() {
-        local _w _o
         [ -n "$1" ] || return 1
-        _w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
-        case "$_w" in ''|*[!0-9]*) return 1 ;; esac
         exec 197<>"$1/.bromure-lease" || return 1
         if python3 -c 'import fcntl; fcntl.flock(197, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
-            printf 'w%s\\n' "$_w" > "$1/.bromure-lease"
             _lease=1
             return 0
         fi
         exec 197>&-
-        _o=$(head -c 16 "$1/.bromure-lease" 2>/dev/null)
-        [ "$_o" = "w$_w" ]
+        return 1
     }
     #    Make home $1 this tab window's: fails when a chat from another
     #    window is using it (one home, one window: its delegation tools
@@ -7818,7 +7815,7 @@ public final class ProfileStore {
         local _lease=""
         if [ -n "$_claimed" ] && [ -n "${HERMES_HOME:-}" ]; then
             if ! _bromure_hermes_lease "$HERMES_HOME"; then
-                echo "[bromure-ac] the Hermes home $HERMES_HOME is being opened by another tab's Hermes; quit it there first." >&2
+                echo "[bromure-ac] the Hermes home $HERMES_HOME is in use by another Hermes chat (in another tab, or another pane of this one); quit it there first." >&2
                 return 1
             fi
             local _win
@@ -7854,10 +7851,7 @@ public final class ProfileStore {
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@" 197>&-
         fi
         _rc=$?
-        if [ -n "$_lease" ]; then
-            : > "$HERMES_HOME/.bromure-lease"
-            exec 197>&-
-        fi
+        [ -z "$_lease" ] || exec 197>&-
         return $_rc
     }
 
