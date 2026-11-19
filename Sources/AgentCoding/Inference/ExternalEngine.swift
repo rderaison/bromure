@@ -440,8 +440,11 @@ enum ExternalEngine {
         }
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            // Shown in full under Test Connection: capped, so a huge message
+            // can't stretch the settings (the agent-facing relay isn't).
+            let reason = errorReason(from: data)
             throw ProbeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0,
-                                       errorReason(from: data))
+                                       reason.count > 300 ? String(reason.prefix(300)) + "…" : reason)
         }
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let list = obj["data"] as? [[String: Any]] else {
