@@ -3990,6 +3990,15 @@ public final class ProfileStore {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
     }
 
+    /// Whether workspace `id` still has its directory: false only once it
+    /// was deleted (a load that failed, or skipped a corrupt profile.json,
+    /// leaves it there).
+    public func hasDirectory(_ id: UUID) -> Bool {
+        var dir: ObjCBool = false
+        return fm.fileExists(atPath: rootDir.appendingPathComponent(id.uuidString, isDirectory: true).path,
+                             isDirectory: &dir) && dir.boolValue
+    }
+
     /// `vm run --rm`: a marker in the workspace's own directory, so the
     /// mark outlives the process -- a quit, a signal or a crash while the
     /// VM is stopped (a reboot's relaunch waiting on a prompt, a boot that

@@ -1538,6 +1538,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // them (settings, AppleScript, the CLI): a card left on older
             // ones had its next Save write them back over the newer.
             unifiedWindow?.refreshVMDashboard()
+            // A deleted workspace's sessions are archived, not left Paused
+            // (nothing to wake; no peer may reach them). Also catches ones
+            // deleted before this ran. Gone = not loaded AND no directory:
+            // a load that came back short archives nothing.
+            let loaded = Set(profiles.map(\.id))
+            agentSessionStore.archiveSessions(ofGoneWorkspaces: { [store] id in
+                !loaded.contains(id) && !store.hasDirectory(id)
+            })
         }
     }
 

@@ -810,6 +810,29 @@ final class AgentSessionStore {
         save()
     }
 
+    /// Archive the sessions of workspaces that are gone (deleted, by any
+    /// path): "Paused" says a message carries on, but there's no machine
+    /// left to wake, and peers shouldn't be offered them (the delegation
+    /// tools never reach an archived session). `gone` answers per
+    /// workspace id. Returns the sessions archived.
+    @discardableResult
+    func archiveSessions(ofGoneWorkspaces gone: (UUID) -> Bool, now: Date = Date()) -> [UUID] {
+        var verdict: [UUID: Bool] = [:]
+        var archived: [UUID] = []
+        for i in sessions.indices where !sessions[i].isArchived && !sessions[i].isDeleted {
+            let pid = sessions[i].profileID
+            let isGone = verdict[pid] ?? gone(pid)
+            verdict[pid] = isGone
+            guard isGone else { continue }
+            sessions[i].archivedAt = now
+            sessions[i].agentAlive = nil
+            deadSince[sessions[i].id] = nil
+            archived.append(sessions[i].id)
+        }
+        if !archived.isEmpty { save() }
+        return archived
+    }
+
     /// Sessions on machines that aren't attached (off, suspended): no
     /// verdict about their agents holds any more — the next probe, once the
     /// machine is back, decides again.
