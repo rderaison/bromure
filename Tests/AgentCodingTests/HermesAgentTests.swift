@@ -454,6 +454,9 @@ struct HermesAgentTests {
         let tab = root.path + "/profiles/tab-4"
         #expect(try tabHome("") == (0, tab))
         #expect(calls() == ["apply root", "hermes profile create tab-4 --clone", "claim " + tab])
+        // Its window is written as soon as the home exists (Hermes starts
+        // its MCP servers then).
+        #expect((try? String(contentsOf: URL(fileURLWithPath: tab + "/bromure-window"), encoding: .utf8)) == "w4\n")
         // The clone carries the applied settings' stamp: no second apply.
         #expect((try? String(contentsOf: URL(fileURLWithPath: tab + "/.bromure-applied"), encoding: .utf8)) == "stamp\n")
         #expect(try tabHome("") == (0, tab))

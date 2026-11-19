@@ -7375,6 +7375,9 @@ public final class ProfileStore {
             _bromure_hermes_apply "$@" >/dev/null 2>&1
             command env "$@" -u BROMURE_HERMES_API_KEY hermes profile create "$_p" --clone >/dev/null 2>&1 \\
                 || mkdir -p "$_h"
+            # Hermes starts the new home's MCP servers as it appears: its
+            # window now, not after the settings step (seconds later).
+            printf 'w%s\\n' "$_w" > "$_h/bromure-window"
             for _f in shell-hooks-allowlist.json .bromure-applied; do
                 if [ -e "$_r/$_f" ] && [ ! -e "$_h/$_f" ]; then cp -p "$_r/$_f" "$_h/$_f"; fi
             done
