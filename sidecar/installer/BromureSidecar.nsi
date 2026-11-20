@@ -83,22 +83,50 @@ VIAddVersionKey "LegalCopyright" "Bromure"
 ; executables too, but only when they live outside $INSTDIR) and so does its
 ; uninstall entry. Install and uninstall both run it, so no entry is left
 ; behind that could later remove the NSIS install.
+; Inno numbers the uninstallers of apps that share a folder (unins000,
+; unins001, …), so only the one named in Sidecar's own UninstallString is
+; deleted, with its .dat and .msg; without that entry, no unins file is
+; touched.
 !macro RetireInno
-  ReadRegStr $R0 HKCU "${INNOKEY}" "Inno Setup: App Path"
-  ${If} $R0 != ""
-    Delete "$R0\unins0*.exe"
-    Delete "$R0\unins0*.dat"
-    Delete "$R0\unins0*.msg"
-    ${If} $R0 != $INSTDIR
-      Delete "$R0\bromure-sidecar.exe"
-      Delete "$R0\BromureSidecar.exe"
-      RMDir "$R0"
+  ; "C:\…\unins000.exe" → $R1 = folder, $R2 = "unins000".
+  ReadRegStr $R0 HKCU "${INNOKEY}" "UninstallString"
+  StrCpy $R1 $R0 1
+  ${If} $R1 == '"'
+    StrCpy $R0 $R0 "" 1
+  ${EndIf}
+  StrCpy $R1 $R0 1 -1
+  ${If} $R1 == '"'
+    StrCpy $R0 $R0 -1
+  ${EndIf}
+  StrLen $R3 $R0
+  ${Do}
+    IntOp $R3 $R3 - 1
+    ${If} $R3 < 0
+      ${ExitDo}
+    ${EndIf}
+    StrCpy $R1 $R0 1 $R3
+  ${LoopUntil} $R1 == "\"
+  ${If} $R3 > 0
+    StrCpy $R1 $R0 $R3
+    IntOp $R3 $R3 + 1
+    StrCpy $R2 $R0 "" $R3
+    StrCpy $R4 $R2 5
+    StrCpy $R5 $R2 "" -4
+    ${If} $R4 == "unins"
+    ${AndIf} $R5 == ".exe"
+      StrCpy $R2 $R2 -4
+      Delete "$R1\$R2.exe"
+      Delete "$R1\$R2.dat"
+      Delete "$R1\$R2.msg"
     ${EndIf}
   ${EndIf}
-  ; Its files may outlive the entry.
-  Delete "$INSTDIR\unins0*.exe"
-  Delete "$INSTDIR\unins0*.dat"
-  Delete "$INSTDIR\unins0*.msg"
+  ReadRegStr $R0 HKCU "${INNOKEY}" "Inno Setup: App Path"
+  ${If} $R0 != ""
+  ${AndIf} $R0 != $INSTDIR
+    Delete "$R0\bromure-sidecar.exe"
+    Delete "$R0\BromureSidecar.exe"
+    RMDir "$R0"
+  ${EndIf}
   DeleteRegKey HKCU "${INNOKEY}"
 !macroend
 
