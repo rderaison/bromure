@@ -32,6 +32,9 @@ SetCompressor /SOLID lzma
 
 !define APPNAME "Bromure Sidecar"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BromureSidecar"
+; Releases up to 0.2.0 were Inno Setup installs (AppId {6F1E5C2A-…}) into the
+; same folder; their entry and unins000.exe must not outlive the switch.
+!define INNOKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F1E5C2A-8B3D-4E7A-9C1F-B5D2A0E4C7B9}_is1"
 !define WEBVIEW2KEY "Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 Name "${APPNAME}"
@@ -74,6 +77,31 @@ VIAddVersionKey "LegalCopyright" "Bromure"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; Retires an Inno Setup install of Sidecar without running its uninstaller
+; (that would stop the pane host and the agents in it, and remove the URL
+; scheme and the Run entry this installer writes): its own files go (the
+; executables too, but only when they live outside $INSTDIR) and so does its
+; uninstall entry. Install and uninstall both run it, so no entry is left
+; behind that could later remove the NSIS install.
+!macro RetireInno
+  ReadRegStr $R0 HKCU "${INNOKEY}" "Inno Setup: App Path"
+  ${If} $R0 != ""
+    Delete "$R0\unins0*.exe"
+    Delete "$R0\unins0*.dat"
+    Delete "$R0\unins0*.msg"
+    ${If} $R0 != $INSTDIR
+      Delete "$R0\bromure-sidecar.exe"
+      Delete "$R0\BromureSidecar.exe"
+      RMDir "$R0"
+    ${EndIf}
+  ${EndIf}
+  ; Its files may outlive the entry.
+  Delete "$INSTDIR\unins0*.exe"
+  Delete "$INSTDIR\unins0*.dat"
+  Delete "$INSTDIR\unins0*.msg"
+  DeleteRegKey HKCU "${INNOKEY}"
+!macroend
+
 Var GitMissing
 Var WebView2Missing
 
@@ -88,6 +116,8 @@ Section "-${APPNAME}" SecMain
   nsExec::Exec '"$SYSDIR\taskkill.exe" /IM BromureSidecar.exe /F'
   Pop $0
   Sleep 1000
+
+  !insertmacro RetireInno
 
   SetOutPath "$INSTDIR"
   File "${DISTDIR}/bromure-sidecar.exe"
@@ -238,6 +268,7 @@ Section "Uninstall"
   Delete "$INSTDIR\bromure-sidecar.exe"
   Delete "$INSTDIR\BromureSidecar.exe"
   Delete "$INSTDIR\uninstall.exe"
+  !insertmacro RetireInno
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   DeleteRegKey HKCU "Software\Classes\bromure-agent-host"
