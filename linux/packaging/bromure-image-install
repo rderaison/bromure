@@ -3,7 +3,8 @@
 # for this server, /var/lib/bromure-ac-image, read-only for every user: the
 # prebuilt amd64 image downloaded when it's published, else baked here
 # under Firecracker (needs /dev/kvm and the network, a few minutes).
-# --build-local skips the download. Run as root; rerun to update it.
+# --build-local skips the download; -v (--verbose) shows the installer's
+# console as it works. Run as root; rerun to update it.
 set -e
 [ "$(id -u)" = 0 ] || { echo "bromure-image-install: run as root (sudo)" >&2; exit 1; }
 L=/usr/lib/bromure-ac

@@ -81,7 +81,8 @@ struct Trace: AsyncParsableCommand {
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
 struct Daemon: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Run the daemon (systemd: bromure-ac.service).")
+    static let configuration = CommandConfiguration(
+        abstract: "Run the daemon. On a multi-user server each user's runs as bromure-ac@<user>, started when they first use bromure-ac.")
 
     // partial: the systemd user service (not an NSApplication): the control socket (inherited from systemd) and SIGTERM/SIGINT through DispatchSource to Daemon.shutdown
     // @port Run.run() h=9e6fb971a835c20c @d3ebbda2
@@ -90,6 +91,10 @@ struct Daemon: AsyncParsableCommand {
     func run() async throws {
         // Before anything spawns threads that inherit the mask.
         _ = acl_unblock_term_signals()
+        if let refusal = MultiUserAdmin.rootDaemonRefusal(euid: geteuid(), multiUser: FileManager.default.fileExists(atPath: MultiUserAdmin.socketDir),
+                                              underSystemd: ProcessInfo.processInfo.environment["INVOCATION_ID"] != nil) {
+            throw CLIError(refusal)
+        }
         let config = DaemonConfig.fromEnvironment()
         // Multi-user: systemd's socket unit made the control socket (owner,
         // group and mode its own) and passes it as "control".
@@ -457,7 +462,7 @@ extension VM {
 
 // @port-skip linux-only: Linux CLI group for the guest image (macOS: the app's Rebuild Base Image)
 struct Image: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Install.self, Bake.self, Info.self])
+    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Install.self, Bake.self, Info.self, Verify.self])
 
     /// `image info`: macOS's `info`, the base image's version, sizes and path.
     struct Info: AsyncParsableCommand {
@@ -513,21 +518,68 @@ struct Image: AsyncParsableCommand {
         func run() async throws {
             _ = acl_unblock_term_signals()
             let o = try await bake.options()
-            let verbose = bake.verbose
-            if buildLocal { return try await Bake.bake(o, verbose: verbose) }
-            let progress: @Sendable (String) -> Void = { FileHandle.standardError.write(Data("[install] \($0)\n".utf8)) }
+            let bar = ProgressBar(verbose: bake.verbose)
+            if buildLocal { return try await Bake.bake(o, bar: bar) }
+            let progress: @Sendable (String) -> Void = { bar.step("install", $0) }
             let store = ImageCatalogStore(distribution: .agentCodingAmd64(imageVersion: o.imageVersion),
                                           supportDir: URL(fileURLWithPath: o.outputDir))
             do {
                 let r = try await ImageInstall.download(o, store: store, steps: !bake.noAgentCLIs, progress: progress,
-                                                        output: { if verbose { FileHandle.standardError.write($0) } })
+                                                        output: { bar.output($0) })
+                bar.finish(ok: true)
                 Bake.report(r, o)
             } catch where !downloadOnly && ImageInstall.isDownloadSideFailure(error) {
                 // Only the download's own failures: the postinstall boot's
                 // would fail the bake the same way.
                 progress("Prebuilt-image download unavailable (\(error.localizedDescription)) — building locally instead.")
-                try await Bake.bake(o, verbose: verbose)
+                bar.restart()
+                try await Bake.bake(o, bar: bar)
+            } catch {
+                bar.finish(ok: false)
+                throw error
             }
+        }
+    }
+
+    /// `image verify`: macOS's `verify-image`, the publish pipeline's gate.
+    // @port-skip linux-only: the CLI of ImageVerify (macOS: VerifyImage, a top-level verify-image)
+    struct Verify: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Boot-check an image before publishing it: install it as a client would, then boot it to the login prompt (the disk itself isn't modified).")
+        @Option(name: .long, help: "The image directory to check (base.img, base.version).")
+        var dir: String
+        @Option(name: .long, help: "Boot timeout in seconds.")
+        var timeout: Int = 300
+        @Option(name: .long, help: "Scratch directory (removed after). Default: beside the image.")
+        var work: String?
+        @Option(name: .customLong("vm-setup"), help: "vm-setup directory (setup.sh, postinstall.sh).")
+        var vmSetup = "Sources/AgentCoding/Resources/vm-setup"
+        @Option(name: .long, help: "Download cache (the Alpine installer).")
+        var cache: String?
+        @Flag(name: [.short, .long], help: "Echo the VMs' serial consoles.") var verbose = false
+
+        // @port-skip linux-only: see Verify
+        func run() async throws {
+            _ = acl_unblock_term_signals()
+            let dir = (self.dir as NSString).expandingTildeInPath
+            guard let version = try? String(contentsOfFile: dir + "/base.version", encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty else {
+                throw ValidationError("no base.version in \(dir)")
+            }
+            let bar = ProgressBar(verbose: verbose)
+            let env = ProcessInfo.processInfo.environment
+            let cache = cache ?? (env["XDG_CACHE_HOME"] ?? NSHomeDirectory() + "/.cache") + "/bromure-ac/bake"
+            do {
+                try await ImageVerify.verify(disk: dir + "/base.img", version: version,
+                                             workDir: work ?? (dir + ".verify"), vmSetupDir: vmSetup, cacheDir: cache,
+                                             timeout: TimeInterval(timeout),
+                                             progress: { bar.step("verify", $0) }, output: { bar.output($0) })
+            } catch {
+                bar.finish(ok: false)
+                throw error
+            }
+            bar.finish(ok: true)
+            print("Image boot verification passed: \(dir)/base.img")
         }
     }
 
@@ -551,12 +603,12 @@ struct Image: AsyncParsableCommand {
         var customizeScript: String?
         @Option(name: .customLong("alpine-releases"), help: "Alpine netboot releases URL (HTTPS). Default: dl-cdn's.")
         var alpineReleases: String?
-        @Flag(help: "Echo the installer's serial console.") var verbose = false
+        @Flag(name: [.short, .long], help: "Echo the installer's serial console (to see a long step move).") var verbose = false
 
         // @port-skip linux-only: the explicit local bake (macOS: init --build-local; `image install` is init)
         func run() async throws {
             _ = acl_unblock_term_signals()
-            try await Self.bake(try await options(), verbose: verbose)
+            try await Self.bake(try await options(), bar: ProgressBar(verbose: verbose))
         }
 
         /// The bake's options from the flags: the catalog's steps (unless
@@ -613,9 +665,15 @@ struct Image: AsyncParsableCommand {
 
         // partial: publisher side is `image bake --no-agent-clis` driven by scripts/publish-image-amd64.sh; no build-info.json/provisioner output from the binary
         // @port InitFossImage.run() h=80ae63309139aa57 @d3ebbda2
-        static func bake(_ o: InterimBake.Options, verbose: Bool) async throws {
-            let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },
-                                               output: { if verbose { FileHandle.standardError.write($0) } })
+        static func bake(_ o: InterimBake.Options, bar: ProgressBar) async throws {
+            let r: InterimBake.Result
+            do {
+                r = try await InterimBake.bake(o, progress: { bar.step("bake", $0) }, output: { bar.output($0) })
+            } catch {
+                bar.finish(ok: false)
+                throw error
+            }
+            bar.finish(ok: true)
             report(r, o)
         }
 

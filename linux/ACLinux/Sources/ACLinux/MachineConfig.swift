@@ -141,11 +141,15 @@ public struct MachineConfig: Sendable {
     static func resolveVirtiofsd(env: String?, executable: String?, isExecutable: (String) -> Bool) -> String {
         resolveHelper("virtiofsd", env: env, executable: executable, system: "/usr/libexec/virtiofsd", isExecutable: isExecutable)
     }
-    /// linux/firecracker/build.sh's output, unless BROMURE_FIRECRACKER says otherwise.
+    /// BROMURE_FIRECRACKER, else the package's beside bromure-ac, else
+    /// linux/firecracker/build.sh's output in the user's home. (A daemon
+    /// run by hand on a packaged server has no BROMURE_FIRECRACKER: the
+    /// units set it.)
     public var firecrackerBinary = Self.defaultFirecrackerBinary
     // @port-skip linux-only: Firecracker backend
     public static var defaultFirecrackerBinary: String {
-        ProcessInfo.processInfo.environment["BROMURE_FIRECRACKER"] ?? (NSHomeDirectory() + "/.local/share/bromure-ac/bin/firecracker")
+        bundledHelper("firecracker", env: "BROMURE_FIRECRACKER",
+                      system: NSHomeDirectory() + "/.local/share/bromure-ac/bin/firecracker")
     }
 
     // @port-skip linux-only: VM config

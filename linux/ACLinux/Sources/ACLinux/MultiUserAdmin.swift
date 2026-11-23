@@ -6,6 +6,21 @@ import Foundation
 // @port-skip linux-only: multi-user Linux server administration
 public enum MultiUserAdmin {
     public static let socketDir = "/run/bromure-ac/sock"
+
+    /// Root starting a daemon by hand on a multi-user server: a daemon of
+    /// its own no user reaches (each user's is bromure-ac@<user>). Refused,
+    /// with what to do instead.
+    // @port-skip linux-only: the multi-user server's daemons
+    public static func rootDaemonRefusal(euid: uid_t, multiUser: Bool, underSystemd: Bool) -> String? {
+        guard euid == 0, multiUser, !underSystemd else { return nil }
+        return """
+            this server runs one daemon per user (bromure-ac@<user>), started on demand: not one for root.
+              Make a user a Bromure user:   sudo bromure-ac admin add --existing <user>
+              Then, as that user:           bromure-ac workspaces ls   (starts their daemon)
+              Their daemon's state:         systemctl status bromure-ac@<user>
+            """
+    }
+
     public static let stateRoot = "/var/lib/bromure-ac"
 
     public enum AdminError: Error, CustomStringConvertible {

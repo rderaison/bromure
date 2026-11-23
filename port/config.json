@@ -1629,14 +1629,6 @@
       "reason": "the flag carries the guest's customize-failure line across macOS's output thread; the Linux bake reads it from the installer's failure line (InterimBake.customizeFailure)"
     },
     {
-      "id": "VerifyImage.run()",
-      "reason": "prebuilt-image publishing and download (area H c, not now): the publish pipeline's boot check of the arm64 image; the Linux image is baked locally and booted by the KVM tests"
-    },
-    {
-      "id": "UbuntuImageManager.verifyImageBoots(diskURL: URL, timeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
-      "reason": "prebuilt-image publishing and download (area H c, not now): the publish pipeline's boot check of the arm64 image; the Linux image is baked locally and booted by the KVM tests"
-    },
-    {
       "id": "UbuntuImageManager.var baseImageNeedsUpdate",
       "reason": "the GUI's launch check (inside !headless: offer a full update or new steps) and createBaseImage's non-forced skip; the Linux bake always builds, as init (force: true)"
     },

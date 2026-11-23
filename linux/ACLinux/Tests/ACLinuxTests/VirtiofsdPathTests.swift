@@ -52,3 +52,24 @@ struct VirtiofsdPathTests {
         #expect(MachineError.virtiofsdNotReady("s").description == "virtiofsd for 's' did not come up")
     }
 }
+
+@Suite("Daemon on a packaged server")
+struct PackagedDaemonTests {
+    @Test func firecrackerTheSameWayAsTheOtherHelpers() {
+        let exe = "/usr/lib/bromure-ac/bin/bromure-ac"
+        #expect(MachineConfig.resolveHelper("firecracker", env: nil, executable: exe, system: "/root/.local/share/bromure-ac/bin/firecracker",
+                                            isExecutable: { $0 == "/usr/lib/bromure-ac/bin/firecracker" }) == "/usr/lib/bromure-ac/bin/firecracker")
+        #expect(MachineConfig.resolveHelper("firecracker", env: nil, executable: "/home/u/.build/debug/bromure-ac",
+                                            system: "/home/u/.local/share/bromure-ac/bin/firecracker", isExecutable: { _ in false })
+                == "/home/u/.local/share/bromure-ac/bin/firecracker")
+    }
+
+    @Test func rootStartingADaemonByHandOnAMultiUserServerIsRefused() {
+        let refusal = MultiUserAdmin.rootDaemonRefusal(euid: 0, multiUser: true, underSystemd: false)
+        #expect(refusal?.contains("sudo bromure-ac admin add --existing <user>") == true)
+        #expect(refusal?.contains("systemctl status bromure-ac@<user>") == true)
+        #expect(MultiUserAdmin.rootDaemonRefusal(euid: 0, multiUser: true, underSystemd: true) == nil, "a unit's")
+        #expect(MultiUserAdmin.rootDaemonRefusal(euid: 1000, multiUser: true, underSystemd: false) == nil, "a user's own")
+        #expect(MultiUserAdmin.rootDaemonRefusal(euid: 0, multiUser: false, underSystemd: false) == nil, "a single-user install")
+    }
+}
