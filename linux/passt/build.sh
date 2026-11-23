@@ -45,8 +45,9 @@ git clean -qfdx
 # target's (4 KiB, Ubuntu's kernels), not the builder's getconf.
 BINS=(passt)
 [ "$ARCH" = x86_64 ] && BINS+=(passt.avx2)
-make -s CC="$CC" VERSION="$TAG" CFLAGS="-static -DGLIBC_NO_STATIC_NSS -UPAGE_SIZE -DPAGE_SIZE=4096" "${BINS[@]}" 2>&1 \
-    | grep -v '"PAGE_SIZE" redefined\|^<command-line>\|^  *|\|^ *[0-9]* | \|^$' || true
+# Its output (warnings, the seccomp listing) only when it fails.
+make -s CC="$CC" VERSION="$TAG" CFLAGS="-static -DGLIBC_NO_STATIC_NSS -UPAGE_SIZE -DPAGE_SIZE=4096" "${BINS[@]}" \
+    >build.log 2>&1 || { tail -40 build.log >&2; die "make failed (the end of $SRC/build.log above)"; }
 mkdir -p "$OUT"
 for b in "${BINS[@]}"; do
     [ -x "$b" ] || die "$b wasn't built"
