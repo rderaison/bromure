@@ -680,7 +680,7 @@ struct Init: ParsableCommand {
                 try await imageManager.createBaseImage(
                     progress: progress,
                     force: true,
-                    postinstallSteps: catalog.sortedSteps
+                    postinstallSteps: catalog.baseImageSteps()
                 )
             }
             do {
@@ -1094,6 +1094,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsFromConfigs.isAlternate = true
     newWsFromConfigs.target = delegate
     wsMenu.addItem(newWsFromConfigs)
+    wsMenu.addItem(NSMenuItem.separator())
+    let baseImageItem = NSMenuItem(title: L("Base Image…"),
+                                   action: #selector(ACAppDelegate.baseImageDetailsAction(_:)),
+                                   keyEquivalent: "")
+    baseImageItem.target = delegate
+    wsMenu.addItem(baseImageItem)
 
     // Infrastructure: the shared machines next to the workspaces — a
     // Kubernetes cluster of node VMs, a container registry.
@@ -1532,6 +1538,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // them (settings, AppleScript, the CLI): a card left on older
             // ones had its next Save write them back over the newer.
             unifiedWindow?.refreshVMDashboard()
+            // A deleted workspace's sessions are archived, not left Paused
+            // (nothing to wake; no peer may reach them). Also catches ones
+            // deleted before this ran. Gone = not loaded AND no directory:
+            // a load that came back short archives nothing.
+            let loaded = Set(profiles.map(\.id))
+            let gone: (UUID) -> Bool = { [store] id in !loaded.contains(id) && !store.hasDirectory(id) }
+            // Asked again by resume, unarchive and the delegation tools: a
+            // session archived here stays so, and unreachable.
+            agentSessionStore.workspaceGone = gone
+            agentSessionStore.archiveSessions(ofGoneWorkspaces: gone)
         }
     }
 
@@ -1580,6 +1596,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
     /// The "Connect to Remote Bromure" window (auth flow), if open.
     var remoteConnectWindow: NSWindow?
+    /// Workspaces › Base Image… (`showBaseImageDetails`).
+    var baseImageDetailsWindow: NSWindow?
+    var baseImageDetailsModel: BaseImageDetailsModel?
 
     /// Every `SessionPane` currently displayed somewhere — in `unifiedWindow`
     /// or a popped-out `profileWindows` entry. This is the dispatch target for
@@ -4309,7 +4328,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else {
                     let catalog = remote ?? ImageCatalogStore.shared.effective()
                     let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
-                    let pending = catalog.pendingSteps(appliedUUIDs: applied)
+                    let pending = catalog.pendingBaseImageSteps(appliedUUIDs: applied)
                     guard !pending.isEmpty, await self.promptNewPostinstallSteps(pending) else { return }
                 }
                 // The install runs on (its window shows it); the restore
@@ -4402,12 +4421,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Start the SSH front door iff `remoteAccess.enabled` (default OFF).
     ///
-    /// Never while the base image is absent or an install is in flight
-    /// (download or local bake): the remote menu exists to create and
-    /// launch workspaces, all of which need a settled base.img — a remote
-    /// session poking at profiles mid-install would race the image swap.
-    /// `startInit`/`startPostinstall` stop the server up front and call
-    /// this again from their completion path.
+    /// Never before a base image exists (the first install): the remote
+    /// side exists to create and run workspaces, which need one. A rebuild,
+    /// an update or new recommended packages keep the server up -- the old
+    /// image stays bootable until the new one is swapped in whole, a boot
+    /// mid-swap is refused where every boot is (`prepare()` needs
+    /// `hasBaseImage`), and a paused server cut every remote client off its
+    /// running workspaces for the whole build. `startInit`/`startPostinstall`
+    /// call this again from their completion path (a first install's start).
     @MainActor func startRemoteAccessIfNeeded() {
         guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
         // A side-by-side test instance shares this Mac's device identity and
@@ -4416,7 +4437,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             SupplyChainLog.shared.record("[remote] disabled for this instance (BROMURE_AC_NO_REMOTE).")
             return
         }
-        guard imageManager.hasBaseImage, installTask == nil else {
+        guard imageManager.hasBaseImage else {
             SupplyChainLog.shared.record(
                 "[remote] SSH front door deferred until the base image is installed.")
             return
@@ -4559,12 +4580,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard cfg.passwordAuth || cfg.pubkeyAuth else {
                 return ["error": "Enable at least one of password / public-key auth."]
             }
-            // No SSH while the base image is being installed (or before
-            // one exists) — same invariant startRemoteAccessIfNeeded
-            // enforces at launch. Refuse instead of deferring silently so
-            // the CLI/Preferences caller knows nothing is listening.
-            if enabled, installTask != nil || !imageManager.hasBaseImage {
-                return ["error": "Base image install in progress (or no image yet) — enable remote access once it completes."]
+            // No SSH before a base image exists -- same invariant
+            // startRemoteAccessIfNeeded enforces at launch. Refuse instead of
+            // deferring silently so the CLI/Preferences caller knows nothing
+            // is listening. (A rebuild in flight is fine: the old image stays.)
+            if enabled, !imageManager.hasBaseImage {
+                return ["error": "No base image yet — enable remote access once it is installed."]
             }
             d.set(enabled, forKey: "remoteAccess.enabled")
             if enabled {
@@ -4579,9 +4600,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         } else if d.bool(forKey: "remoteAccess.enabled") {
             // No enable/disable in this call but we're on → apply live.
-            // (Skipped mid-install — the server is paused then; the
-            // post-install resume picks the new config up.)
-            if installTask == nil {
+            // (Skipped before a first image: the server isn't up yet; the
+            // post-install start picks the new config up.)
+            if imageManager.hasBaseImage {
                 let cfg = remoteAccessConfig()
                 do { try RemoteAccessServer.shared.start(cfg) }
                 catch { return ["error": error.localizedDescription] }
@@ -5938,6 +5959,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let toolRaw = body["tool"] as? String,
                           let tool = Profile.Tool(rawValue: toolRaw)
                     else { return ["error": "profile and tool required"] }
+                    // Hermes with no model set up: refused, whichever client
+                    // asks (an older one doesn't grey it out).
+                    if tool.needsModelToStart,
+                       !self.readyToolSpecs(for: profile).contains(where: { $0.tool == tool }) {
+                        return ["error": NewSessionView.needsModelMessage(tool)]
+                    }
                     // Files dropped on a remote client's new-session screen,
                     // {name, data (base64), isImage} each — staged here once
                     // the machine is up, like a local drop.
@@ -6642,6 +6669,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
                 }
                 return nil
+            }
+        }
+        // Only the run named: a cancel that comes late (the run already
+        // over, another started) ends nothing.
+        server.onCancelRegistration = { [weak self] run in
+            MainActor.assumeIsolated {
+                guard let self, RemoteRegistrationBroker.shared.pending?.id.uuidString == run,
+                      self.claudeRegistration != nil else { return false }
+                self.teardownClaudeRegistration(reason: .cancelled)
+                return true
             }
         }
         server.onForgetSubscription = { [weak self] provider, profileID in
@@ -8767,18 +8804,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // rebuilds and CLI-started installs.
         if !fromWizard { renderInitializing() }
 
-        // No SSH front door while the base image is being installed — a remote
-        // session could otherwise launch workspaces against a base that's
-        // absent or mid-swap. Resumed (when still enabled) by the defer.
-        if RemoteAccessServer.shared.isRunning {
-            SupplyChainLog.shared.record("[remote] SSH front door paused for base-image install.")
-            stopRemoteAccess()
-        }
-
+        // The SSH front door stays up through a rebuild or an update (see
+        // startRemoteAccessIfNeeded); a first install starts it once done.
         installTask = Task { @MainActor in
             defer {
                 self.installTask = nil
-                self.startRemoteAccessIfNeeded()
+                // Started only if it isn't up: a start restarts the server,
+                // dropping every remote client again.
+                if !RemoteAccessServer.shared.isRunning { self.startRemoteAccessIfNeeded() }
             }
             // High-level checkpoints: drive the status pill + weighted
             // progress bar + bookmark the console log with a leading
@@ -8891,7 +8924,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ) async throws {
         var catalog = ImageCatalogStore.shared.remote()
         if catalog == nil { catalog = await ImageCatalogStore.shared.refresh() }
-        let steps = (catalog ?? ImageCatalogStore.shared.effective()).sortedSteps
+        let steps = (catalog ?? ImageCatalogStore.shared.effective()).baseImageSteps()
         try await imageManager.createBaseImage(
             progress: progress,
             output: output,
@@ -8914,16 +8947,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         )
         NSApp.activate(ignoringOtherApps: true)
 
-        // Same SSH pause as startInit — base.img is being amended + swapped.
-        if RemoteAccessServer.shared.isRunning {
-            SupplyChainLog.shared.record("[remote] SSH front door paused for base-image install.")
-            stopRemoteAccess()
-        }
-
+        // The SSH front door stays up, as in startInit: the image being
+        // amended is swapped in whole, and a boot mid-swap is refused.
         installTask = Task { @MainActor in
             defer {
                 self.installTask = nil
-                self.startRemoteAccessIfNeeded()
+                if !RemoteAccessServer.shared.isRunning { self.startRemoteAccessIfNeeded() }
             }
             do {
                 try await self.imageManager.applyPostinstallSteps(
@@ -10367,7 +10396,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Consent gate for postinstall steps published in img-catalog.json
     /// after this image was installed. They run as root inside the base
     /// image, so nothing executes until the user explicitly accepts.
-    /// "Later" asks again next launch.
+    /// "Later" asks again next launch; "Skip Permanently" never asks about
+    /// these again (Workspaces › Base Image… still installs them).
     private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async -> Bool {
         let alert = NSAlert()
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
@@ -10376,12 +10406,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             format: NSLocalizedString(
                 "New packages are recommended to be installed:\n\n%@\n\nBromure installs them into the base image (a few minutes, in the background VM). Then you choose which workspaces move to it, and which keep running as they are.",
                 comment: ""),
-            list)
+            list) + "\n\n" + NSLocalizedString(
+                "To install only some of them, or later, use Workspaces › Base Image…",
+                comment: "new packages prompt: where to pick steps")
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        guard await presentStartupPrompt(alert) == .alertFirstButtonReturn else { return false }
+        alert.addButton(withTitle: NSLocalizedString("Skip Permanently", comment: "new packages prompt: never ask about these steps again"))
+        switch await presentStartupPrompt(alert) {
+        case .alertFirstButtonReturn:
+            startPostinstall(steps)
+            return true
+        case .alertThirdButtonReturn:
+            PostinstallSkips().skip(steps.map(\.uuid))
+            AppLog.stamp("postinstall: skipped for good: \(steps.map(\.uuid).joined(separator: ","))")
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// Whether a base-image install or amendment is running.
+    var isInstallingBaseImage: Bool { installTask != nil }
+
+    /// The base image version on disk (its stamp), nil without one.
+    func currentBaseVersion() -> String? { readCurrentBaseVersion() }
+
+    /// Base Image details' "Install Selected": the steps go into the base
+    /// image, come off the skip list once the image has them, and then --
+    /// as after the startup prompt -- the user picks which workspaces move
+    /// to it. A failed or cancelled install leaves them skipped as they were.
+    @MainActor func installPostinstallStepsNow(_ steps: [PostinstallStep]) async {
+        guard installTask == nil, !steps.isEmpty, imageManager.hasBaseImage else { return }
+        let before = readCurrentBaseVersion()
         startPostinstall(steps)
-        return true
+        await installTask?.value
+        PostinstallSkips().unskip(PostinstallSkips.installed(
+            steps.map(\.uuid), applied: imageManager.loadImageState()?.appliedStepUUIDs ?? []))
+        if let after = readCurrentBaseVersion(), after != before {
+            await chooseWorkspacesForNewBase(after)
+        }
     }
 
 
@@ -12210,8 +12273,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// chooser after a base-image install), and its disk is still from an
     /// older one: this boot resets it, without asking.
     func acceptedBaseImageUpgradeDue(_ profile: Profile, current: String?) -> Bool {
+        // A disk with no record of its base counts as older: the chooser
+        // offers it, so its Update must reset it too.
         guard let current, profile.baseImageUpgradeAcceptedFor == current,
-              let recorded = profile.baseImageVersionAtClone, recorded != current,
+              profile.baseImageVersionAtClone != current,
               FileManager.default.fileExists(atPath: store.diskURL(for: profile).path) else { return false }
         return true
     }

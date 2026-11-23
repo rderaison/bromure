@@ -384,6 +384,9 @@ final class ACAutomationServer {
     /// workspace's own sign-in if it has one, else the shared one.
     /// (provider, optional profile id) -> ok.
     var onForgetSubscription: ((_ provider: String, _ profileID: String?) -> Bool)?
+    /// End the in-flight remote sign-in `registration` (its run id), as a
+    /// cancel: true when it was that run and it ended.
+    var onCancelRegistration: ((_ registration: String) -> Bool)?
     /// Per-tool subscription status for the editor: registered-at + whether
     /// the provider rejected the credential (sign-in expired).
     var onSubscriptionStatus: ((_ profileID: String?) -> [String: Any])?
@@ -971,6 +974,20 @@ final class ACAutomationServer {
             var reply: [String: Any] = ["ok": ok, "error": refused ?? ""]
             if let run { reply["registration"] = run }
             sendResponse(fd: fd, status: ok ? 202 : 409, body: reply)
+
+        // A fat client gave up its sign-in (closed the sign-in machine's
+        // window): end that run now, rather than leave it holding the one
+        // sign-in slot until its credential wait runs out.
+        case ("POST", "/subscriptions/cancel"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let run = (bodyJSON["registration"] as? String) ?? ""
+            guard !run.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'registration'"]); return
+            }
+            let ok = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { self.onCancelRegistration?(run) ?? false }
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 404, body: ["ok": ok])
 
         case ("POST", "/subscriptions/forget"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }

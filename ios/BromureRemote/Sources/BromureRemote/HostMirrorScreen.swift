@@ -122,7 +122,8 @@ struct HostMirrorScreen: View {
     /// Headless screenshot runs (no taps on a simulator without Simulator.app):
     /// `BROMURE_DEBUG_OPEN_SESSION=<id>` pushes that session once the mirror
     /// reports it; `BROMURE_DEBUG_OPEN_ROOM=<id>` a room;
-    /// `BROMURE_DEBUG_NEW_SESSION=1` presents the composer.
+    /// `BROMURE_DEBUG_NEW_SESSION=1` presents the composer;
+    /// `BROMURE_DEBUG_OPEN_BOARD=coding|automations` opens that board.
     private func debugRoute() {
         guard !didDebugRoute, controller.supportsSessions else { return }
         let env = ProcessInfo.processInfo.environment
@@ -137,6 +138,9 @@ struct HostMirrorScreen: View {
         } else if env["BROMURE_DEBUG_NEW_SESSION"] == "1" {
             didDebugRoute = true
             newSession = true
+        } else if let board = env["BROMURE_DEBUG_OPEN_BOARD"] {
+            didDebugRoute = true
+            openBoard = board == "automations" ? .automations : .coding
         }
     }
     #endif

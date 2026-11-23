@@ -227,7 +227,12 @@ final class AgentSessionEngine {
     /// else once the relaunch has it running.
     /// `remotely`: a fat client asked — see `start`.
     func resume(_ id: UUID, message: String? = nil, quietly: Bool = false, remotely: Bool = false) {
-        guard let s = store.session(id), let delegate else { return }
+        guard let s = store.session(id) else { return }
+        // Its workspace was deleted: nothing to wake. It stays archived
+        // (a resume used to clear that first, and a failed boot left it
+        // un-archived — back in every peer's list).
+        if refuseGoneWorkspace(s) { return }
+        guard let delegate else { return }
         if s.folderMissing == true {
             store.mutate(id) { $0.lastError = NSLocalizedString(
                 "The folder no longer exists on the machine.", comment: "session resume") }
@@ -601,8 +606,21 @@ final class AgentSessionEngine {
         store.setArchived(id, true)
     }
 
+    /// A session whose workspace is gone can't be brought back: kept (or
+    /// put) archived, with why. True when it refused.
+    @discardableResult
+    func refuseGoneWorkspace(_ s: AgentSession) -> Bool {
+        guard store.workspaceGone(s.profileID) else { return false }
+        BACDebug.log("sessions", "“\(s.title)”: its workspace was deleted — kept archived")
+        store.mutate(s.id) { $0.lastError = NSLocalizedString(
+            "Its workspace was deleted.", comment: "session resume") }
+        store.setArchived(s.id, true)
+        return true
+    }
+
     func unarchive(_ id: UUID) {
         guard let s = store.session(id) else { return }
+        if refuseGoneWorkspace(s) { return }
         BACDebug.log("sessions", "unarchive “\(s.title)”")
         store.setArchived(id, false)
         // Back from an archived room: the room comes back too (its other

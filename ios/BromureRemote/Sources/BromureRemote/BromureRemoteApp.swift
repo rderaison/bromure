@@ -163,6 +163,21 @@ struct RootView: View {
                     }
                 }
             }
+            #if os(iOS)
+            // Landscape screenshots: `BROMURE_DEBUG_ORIENTATION=landscape`
+            // rotates the window (simctl has no rotate command).
+            if debugEnv["BROMURE_DEBUG_ORIENTATION"] == "landscape" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    // iPad windowing refuses this unless the screenshot
+                    // build sets UIRequiresFullScreen in its Info.plist.
+                    for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+                        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) {
+                            NSLog("BROMURE_DEBUG_ORIENTATION: %@", $0.localizedDescription)
+                        }
+                    }
+                }
+            }
+            #endif
             #endif
         }
         .onChange(of: scenePhase) { _, phase in

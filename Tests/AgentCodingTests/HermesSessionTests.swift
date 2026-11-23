@@ -156,19 +156,41 @@ struct HermesSessionTests {
     /// A stand-in tmux pane: `capture-pane` draws Hermes's composer once
     /// `$SIM/up` exists (its placeholder in italics while `$SIM/text` is
     /// empty), `send-keys -l` types into it, Enter sends it to `$SIM/sent`;
-    /// `ps` shows a Hermes on the pane's terminal once it is up.
+    /// `ps` shows a Hermes on the pane's terminal once it is up. The pane is
+    /// `$SIM/width` columns wide (200 without it); like Hermes, the composer
+    /// cuts longer input at that width and carries on at the next row's
+    /// first column, and like tmux, the capture drops the blanks ending a row.
     private static func simulatedPane(in root: URL) throws -> URL {
         let bin = root.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let tmux = """
         #!/bin/sh
         case "$1" in
-          display-message) echo /dev/pts/9 ;;
+          display-message)
+            case "$5" in
+              *pane_width*)
+                # Width, then the cursor: right after the text, or -- for a
+                # text ending a row exactly -- parked off the composer, as
+                # Hermes leaves it.
+                w=$(cat "$SIM/width" 2>/dev/null || echo 200)
+                t=$(cat "$SIM/text" 2>/dev/null); n=${#t}
+                if [ "$n" -lt $((w - 2)) ]; then echo "$w $((2 + n)) 1"
+                elif [ "$n" -eq $((w - 2)) ]; then echo "$w 0 0"
+                else
+                  rest=$((n - (w - 2))); q=$(((rest + w - 1) / w)); x=$((rest - (q - 1) * w))
+                  if [ "$x" -eq "$w" ]; then echo "$w 0 0"; else echo "$w $x $((1 + q))"; fi
+                fi ;;
+              *) echo /dev/pts/9 ;;
+            esac ;;
           capture-pane)
             if [ -e "$SIM/up" ]; then
               echo '↻ Resumed session local-abc'
               t=$(cat "$SIM/text" 2>/dev/null)
-              if [ -n "$t" ]; then printf '\\033[38;5;230m❯ \\033[0m%s\\n' "$t"
+              w=$(cat "$SIM/width" 2>/dev/null || echo 200)
+              if [ -n "$t" ]; then
+                printf '\\033[38;5;230m❯ \\033[0m%s\\n' "$(printf '%s' "$t" | cut -c1-$((w - 2)) | sed 's/ *$//')"
+                rest=$(printf '%s' "$t" | cut -c$((w - 1))-)
+                if [ -n "$rest" ]; then printf '%s\\n' "$rest" | fold -w "$w" | sed 's/ *$//'; fi
               else printf '\\033[38;5;230m❯ \\033[3m\\033[38;5;136mFind and fix a failing test\\033[0m\\n'; fi
               printf '\\033[38;5;250m ☤ \\033[1mgpt-5.5\\033[0m\\n'
             else
@@ -179,7 +201,17 @@ struct HermesSessionTests {
             if [ "$1" = -l ]; then printf '%s' "$3" >> "$SIM/text"; else mv "$SIM/text" "$SIM/sent"; fi ;;
         esac
         """
-        let ps = "#!/bin/sh\n[ -e \"$SIM/up\" ] && echo 'python3 -I -c import hermes_bootstrap /opt/hermes/hermes-agent'\nexit 0\n"
+        // `ps -o pgid=,tpgid=,args=`: the shell, its background jobs (this
+        // probe among them, its command line naming hermes), and Hermes in
+        // the foreground once up -- unless `$SIM/gone` says it has exited.
+        let ps = """
+        #!/bin/sh
+        if [ -e "$SIM/up" ] && [ ! -e "$SIM/gone" ]; then fg=100; else fg=90; fi
+        echo "   90 $fg -bash"
+        echo "  130 $fg grep -q hermes"
+        [ "$fg" = 100 ] && echo "  100 100 python3 -I -c import hermes_bootstrap /opt/hermes/hermes-agent"
+        exit 0
+        """
         for (name, text) in [("tmux", tmux), ("ps", ps)] {
             let url = bin.appendingPathComponent(name)
             try text.write(to: url, atomically: true, encoding: .utf8)
@@ -220,7 +252,7 @@ struct HermesSessionTests {
     /// as a turn on the session's old model.
     @Test("a bare resume's /model is typed into an empty composer, never over the user's text", arguments: [false, true])
     func typesModel(userTyped: Bool) throws {
-        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_type_model"])
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
         defer { try? FileManager.default.removeItem(at: root) }
         let sim = root.appendingPathComponent("sim")
         try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
@@ -244,6 +276,143 @@ struct HermesSessionTests {
             #expect(sent == model)
             #expect(left == nil)
         }
+    }
+
+    /// Hermes gone (the resume failed) but its last composer still on
+    /// screen: the shell has the terminal again, and nothing is typed into
+    /// it -- not even though a `grep hermes` of this very probe is on the
+    /// terminal too.
+    @Test("nothing is typed when Hermes isn't the terminal's foreground program")
+    func noHermesNoTyping() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        FileManager.default.createFile(atPath: sim.appendingPathComponent("gone").path, contents: nil)
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '/model openai/gpt-5.5 --provider nous --session' &
+        sleep 0.3
+        touch "$SIM/up"
+        sleep 2.5
+        kill $! 2>/dev/null
+        wait
+        """
+        _ = try Self.bash(script, path: bin, sim: sim)
+        #expect(!FileManager.default.fileExists(atPath: sim.appendingPathComponent("text").path))
+        #expect(!FileManager.default.fileExists(atPath: sim.appendingPathComponent("sent").path))
+    }
+
+    @Test("Hermes counts only as the terminal's foreground program", arguments: [
+        ("   90  100 -bash\n  100  100 python3 -I -c import hermes_bootstrap", true),
+        ("   90   90 -bash\n  130   90 grep -q hermes", false),
+        ("   90   90 /bin/bash -c hermes --resume x", false),
+        ("   90   90 bash -i\n  140   90 awk /herm[e]s/", false),
+        ("", false),
+    ])
+    func foreground(ps: String, running: Bool) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_foreground"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let url = bin.appendingPathComponent("ps")
+        try "#!/bin/sh\nprintf '%s\\n' \"$PS_OUT\"\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", fns + "\n_bromure_hermes_foreground pts/9"]
+        proc.environment = ["PATH": bin.path + ":/usr/bin:/bin", "PS_OUT": ps.replacingOccurrences(of: "\\n", with: "\n")]
+        try proc.run(); proc.waitUntilExit()
+        #expect((proc.terminationStatus == 0) == running)
+    }
+
+    /// A pane narrower than the `/model` line: Hermes wraps it onto a second
+    /// row, and the check before Enter reads it across both.
+    @Test("a /model longer than the pane is sent once typed, read across the rows it wraps onto")
+    func typesWrappedModel() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        try "40".write(to: sim.appendingPathComponent("width"), atomically: true, encoding: .utf8)
+        let model = "/model anthropic/claude-opus-5-5 --provider nous --session"
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '\(model)' &
+        sleep 0.3
+        touch "$SIM/up"
+        wait
+        """
+        #expect(try Self.bash(script, path: bin, sim: sim).0 == 0)
+        #expect((try? String(contentsOf: sim.appendingPathComponent("sent"), encoding: .utf8)) == model)
+    }
+
+    /// A `/model` that ends at the pane's edge gets one blank more, so the
+    /// check before Enter can see that nothing follows it.
+    @Test("a /model ending a row exactly is sent with a trailing blank")
+    func typesFullRowModel() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        try "40".write(to: sim.appendingPathComponent("width"), atomically: true, encoding: .utf8)
+        let model = "/model 0123456789012345678901234567890"
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '\(model)' &
+        sleep 0.3
+        touch "$SIM/up"
+        wait
+        """
+        #expect(try Self.bash(script, path: bin, sim: sim).0 == 0)
+        #expect((try? String(contentsOf: sim.appendingPathComponent("sent"), encoding: .utf8)) == model + " ")
+    }
+
+    /// The exact check, at the edges of Hermes's wrapping: a row the text
+    /// fills exactly (the status row follows), a cut on a space (tmux drops
+    /// it), and text that only starts like the expected one, or runs on.
+    @Test("the composer holds exactly the expected text, however it wraps", arguments: [
+        // Ending a row exactly, it can't be told from more full rows of input:
+        // no answer (3), never a yes.
+        ("/model 0123456789012345678901234567890", "/model 0123456789012345678901234567890", 3),
+        ("/model 012345678901234567890123456789 x", "/model 012345678901234567890123456789 x", 0),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session", "/model anthropic/claude-opus-5-5 --provider nous --session", 0),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session", "/model anthropic/claude-opus-5-5 --provider nous", 1),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session extra", "/model anthropic/claude-opus-5-5 --provider nous --session", 1),
+        ("/model anthropic/claude-opus-5-5", "/model other", 1),
+        // Finding "Wrapped composer check accepts extra input after a full
+        // row": the expected text ends a row exactly, more input starts
+        // the next one with a blank -- not Hermes's status row.
+        ("/model 0123456789012345678901234567890 extra", "/model 0123456789012345678901234567890", 3),
+        ("/model 0123456789012345678901234567890 ", "/model 0123456789012345678901234567890", 3),
+        // Finding "Full-row composer check accepts an additional complete
+        // row of input": a whole extra row looks, to the cursor, exactly
+        // like none.
+        ("/model 0123456789012345678901234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN", "/model 0123456789012345678901234567890", 3),
+        // With the blank the caller adds, it ends inside a row: checked.
+        ("/model 0123456789012345678901234567890 ", "/model 0123456789012345678901234567890 ", 0),
+        ("/model 0123456789012345678901234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN", "/model 0123456789012345678901234567890 ", 1),
+        ("/model 0123456789012345678901234567890 x", "/model 0123456789012345678901234567890 ", 1),
+        ("/model short  ", "/model short", 1),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session  ", "/model anthropic/claude-opus-5-5 --provider nous --session", 1),
+    ])
+    func composerHolds(typed: String, want: String, code: Int32) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        try "40".write(to: sim.appendingPathComponent("width"), atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: sim.appendingPathComponent("up").path, contents: nil)
+        try typed.write(to: sim.appendingPathComponent("text"), atomically: true, encoding: .utf8)
+        let check = fns + "\n_bromure_hermes_composer %1 '\(want)'"
+        #expect(try Self.bash(check, path: bin, sim: sim).0 == code)
+        // Without an expected text it still prints the first row's content.
+        let read = try Self.bash(fns + "\n_bromure_hermes_composer %1", path: bin, sim: sim)
+        #expect(read.0 == 0 && typed.hasPrefix(read.1.trimmingCharacters(in: .newlines)))
     }
 
     @Test("the wrapper no longer seeds the resume's /model as a chat query")

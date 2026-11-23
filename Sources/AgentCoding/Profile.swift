@@ -1122,6 +1122,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// switched by a setting (omp, Hermes) rather than tied to one.
         public var switchesProvider: Bool { self == .omp || self == .hermes }
 
+        /// Hermes starts only on a model the workspace names (Models
+        /// settings, or the workspace's own pick): with none, its sessions
+        /// are saved without one and can't be reopened ("storage_unavailable").
+        /// Not startable until then; the workspace's settings still save.
+        public var needsModelToStart: Bool { self == .hermes }
+
         /// The guest variable carrying Hermes's (stand-in) provider key: the
         /// bashrc `hermes()` wrapper hands it to Hermes as its provider's
         /// variable at launch.
@@ -3999,6 +4005,15 @@ public final class ProfileStore {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
     }
 
+    /// Whether workspace `id` still has its directory: false only once it
+    /// was deleted (a load that failed, or skipped a corrupt profile.json,
+    /// leaves it there).
+    public func hasDirectory(_ id: UUID) -> Bool {
+        var dir: ObjCBool = false
+        return fm.fileExists(atPath: rootDir.appendingPathComponent(id.uuidString, isDirectory: true).path,
+                             isDirectory: &dir) && dir.boolValue
+    }
+
     /// `vm run --rm`: a marker in the workspace's own directory, so the
     /// mark outlives the process -- a quit, a signal or a crash while the
     /// VM is stopped (a reboot's relaunch waiting on a prompt, a boot that
@@ -5335,6 +5350,9 @@ public final class ProfileStore {
         for f in profile.importedConfigFiles
         where f.path != ".gitconfig" && f.path != ".npmrc" && !f.contents.isEmpty {
             guard ImportedConfigFile.isSafeRelativePath(f.path) else { continue }
+            // Imported before the scan learned to leave it (another Mac's
+            // Hermes install records, say): not seeded.
+            guard !AgentConfigScan.isDenied(homeRelativePath: f.path) else { continue }
             let dest = home.appendingPathComponent(f.path)
             // Seed, don't manage: these are the user's own settings, so an edit
             // made inside the VM has to survive the next launch. (In seedMode
@@ -7130,11 +7148,43 @@ public final class ProfileStore {
     #    there is dropped.
     #    The Hermes home is $HERMES_HOME when set (a board task's own
     #    profile, below), else ~/.hermes.
+    #    Hermes's own default model on Nous (printed; nothing when the
+    #    workspace isn't on Nous, or no catalog names one): the model
+    #    catalog's labeled default -- Hermes's silent pick -- from its cache,
+    #    else the checkout's copy. Hermes refreshes the catalog on its own,
+    #    so the stamp carries it: a default that rotates, or first shows up,
+    #    is applied again.
+    _bromure_hermes_catalog_default() {
+        local _h="${HERMES_HOME:-$HOME/.hermes}"
+        grep -Eq '"provider" *: *"nous"' "${BROMURE_META_DIR:-/mnt/bromure-meta}/hermes-settings.json" 2>/dev/null || return 0
+        python3 - "$_h" <<'BROMURE_HERMES_CATALOG' 2>/dev/null
+    import json, os, re, sys
+    home = sys.argv[1]
+    places = [os.path.join(home, "cache", "model_catalog.json")]
+    for root in ("/opt/hermes/hermes-agent", os.path.join(home, "hermes-agent"),
+                 os.path.expanduser("~/.hermes/hermes-agent")):
+        places.append(os.path.join(root, "website", "static", "api", "model-catalog.json"))
+    for place in places:
+        try:
+            block = json.load(open(place)).get("providers", {}).get("nous") or {}
+            for m in block.get("models", []):
+                mid = str(m.get("id") or "").strip() if isinstance(m, dict) else ""
+                if mid and m.get("default") is True and re.fullmatch(r"[A-Za-z0-9._/:@+-]+", mid):
+                    print(mid)
+                    sys.exit(0)
+        except Exception:
+            continue
+    BROMURE_HERMES_CATALOG
+    }
     _bromure_hermes_stamp() {
         local _h="${HERMES_HOME:-$HOME/.hermes}"
         { cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json \\
               /mnt/bromure-meta/hermes-env-unset 2>/dev/null | sha256sum | cut -c1-32
           printf '%s' "${BROMURE_HERMES_TASK:-}" | sha256sum | cut -c1-32
+          # The apply's own revision: a change to what it writes applies
+          # once to every workspace, settings unchanged.
+          printf 'apply-4 '
+          _bromure_hermes_catalog_default | sha256sum | cut -c1-32
           cat "$_h/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/shell-hooks-allowlist.json" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
@@ -7144,8 +7194,10 @@ public final class ProfileStore {
         local _h="${HERMES_HOME:-$HOME/.hermes}"
         [ "$(cat "$_h/.bromure-applied" 2>/dev/null)" = "$(_bromure_hermes_stamp)" ] && return 0
         echo "[bromure-ac] applying this workspace's Hermes settings…" >&2
-        command env "$@" -u BROMURE_HERMES_API_KEY python3 - <<'BROMURE_HERMES_APPLY' || return 0
-    import datetime, json, os, re, subprocess, sys
+        command env "$@" -u BROMURE_HERMES_API_KEY \\
+            BROMURE_HERMES_NOUS_DEFAULT="$(_bromure_hermes_catalog_default)" \\
+            python3 - <<'BROMURE_HERMES_APPLY' || return 0
+    import datetime, json, os, re, subprocess, sys, tempfile, textwrap
     home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     os.makedirs(home, exist_ok=True)
     meta = os.environ.get("BROMURE_META_DIR") or "/mnt/bromure-meta"
@@ -7164,14 +7216,87 @@ public final class ProfileStore {
     except Exception:
         before = set()
     ok = True
+    # Every `hermes config` run is a whole Hermes start (~1 s; an apply
+    # makes a dozen or more): they're queued, then run in ONE Hermes
+    # process -- Hermes's own `config_command`, as `hermes config` runs
+    # it, on the interpreter and imports its launcher sets up (the command
+    # it prints for --print-runtime-command, its last step swapped for
+    # this worker). A `hermes config` run each again if that can't start.
+    pending = []
+    BATCH_MARK = "@@BROMURE-HERMES-BATCH@@"
+    WORKER = '''
+    import argparse, contextlib, io, json, sys
+    from hermes_cli.config import config_command
+    out = []
+    for op in json.load(sys.stdin):
+        flags = op[2:] if op[0] == "get" else []
+        ns = argparse.Namespace(config_command=op[0], key=op[1], force=False,
+                                value=op[2] if op[0] == "set" else None,
+                                json="--json" in flags, raw="--raw" in flags)
+        o, e, rc = io.StringIO(), io.StringIO(), 0
+        try:
+            with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+                config_command(ns)
+        except SystemExit as x:
+            rc = x.code if isinstance(x.code, int) else (0 if x.code is None else 1)
+        except RuntimeError as x:
+            e.write("Error: %s" % x)
+            rc = 1
+        except Exception as x:
+            e.write("%s: %s" % (type(x).__name__, x))
+            rc = 1
+        out.append([rc, o.getvalue(), e.getvalue()])
+    sys.__stdout__.write(BATCH_MARK + json.dumps(out) + chr(10))
+    sys.__stdout__.flush()
+    '''.replace("BATCH_MARK", repr(BATCH_MARK))
+    def in_hermes(ops):
+        worker = None
+        try:
+            r = subprocess.run(["hermes", "--print-runtime-command", "config", "get", "model"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
+            argv = json.loads(r.stdout)
+            i = argv.index("-c")
+            tail = "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+            if not argv[i + 1].endswith(tail):
+                return None
+            fd, worker = tempfile.mkstemp(prefix="bromure-hermes-", suffix=".py")
+            with os.fdopen(fd, "w") as f:
+                f.write(textwrap.dedent(WORKER))
+            argv = argv[:i] + ["-c", argv[i + 1][:-len(tail)] + "runpy.run_path(sys.argv[1], run_name='__main__')", worker]
+            r = subprocess.run(argv, input=json.dumps(ops), stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, timeout=300)
+            if BATCH_MARK not in r.stdout:
+                return None
+            res = json.loads(r.stdout.rsplit(BATCH_MARK, 1)[1].splitlines()[0])
+            return res if isinstance(res, list) and len(res) == len(ops) else None
+        except Exception:
+            return None
+        finally:
+            if worker:
+                try:
+                    os.unlink(worker)
+                except OSError:
+                    pass
+    def one(args):
+        r = subprocess.run(["hermes", "config", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return [r.returncode, r.stdout, r.stderr]
     def run(*args):
+        pending.append([str(a) for a in args])
+    def flush(*get):
+        # The queued runs (and a `config get`, last), in order; their results.
         global ok
-        r = subprocess.run(["hermes", "config", *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        # Unsetting a key that isn't there is Hermes's "Config key not
-        # set" (exit 1): already the state wanted.
-        if r.returncode != 0 and not (args[0] == "unset" and "not set" in r.stderr):
-            ok = False
-            sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), r.stderr.strip()[-300:]))
+        ops = pending[:] + ([list(get)] if get else [])
+        del pending[:]
+        if not ops:
+            return []
+        res = in_hermes(ops) or [one(o) for o in ops]
+        for args, (rc, _, err) in zip(ops, res):
+            # Unsetting a key that isn't there is Hermes's "Config key not
+            # set" (exit 1): already the state wanted.
+            if args[0] != "get" and rc != 0 and not (args[0] == "unset" and "not set" in err):
+                ok = False
+                sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), err.strip()[-300:]))
+        return res
     # A Bromure stand-in for a key Hermes must not see, left in its .env
     # (which overrides the environment): dropped. A key the user put
     # there themselves is theirs.
@@ -7203,9 +7328,19 @@ public final class ProfileStore {
             run("unset", "model." + key)
     # No model chosen (cleared, or a provider picked without one): the
     # provider's own default, not the last model set -- which the next
-    # provider may not serve at all.
-    if model.get("default"):
-        run("set", "model.default", model["default"])
+    # provider may not serve at all. On Nous, that default is written out:
+    # Hermes runs a turn on it all the same, but its gateway saves a
+    # session begun with no model set as having none, then refuses to
+    # reopen it ("storage_unavailable", restore_policy's "invalid
+    # policy"). It is the model catalog's labeled default -- Hermes's own
+    # silent pick (`_bromure_hermes_catalog_default`, which the stamp
+    # carries, so a new default is applied again).
+    nous_default = os.environ.get("BROMURE_HERMES_NOUS_DEFAULT", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._/:@+-]+", nous_default):
+        nous_default = ""
+    chosen = model.get("default") or (nous_default if model.get("provider") == "nous" else "")
+    if chosen:
+        run("set", "model.default", chosen)
     else:
         run("unset", "model.default")
     run("set", "auth.adopt_external_logins", "false")
@@ -7225,6 +7360,11 @@ public final class ProfileStore {
             v = {"command": s["command"], "args": s.get("args") or []}
             if s.get("env"):
                 v["env"] = s["env"]
+            # The delegation tools know their tab from tmux, which Hermes's
+            # MCP servers never see (a gateway serving every home starts
+            # them): the shim reads it from the home the wrapper wrote it to.
+            if any(str(a).endswith("/bromure-delegation-mcp.py") for a in v["args"]):
+                v["args"] = [a for a in v["args"] if a != "--hermes"] + ["--hermes"]
         else:
             continue
         run("set", "mcp_servers." + esc(name), json.dumps(v))
@@ -7247,10 +7387,9 @@ public final class ProfileStore {
     hooks = settings.get("hooks") or {}
     hook, events = hooks.get("command") or "", hooks.get("events") or []
     if hook:
-        r = subprocess.run(["hermes", "config", "get", "hooks", "--json", "--raw"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        rc, got, _ = flush("get", "hooks", "--json", "--raw")[-1]
         try:
-            current = json.loads(r.stdout) if r.returncode == 0 else {}
+            current = json.loads(got) if rc == 0 else {}
         except ValueError:
             current = {}
         if not isinstance(current, dict):
@@ -7284,6 +7423,7 @@ public final class ProfileStore {
                 json.dump(allow, f, indent=2)
             os.chmod(tmp, 0o600)
             os.replace(tmp, allow_path)
+    flush()
     sys.exit(0 if ok else 3)
     BROMURE_HERMES_APPLY
         # Stamped with config.yaml and .env as the apply left them.
@@ -7305,13 +7445,255 @@ public final class ProfileStore {
         fi
         printf '%s' "$HOME/.hermes/profiles/$_p"
     }
+    #    A chat in a tab: its own Hermes profile, tab-<window> (cloned from
+    #    the user's on first use). Hermes starts MCP servers from a gateway
+    #    that serves every home, never from the tab, so the delegation
+    #    shim can't see its tab's tmux pane: it reads its window from the
+    #    home (bromure-window, written by the wrapper), and a home is one
+    #    window's at a time. A resumed session goes back to the home that
+    #    holds it, when no other window's chat is using that home. Prints
+    #    the home; fails outside tmux.
+    _bromure_hermes_tab_home() {
+        local _sid="$1" _w _p _h _r="$HOME/.hermes" _f _cloned=""
+        shift
+        [ -n "${TMUX_PANE:-}" ] || return 1
+        if [ -n "$_sid" ] && _h=$(_bromure_hermes_session_home "$_sid") && [ -n "$_h" ] \\
+                && _bromure_hermes_claim "$_h"; then
+            printf '%s' "$_h"
+            return 0
+        fi
+        _w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+        case "$_w" in ''|*[!0-9]*) return 1 ;; esac
+        _p="tab-$_w"
+        _h="$_r/profiles/$_p"
+        if [ ! -e "$_h/config.yaml" ]; then
+            # The user's own settings applied first, so the clone has them
+            # (and, with the same files, the same stamp: no second apply).
+            _bromure_hermes_apply "$@" >/dev/null 2>&1
+            # A bare folder in its place -- Hermes's gateway reopens every
+            # home it ever served, a deleted one too, with a log, a lock, a
+            # stock SOUL.md -- is one `profile create` refuses. Moved aside
+            # (hidden: no gateway serves a dot-name; kept: Hermes never
+            # deletes one) so Hermes's own clone makes the profile. Never
+            # one with anything of the user's: its config, keys, login or
+            # conversations.
+            if [ -d "$_h" ] && [ ! -e "$_h/.env" ] && [ ! -e "$_h/auth.json" ] && [ ! -e "$_h/state.db" ]; then
+                mv "$_h" "$_r/profiles/.bromure-stale-$_p-$(date +%s)-$$" 2>/dev/null
+            fi
+            if command env "$@" -u BROMURE_HERMES_API_KEY hermes profile create "$_p" --clone >/dev/null 2>&1 \\
+                    && [ -e "$_h/config.yaml" ]; then
+                _cloned=1
+            else
+                mkdir -p "$_h"
+            fi
+            # Hermes starts the new home's MCP servers as it appears: its
+            # window now, not after the settings step (seconds later).
+            printf 'w%s\\n' "$_w" > "$_h/bromure-window"
+            # Bromure's own files the settings step reads back (the MCP
+            # servers it set, the hooks it approved, the catalog its Nous
+            # default comes from). Never the user's config.yaml or .env by
+            # hand: Hermes's clone strips their messaging channels (bot
+            # tokens, allowlists, platform sections) -- a raw copy would hand
+            # this tab's gateway the user's bots. A home Hermes didn't clone
+            # gets the settings step instead.
+            for _f in shell-hooks-allowlist.json .bromure-mcp.json cache/model_catalog.json; do
+                if [ -e "$_r/$_f" ] && [ ! -e "$_h/$_f" ]; then
+                    mkdir -p "$(dirname "$_h/$_f")" && cp -p "$_r/$_f" "$_h/$_f"
+                fi
+            done
+            # Hermes cloned the user's settings and they're applied (their
+            # stamp is current): so are the clone's -- stamped as such, no
+            # second settings step (a dozen seconds) in every new tab. Not
+            # when the user's step failed, nor for a home Hermes didn't
+            # clone: the tab's own step then runs.
+            if [ -n "$_cloned" ] && [ -s "$_r/.bromure-applied" ] \\
+                    && [ "$(cat "$_r/.bromure-applied")" = "$(HERMES_HOME= _bromure_hermes_stamp)" ]; then
+                HERMES_HOME="$_h" _bromure_hermes_stamp > "$_h/.bromure-applied"
+            fi
+        fi
+        _bromure_hermes_claim "$_h" || return 1
+        printf '%s' "$_h"
+    }
+    #    Whether this run is a chat (a tab's conversation), not a subcommand
+    #    (auth, config, model, sessions, ...: the user's own home) nor a
+    #    profile the user picked.
+    _bromure_hermes_is_chat() {
+        local _x
+        for _x in "$@"; do
+            case "$_x" in -p|--profile|--profile=*|-p?*) return 1 ;; esac
+        done
+        case "${1:-}" in ''|chat|-*) return 0 ;; esac
+        return 1
+    }
+    #    The session id a run resumes (`--resume <id>`, `-r <id>`,
+    #    `--resume=<id>`), printed; nothing for any other run.
+    _bromure_hermes_resume_id() {
+        local _id=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --resume|-r) _id="${2:-}"; break ;;
+                --resume=*) _id="${1#--resume=}"; break ;;
+            esac
+            shift
+        done
+        case "$_id" in [A-Za-z0-9]*) ;; *) return 0 ;; esac
+        case "$_id" in *[!A-Za-z0-9_.-]*|*..*) return 0 ;; esac
+        printf '%s' "$_id"
+    }
+    #    The Hermes home whose sessions include $1 (the user's, then each
+    #    profile's), printed; nothing when none does.
+    _bromure_hermes_session_home() {
+        python3 - "$1" <<'BROMURE_HERMES_SESSION_HOME' 2>/dev/null
+    import glob, os, sqlite3, sys, urllib.parse
+    sid, root = sys.argv[1], os.path.expanduser("~/.hermes")
+    for home in [root] + sorted(glob.glob(os.path.join(root, "profiles", "*"))):
+        db = os.path.join(home, "state.db")
+        if not os.path.isfile(db):
+            continue
+        try:
+            con = sqlite3.connect("file:" + urllib.parse.quote(db) + "?mode=ro", uri=True, timeout=2)
+            try:
+                if con.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (sid,)).fetchone():
+                    print(home)
+                    sys.exit(0)
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+    BROMURE_HERMES_SESSION_HOME
+    }
+    #    Hold home $1 until this chat ends: an exclusive flock(2) on
+    #    $1/.bromure-lease, kept on the shell's fd 197 (never passed on to
+    #    Hermes; `hermes()` lets go once its chat exits, the kernel when
+    #    the tab's shell dies). Every chat Bromure lets run holds it, so
+    #    one home is one chat at a time -- another pane of the same window
+    #    too: a chat let in beside the holder without a lease of its own
+    #    was unguarded once the holder exited, and another window could
+    #    take the home from under it.
+    _bromure_hermes_lease() {
+        [ -n "$1" ] || return 1
+        exec 197<>"$1/.bromure-lease" || return 1
+        if python3 -c 'import fcntl; fcntl.flock(197, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
+            _lease=1
+            return 0
+        fi
+        exec 197>&-
+        return 1
+    }
+    #    Make home $1 this tab window's: fails when a chat from another
+    #    window is using it (one home, one window: its delegation tools
+    #    speak for the window the home names).
+    _bromure_hermes_claim() {
+        [ -n "$1" ] || return 1
+        python3 - "$1" "${TMUX_PANE:-}" <<'BROMURE_HERMES_CLAIM' 2>/dev/null
+    import json, os, subprocess, sys
+    home = os.path.realpath(sys.argv[1])
+    pane = sys.argv[2]
+    root = os.path.realpath(os.path.expanduser("~/.hermes"))
+    me = (os.getpid(), os.getppid())
+    windows = {}
+
+    def window_of(p):
+        if not p:
+            return ""
+        if p not in windows:
+            try:
+                out = subprocess.run(["tmux", "display-message", "-p", "-t", p, "#{window_index}"],
+                                     capture_output=True, text=True, timeout=5).stdout.strip()
+            except Exception:
+                out = ""
+            windows[p] = out if out.isdigit() else ""
+        return windows[p]
+
+    def environ_of(pid):
+        try:
+            with open("/proc/%d/environ" % pid, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return {}
+        env = {}
+        for kv in raw.split(b"\\0"):
+            k, sep, v = kv.partition(b"=")
+            if sep:
+                env[k.decode(errors="replace")] = v.decode(errors="replace")
+        return env
+
+    def home_of(words, env):
+        if "--profile" in words:
+            i = words.index("--profile")
+            name = words[i + 1] if i + 1 < len(words) else ""
+            if name and name != "default":
+                return os.path.join(root, "profiles", name)
+            if name == "default":
+                return root
+        h = env.get("HERMES_HOME") or ""
+        return os.path.realpath(h) if os.path.isabs(h) else root
+
+    mine = window_of(pane)
+    if not mine:
+        sys.exit(1)
+    # Hermes's own record of the chats on this home (the hook reads it too).
+    try:
+        with open(os.path.join(home, "runtime", "active_sessions.json")) as f:
+            entries = json.load(f).get("entries") or []
+    except (OSError, ValueError, AttributeError):
+        entries = []
+    for e in entries:
+        try:
+            pid = int(e.get("pid"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if pid in me or not os.path.exists("/proc/%d" % pid):
+            continue
+        if window_of(environ_of(pid).get("TMUX_PANE") or "") != mine:
+            sys.exit(1)
+    # And any chat process on it: the launcher (a script, or inline code),
+    # `-m hermes_cli.main`, the TUI's gateway child. A gateway is none of
+    # them: one serves every home.
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) in me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % d, "rb") as f:
+                words = [w.decode(errors="replace") for w in f.read().split(b"\\0") if w]
+            with open("/proc/%s/comm" % d, "rb") as f:
+                comm = f.read().decode(errors="replace").strip()
+        except OSError:
+            continue
+        if not comm.startswith("python") and comm != "hermes":
+            continue
+        if "hermes_cli.main" in words and "gateway" in words:
+            continue
+        cli = any(os.path.basename(w) == "hermes" for w in words[:3]) \\
+            or ("-c" in words[:3] and any("hermes_bootstrap" in w for w in words[:4])) \\
+            or "hermes_cli.main" in words or any("tui_gateway" in w for w in words)
+        if not cli or any("hermes-hook" in w for w in words):
+            continue
+        env = environ_of(int(d))
+        if home_of(words, env) == home and window_of(env.get("TMUX_PANE") or "") != mine:
+            sys.exit(1)
+    sys.exit(0)
+    BROMURE_HERMES_CLAIM
+    }
+    #    A profile signs in with the user's own login: Hermes keeps it in
+    #    each home's auth.json (a clone takes none), so a newer one of the
+    #    user's is copied in before each run.
+    _bromure_hermes_sync_auth() {
+        local _h="${HERMES_HOME:-}" _r="$HOME/.hermes"
+        [ -n "$_h" ] && [ "$_h" != "$_r" ] && [ -d "$_h" ] || return 0
+        if [ -s "$_r/auth.json" ] && { [ ! -e "$_h/auth.json" ] || [ "$_r/auth.json" -nt "$_h/auth.json" ]; }; then
+            install -m 600 "$_r/auth.json" "$_h/auth.json" 2>/dev/null || true
+        fi
+    }
     #    The base image carries Hermes in /opt/hermes, installed as root
     #    when the image was built. Its code and runtime are shared, but each
     #    data root needs a dependency environment of its own, which Hermes's
     #    first-launch sync refuses to build for a user who doesn't own the
-    #    checkout. `hermes pm repair` builds it from /opt's runtime instead:
-    #    seconds, no network, nothing written under /opt. Done once per data
-    #    root, and again when the image brings another Hermes.
+    #    checkout. `hermes pm repair` builds it from /opt's runtime instead,
+    #    its packages from the image's payload cache (/opt/hermes/uv-cache):
+    #    seconds, nothing downloaded but the index's answers, nothing written
+    #    under /opt but its install lock. Done once per data root, and again
+    #    when the image brings another Hermes.
     _bromure_hermes_opt() {
         case "$(readlink -f "$(type -P hermes)" 2>/dev/null)" in
             /opt/hermes/*) return 0 ;;
@@ -7330,7 +7712,11 @@ public final class ProfileStore {
             install -m 600 /opt/hermes/config.yaml "$_h/config.yaml"
         fi
         echo "[bromure-ac] preparing Hermes Agent for this workspace…"
-        if command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1; then
+        # Twice at most: it still asks the package index about versions (the
+        # packages themselves come from the image), and one network hiccup
+        # shouldn't leave the workspace without its agent.
+        if command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1 \\
+            || { sleep 3; command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1; }; then
             printf '%s\\n' "$_s" > "$_h/.bromure-opt-repaired"
             return 0
         fi
@@ -7365,31 +7751,85 @@ public final class ProfileStore {
     }
     #    What Hermes's composer in tmux pane $1 holds (printed): its last
     #    `❯ ` row, less the italic placeholder Hermes draws in an empty one.
-    #    Fails (2) with no composer on screen.
+    #    Fails (2) with no composer on screen. With $2: whether the composer
+    #    holds exactly $2 (fails 1 if not) -- read across the rows Hermes
+    #    wraps it onto: it cuts long input at the pane's width, character by
+    #    character, and carries on at the next row's first column -- and
+    #    nothing typed after it: the cursor sits right after it. Fails 3 when
+    #    $2 ends a row exactly: then nothing on screen tells whether more
+    #    input follows (see below), and the caller must make it end elsewhere.
     _bromure_hermes_composer() {
+        local _w
+        _w=$(tmux display-message -p -t "$1" '#{pane_width} #{cursor_x} #{cursor_y}' 2>/dev/null)
         tmux capture-pane -p -e -t "$1" 2>/dev/null | python3 -c '
-    import re, sys
+    import re, sys, unicodedata
     esc, glyph = chr(27), chr(0x276F) + " "
-    rows = [l for l in sys.stdin.read().split(chr(10)) if glyph in l]
-    if not rows:
+    geo = (sys.argv[1] if len(sys.argv) > 1 else "").split()
+    width, cx, cy = (int(g) for g in geo) if len(geo) == 3 and all(g.isdigit() for g in geo) else (0, 0, 0)
+    want = sys.argv[2] if len(sys.argv) > 2 else None
+    lines = sys.stdin.read().split(chr(10))
+    at = [n for n, l in enumerate(lines) if glyph in l]
+    if not at:
         sys.exit(2)
-    italic, text = False, ""
-    for sgr, ch in re.findall(esc + "[[]([0-9;]*)m|([^" + esc + "])", rows[-1].split(glyph, 1)[1]):
-        if ch:
-            text += "" if italic else ch
-            continue
-        codes, i = (sgr or "0").split(";"), 0
-        while i < len(codes):
-            if codes[i] in ("38", "48", "58"):
-                i += 5 if codes[i + 1:i + 2] == ["2"] else 3
+    def visible(row):
+        italic, text = False, ""
+        for sgr, ch in re.findall(esc + "[[]([0-9;]*)m|([^" + esc + "])", row):
+            if ch:
+                text += "" if italic else ch
                 continue
-            if codes[i] in ("", "0", "23"):
-                italic = False
-            elif codes[i] == "3":
-                italic = True
-            i += 1
-    print(text.strip())
-    '
+            codes, i = (sgr or "0").split(";"), 0
+            while i < len(codes):
+                if codes[i] in ("38", "48", "58"):
+                    i += 5 if codes[i + 1:i + 2] == ["2"] else 3
+                    continue
+                if codes[i] in ("", "0", "23"):
+                    italic = False
+                elif codes[i] == "3":
+                    italic = True
+                i += 1
+        return text
+    def cols(s):
+        return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+    head, first = lines[at[-1]].split(glyph, 1)
+    if want is None:
+        print(visible(first).strip())
+        sys.exit(0)
+    if width <= 0:
+        sys.exit(1)
+    # Lay $2 out as Hermes would after its prompt, then compare row by row
+    # (tmux drops the blanks that end a row).
+    rows, used = [""], cols(visible(head)) + 2
+    for c in want:
+        if used + cols(c) > width:
+            rows.append("")
+            used = 0
+        rows[-1] += c
+        used += cols(c)
+    shown = [visible(first)] + [visible(l) for l in lines[at[-1] + 1:at[-1] + len(rows) + 1]]
+    if [r.rstrip() for r in shown[:len(rows)]] != [r.rstrip() for r in rows]:
+        sys.exit(1)
+    # Nothing typed after it (the rows do not tell: tmux drops trailing
+    # blanks, and what follows a full row may be the next row of input or
+    # the row under the composer, whatever the skin draws there): the
+    # cursor sits right after the text. Not for a text ending a row
+    # exactly: Hermes then parks the cursor above the composer, and does
+    # the same with one or more full rows of input after it -- so no answer
+    # (3), rather than a yes nothing backs.
+    if used >= width:
+        sys.exit(3)
+    last = at[-1] + len(rows) - 1
+    sys.exit(0 if (cx, cy) == (used, last) else 1)
+    ' "$_w" ${2+"$2"}
+    }
+    #    Whether Hermes is what terminal $1 runs in the foreground: a
+    #    process of the terminal's foreground group (pgid = tpgid) that isn't
+    #    a shell. This probe runs on that terminal too, as a background job,
+    #    so its own ps and awk are never in that group; the bracket keeps
+    #    awk's pattern from matching its own command line all the same.
+    _bromure_hermes_foreground() {
+        ps -t "$1" -o pgid=,tpgid=,args= 2>/dev/null | awk '
+            $1 == $2 && $3 !~ "^-?(.*/)?(ba|da|z)?sh$" && /herm[e]s/ { found = 1 }
+            END { exit !found }'
     }
     #    Type $2 (the resume's `/model`) into the Hermes that is starting in
     #    tmux pane $1, once its composer is up and empty, then send it. The
@@ -7405,17 +7845,20 @@ public final class ProfileStore {
         while [ "$_i" -lt 120 ]; do
             sleep 0.5; _i=$((_i + 1))
             [ "$(tmux capture-pane -p -t "$_p" 2>/dev/null)" != "$_first" ] || continue
-            ps -t "$_tty" -o args= 2>/dev/null | grep -v -E '^-?(bash|sh)( |$)' \\
-                | grep -q hermes || continue
             _c=$(_bromure_hermes_composer "$_p") || continue
             [ -z "$_c" ] || return 0
+            _bromure_hermes_foreground "$_tty" || continue
             tmux send-keys -t "$_p" -l -- "$_m" || return 0
             for _j in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 0.2
-                if [ "$(_bromure_hermes_composer "$_p")" = "$_m" ]; then
-                    tmux send-keys -t "$_p" Enter
-                    return 0
-                fi
+                _bromure_hermes_composer "$_p" "$_m"
+                case $? in
+                    0) tmux send-keys -t "$_p" Enter; return 0 ;;
+                    # It ends a row exactly, where the check can't see past
+                    # it: one more blank (Hermes strips it) ends it inside
+                    # the next row, where it can.
+                    3) tmux send-keys -t "$_p" -l -- " " || return 0; _m="$_m " ;;
+                esac
             done
             return 0
         done
@@ -7452,14 +7895,66 @@ public final class ProfileStore {
         set -- "${_a[@]}"
         case "$_t" in wt/[a-z0-9]*) ;; *) _t="" ;; esac
         case "${_t#wt/}" in *[!a-z0-9-]*) _t="" ;; esac
+        # Only a home this tab just claimed gets its window: a chat's
+        # identity is never rewritten by a home another tab holds, nor by
+        # a command that isn't a chat (`hermes config`, `sessions`, …).
+        local _claimed=""
         if [ -n "$_t" ]; then
             local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
+            if [ -n "${TMUX_PANE:-}" ]; then
+                if ! _bromure_hermes_claim "$HERMES_HOME"; then
+                    echo "[bromure-ac] this task's Hermes is running in another tab; open it there." >&2
+                    return 1
+                fi
+                _claimed=1
+            fi
+        elif [ -n "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
+                && [ -n "${TMUX_PANE:-}" ] && _bromure_hermes_is_chat "$@"; then
+            # A home the user chose: still one tab's at a time.
+            if ! _bromure_hermes_claim "$HERMES_HOME"; then
+                echo "[bromure-ac] the Hermes home $HERMES_HOME is in use by another tab's Hermes; quit it there first." >&2
+                return 1
+            fi
+            _claimed=1
+        elif [ -z "${HERMES_HOME:-}" ] && [ "${BROMURE_AC_REGISTER:-}" != 1 ] \\
+                && [ -n "${TMUX_PANE:-}" ] && _bromure_hermes_is_chat "$@"; then
+            # Never the shared home instead: its gateway would give this
+            # tab another tab's identity.
+            local _th
+            if ! _th=$(_bromure_hermes_tab_home "$(_bromure_hermes_resume_id "$@")" "${_u[@]}") \\
+                    || [ -z "$_th" ]; then
+                echo "[bromure-ac] couldn't give this tab its own Hermes home (another tab's Hermes is using it); try again in a moment." >&2
+                return 1
+            fi
+            local -x HERMES_HOME="$_th"
+            _claimed=1
         fi
+        _bromure_hermes_sync_auth
         # A sign-in machine only runs `hermes auth add nous`: the workspace
         # settings (provider, MCP servers, hooks) are a dozen `hermes config`
         # runs for nothing there, ahead of the sign-in page.
         [ "${BROMURE_AC_REGISTER:-}" = 1 ] || _bromure_hermes_apply "${_u[@]}"
+        # The window this home's chat runs in, for its delegation tools
+        # (Hermes's MCP servers never see the tab's tmux pane) -- under the
+        # home's lease, held until the chat ends: the claim above only sees
+        # chats already running, and two tabs resuming one session at once
+        # both passed it. After the settings step, so nothing it starts
+        # inherits the lease.
+        local _lease=""
+        if [ -n "$_claimed" ] && [ -n "${HERMES_HOME:-}" ]; then
+            if ! _bromure_hermes_lease "$HERMES_HOME"; then
+                echo "[bromure-ac] the Hermes home $HERMES_HOME is in use by another Hermes chat (in another tab, or another pane of this one); quit it there first." >&2
+                return 1
+            fi
+            local _win
+            _win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+            case "$_win" in
+                ''|*[!0-9]*) rm -f "$HERMES_HOME/bromure-window" ;;
+                *) printf 'w%s\\n' "$_win" > "$HERMES_HOME/bromure-window.tmp" \\
+                       && mv -f "$HERMES_HOME/bromure-window.tmp" "$HERMES_HOME/bromure-window" ;;
+            esac
+        fi
         # A resumed session runs on the model it was stored with, not
         # config.yaml's, and Hermes refuses --provider / -m on a resume. A
         # session begun on another provider (a local model, before the
@@ -7473,14 +7968,20 @@ public final class ProfileStore {
         local _rm
         if [ -n "${TMUX_PANE:-}" ] && [ -t 0 ] \
                 && _rm=$(_bromure_hermes_resume_model "$@"); then
-            ( _bromure_hermes_type_model "$TMUX_PANE" "$_rm" </dev/null >/dev/null 2>&1 & )
+            ( exec 197>&-; _bromure_hermes_type_model "$TMUX_PANE" "$_rm" </dev/null >/dev/null 2>&1 & )
         fi
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
+        # Hermes never holds the lease (fd 197): the gateway it may start
+        # outlives the chat and would keep the home leased for good.
+        local _rc
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
-            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@" 197>&-
         else
-            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@"
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@" 197>&-
         fi
+        _rc=$?
+        [ -z "$_lease" ] || exec 197>&-
+        return $_rc
     }
 
     #  • The Nous Portal sign-in (RegistrationLaunch.nousLoginCommand). The
@@ -8219,4 +8720,13 @@ extension Notification.Name {
     /// started (a boot creates the home image) or stopped. `object` is the
     /// profile id; its editor measures the storage again.
     static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
+}
+
+extension Profile {
+    /// Home-relative path of the Nous login's stand-ins the host seeds for a
+    /// Hermes on Nous Portal (`providers.nous`, never a real token). The
+    /// managed .bashrc merges it into Hermes's own `~/.hermes/auth.json`,
+    /// which also holds the user's other Hermes logins — so a seed (which
+    /// overwrites what it manages) never owns that file.
+    static let hermesNousSidecar = ".hermes/.bromure-nous.json"
 }

@@ -4370,3 +4370,44 @@
 
 /* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
 "Powers Hermes Agent only." = "Nur für Hermes Agent.";
+
+/* Remote sign-in progress */
+"Signing in to %@…" = "Anmeldung bei %@…";
+"Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Auf %@ wird eine private Anmelde-Maschine gestartet. Die Anmeldeseite öffnet sich in Ihrem Browser, sobald sie bereit ist, meist innerhalb einer Minute.";
+"Hide" = "Ausblenden";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "Basis-Image…";
+"Base Image" = "Basis-Image";
+"Base image" = "Basis-Image";
+"Skip Permanently" = "Dauerhaft überspringen";
+"To install only some of them, or later, use Workspaces › Base Image…" = "Um nur einige davon oder später zu installieren, verwenden Sie Arbeitsbereiche › Basis-Image…";
+"Version" = "Version";
+"Source" = "Quelle";
+"Updated" = "Aktualisiert";
+"Size on disk" = "Größe auf dem Volume";
+"Packages" = "Pakete";
+"Installing…" = "Wird installiert…";
+"Install Selected" = "Auswahl installieren";
+"Choose Workspaces to Update…" = "Zu aktualisierende Arbeitsbereiche wählen…";
+"Skipped" = "Übersprungen";
+"Don't Skip" = "Nicht überspringen";
+"Not installed" = "Nicht installiert";
+"Not started yet" = "Noch nicht gestartet";
+"v%@ · current" = "v%@ · aktuell";
+"v%@ · updates at its next start" = "v%@ · wird beim nächsten Start aktualisiert";
+"v%@ · kept" = "v%@ · beibehalten";
+"v%@ · older" = "v%@ · älter";
+"Published image %@" = "Veröffentlichtes Image %@";
+"Built on this Mac" = "Auf diesem Mac erstellt";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "Für %@ ist auf dieser Maschine kein Modell eingerichtet. Wählen Sie eines in den Einstellungen der Maschine › Modelle.";
+"No model set up (settings › Models)" = "Kein Modell eingerichtet (Einstellungen › Modelle)";
+"Base unknown" = "Basis unbekannt";
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "Vertraut dem exakten Zertifikat eines selbstsignierten Servers, damit Zugangsdaten ihn trotzdem erreichen.";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "Für einen internen Server mit selbstsigniertem Zertifikat oder privater CA, der trotzdem echte Zugangsdaten erhalten soll. Geben Sie seinen Hostnamen und den SHA-256-Fingerabdruck des vorgelegten Zertifikats ein (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256` oder der Fingerabdruck, den die Zertifikatsansicht eines Browsers zeigt). Legt dieser Host genau dieses Zertifikat vor, vertraut Bromure ihm wie jedem gültigen Zertifikat und tauscht und injiziert Zugangsdaten wie gewohnt. Jedes andere Zertifikat wird normal geprüft. Prüfen Sie den Fingerabdruck am Server selbst, bevor Sie ihn anheften: Nur Sie können einen Pin hinzufügen, niemals der Agent. Wirkt sofort.";
+"Trusted upstream certificates" = "Vertrauenswürdige Upstream-Zertifikate";
+"SHA-256 fingerprint" = "SHA-256-Fingerabdruck";
+"Add certificate" = "Zertifikat hinzufügen";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Benötigt einen Hostnamen und einen 64-stelligen SHA-256-Fingerabdruck; bis dahin ignoriert.";

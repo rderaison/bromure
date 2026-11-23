@@ -61,20 +61,57 @@ final class P2PAccount {
         if let url = comps.url { NSWorkspace.shared.open(url) }
     }
 
-    /// A handed-back link (URL scheme), or one pasted by hand. A link with a
-    /// `state` must be the handoff we started.
-    func complete(_ raw: String) {
-        guard let link = EnrollLink(parsing: raw) else {
+    /// What the `bromure-agent-host://` URL scheme hands over. Any page can
+    /// open such a link, so only the handoff this Mac started is accepted:
+    /// that scheme, carrying the pending, non-empty `state` — never a
+    /// state-free link that would enroll this Mac into another account.
+    func completeHandoff(_ raw: String) {
+        guard EnrollLink(parsing: raw) != nil else {
             lastError = "That isn't an enrollment link or code."
             return
         }
-        if let state = URLComponents(string: raw)?.queryItems?.first(where: { $0.name == "state" })?.value {
-            let pending = (try? String(contentsOf: Self.pendingStateFile, encoding: .utf8)) ?? ""
-            guard state == pending else {
-                AgentHostLog.log("p2p: ignored an enroll link we didn't start")
-                return
-            }
+        guard Self.isHandoffLink(raw), Self.statePending(raw) else {
+            AgentHostLog.log("p2p: ignored an enroll link we didn't start")
+            return
         }
+        redeem(raw)
+    }
+
+    /// A code or link the user deliberately pasted (Paste Link…). A pasted
+    /// `bromure-agent-host://` link is still a handoff and needs its state;
+    /// a bare code or a `bromure://` link carries none.
+    func completeManual(_ raw: String) {
+        guard EnrollLink(parsing: raw) != nil else {
+            lastError = "That isn't an enrollment link or code."
+            return
+        }
+        let hasState = Self.components(raw)?.queryItems?.contains(where: { $0.name == "state" }) ?? false
+        if (Self.isHandoffLink(raw) || hasState) && !Self.statePending(raw) {
+            AgentHostLog.log("p2p: ignored an enroll link we didn't start")
+            return
+        }
+        redeem(raw)
+    }
+
+    private static func components(_ raw: String) -> URLComponents? {
+        URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func isHandoffLink(_ raw: String) -> Bool {
+        components(raw)?.scheme?.lowercased() == urlScheme
+    }
+
+    /// `raw` carries a non-empty state equal to the one `beginSignIn` wrote
+    /// and that hasn't been redeemed yet.
+    private static func statePending(_ raw: String) -> Bool {
+        guard let state = components(raw)?.queryItems?.first(where: { $0.name == "state" })?.value,
+              !state.isEmpty else { return false }
+        let pending = (try? String(contentsOf: pendingStateFile, encoding: .utf8)) ?? ""
+        return !pending.isEmpty && state == pending
+    }
+
+    private func redeem(_ raw: String) {
+        guard let link = EnrollLink(parsing: raw) else { return }
         try? FileManager.default.removeItem(at: Self.pendingStateFile)
         // A re-enroll replaces the device: drop the old one's channel first,
         // so serving comes back up as the new one.
@@ -92,6 +129,10 @@ final class P2PAccount {
             case .failure(let e):
                 lastError = "Sign-in failed: \(e)"
                 AgentHostLog.log("p2p: enroll failed: \(e)")
+                // Enrollment stores a record only on success: an already
+                // enrolled machine still is, so serve it again rather than
+                // staying offline until the next launch.
+                if isEnrolled && sshPort != 0 { start(sshPort: sshPort) }
             }
             NotificationCenter.default.post(name: SessionEngine.didChange, object: nil)
         }

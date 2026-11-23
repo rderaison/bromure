@@ -1816,8 +1816,11 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             # the life of the terminal session (possibly hours). Without an
             # immediate replacement, N concurrent host terminals would drain the
             # POOL_SIZE idle connections and starve exec/roster traffic.
-            replenished = True
-            replenish_fn()
+            # Once only: a request that waited for the sandbox was replaced
+            # already, and each replenish is one more pool slot.
+            if not replenished:
+                replenished = True
+                replenish_fn()
             _run_interactive(vsock_sock, req)
             return  # finally below closes the vsock
 
@@ -1944,47 +1947,106 @@ def _shell_connect_to_host():
         return None
 
 
+# The host's idle connections are a pool of POOL_SIZE: each one a request
+# claims (an exec, a terminal, a file op) is replaced (`replenish`). A
+# replacement used to be tried 20 times, 0.1 s apart, then given up for
+# good -- and nothing tried again. A burst of runs starting at once (several
+# commit reviews) drained the pool while the host was slow to accept, the
+# replacements gave up, and the workspace could never open a shell or a
+# session again until agentd restarted ("No shell connection"). So each
+# missing slot has a filler that keeps trying, backing off, for as long as
+# agentd runs. The fillers connect side by side -- one per missing slot,
+# never more: the host waits ~3 s for a pooled connection, and replacements
+# taking turns behind a slow connect() didn't all arrive in time.
+SHELL_REFILL_BACKOFF_MIN = 0.1
+SHELL_REFILL_BACKOFF_MAX = 5.0
+
+
+class _ShellPool:
+    """POOL_SIZE idle connections to the host, kept topped up. `replenish()`
+    says one was used (or lost): a filler opens its replacement, retrying with
+    backoff until it gets one -- never giving up while `running()`."""
+
+    def __init__(self, connect, handle, running, sleep=time.sleep,
+                 clock=time.monotonic, size=None):
+        self._connect, self._handle, self._running = connect, handle, running
+        self._sleep, self._clock = sleep, clock
+        self._size = POOL_SIZE if size is None else size
+        self._lock = threading.Lock()
+        self._missing = 0          # fillers at work: one per missing slot
+        self._initial = 0          # of the first fill, still to come
+        self._outage = None        # (since, failed attempts) while the host refuses
+        self.established = 0       # connections opened, ever (tests, logs)
+
+    def replenish(self):
+        with self._lock:
+            self._missing += 1
+        threading.Thread(target=self._fill_one, daemon=True).start()
+
+    def missing(self):
+        with self._lock:
+            return self._missing
+
+    def _fill_one(self):
+        backoff = SHELL_REFILL_BACKOFF_MIN
+        while self._running():
+            try:
+                s = self._connect()
+            except Exception as e:  # never lose the slot: a failure like any other
+                log("shell", "pool connect failed: %s" % e)
+                s = None
+            if s is None:
+                with self._lock:
+                    first = self._outage is None
+                    since, failed = self._outage or (self._clock(), 0)
+                    self._outage = (since, failed + 1)
+                    missing = self._missing
+                if first:
+                    log("shell", "the host isn't taking pool connections; retrying"
+                                 " until it does (%d missing)" % missing)
+                self._sleep(backoff)
+                backoff = min(backoff * 2, SHELL_REFILL_BACKOFF_MAX)
+                continue
+            with self._lock:
+                self._missing -= 1
+                self.established += 1
+                outage = self._outage
+                if outage is not None and self._missing == 0:
+                    self._outage = None
+                else:
+                    outage = None
+                ready = False
+                if self._initial > 0:
+                    self._initial -= 1
+                    ready = self._initial == 0
+            threading.Thread(target=self._handle, args=(s, self.replenish),
+                             daemon=True).start()
+            if outage is not None:
+                failed = outage[1]
+                log("shell", "pool connection to the host restored after %d failed"
+                             " attempt%s (%.1f s)" % (failed, "" if failed == 1 else "s",
+                                                     self._clock() - outage[0]))
+            if ready:
+                log("shell", "pool ready (%d connections)" % self._size)
+            return
+        with self._lock:
+            self._missing -= 1
+
+    def run(self):
+        """Fills the pool, then keeps it full (the fillers). Returns when
+        agentd stops."""
+        with self._lock:
+            self._initial = self._size
+        for _ in range(self._size):
+            self.replenish()
+        while self._running():
+            time.sleep(0.2)
+
+
 def shell_agent_service():
     """Guest-initiated vsock pool to host port 5800 (see shell-agent.py)."""
     log("shell", "starting")
-
-    def replenish():
-        """Open a new vsock connection to refill the pool."""
-        for _ in range(20):
-            if not _RUNNING.is_set():
-                return
-            s = _shell_connect_to_host()
-            if s:
-                t = threading.Thread(
-                    target=_shell_handle_connection, args=(s, replenish),
-                    daemon=True)
-                t.start()
-                return
-            time.sleep(0.1)
-        log("shell", "failed to replenish pool after 20 attempts")
-
-    # Fill the initial pool.
-    established = 0
-    for _ in range(POOL_SIZE):
-        if not _RUNNING.is_set():
-            return
-        for _ in range(30):
-            if not _RUNNING.is_set():
-                return
-            s = _shell_connect_to_host()
-            if s:
-                established += 1
-                t = threading.Thread(
-                    target=_shell_handle_connection, args=(s, replenish),
-                    daemon=True)
-                t.start()
-                break
-            time.sleep(0.2)
-
-    log("shell", "pool ready (%d connections)" % established)
-
-    while _RUNNING.is_set():
-        time.sleep(1)
+    _ShellPool(_shell_connect_to_host, _shell_handle_connection, _RUNNING.is_set).run()
 
 
 # ─────────────── §4 vm-bridge (local listeners → host vsock MITM) ───────────
@@ -8340,6 +8402,278 @@ _JAVA_CA_APT_HOOK = (
 )
 
 
+# MITM CA trust for docker containers (and every `docker build` step).
+#
+# A container sees its image's trust store, not the VM's, so TLS through the
+# MITM proxy failed in containers out of the box. Docker's `default-runtime`
+# isn't enough: `docker build` (BuildKit) runs its RUN steps by calling runc
+# itself. Every path -- containerd's shim (`runc create --bundle ...`) and
+# BuildKit (`runc run --bundle .../buildkit/executor/...`) -- finds runc by
+# name on its PATH, which lists /usr/local/sbin first: a wrapper there sees
+# every container, with no daemon config and no restart.
+#
+# The wrapper runs `bromure-runc-ca` for create/run/exec, then the real runc.
+# The helper edits the OCI spec before runc reads it:
+#  - create/run: a CA bundle (the image's own roots + the proxy CA; the VM's
+#    roots when the image has none -- the image's paths resolved within its
+#    rootfs only) and the raw CA, bind-mounted read-only at /dev/bromure-ca/
+#    (the container's own /dev tmpfs: nothing lands in a built image's
+#    layers), the CA variables the image or the user didn't set, and an
+#    `io.bromure.ca=1` annotation;
+#  - exec (docker exec, healthchecks): the same variables, for a container
+#    carrying the annotation.
+# It never mounts over the image's own store (a later update-ca-certificates
+# would fail on it: "device busy"), so what reads only the system store
+# (apt over HTTPS, Java) inside a container doesn't trust the CA. Errors go to
+# /run/bromure-runc-ca.log and never block a container.
+_RUNC_WRAPPER_PATH = "/usr/local/sbin/runc"
+_RUNC_CA_HELPER_PATH = "/usr/local/libexec/bromure-runc-ca"
+_RUNC_WRAPPER = r"""#!/bin/sh
+# Generated by Bromure AC: the MITM CA for containers (bromure-runc-ca), then
+# the real runc. Never in the way: the helper's failure is ignored.
+real=/usr/sbin/runc
+[ -x "$real" ] || real=/usr/bin/runc
+for a in "$@"; do
+    case "$a" in
+        create|run|exec)
+            [ -x /usr/bin/python3 ] && [ -r /usr/local/libexec/bromure-runc-ca ] &&
+                /usr/bin/python3 -I /usr/local/libexec/bromure-runc-ca "$@" </dev/null >/dev/null 2>&1
+            break ;;
+    esac
+done
+exec "$real" "$@"
+"""
+_RUNC_CA_HELPER = r'''# Generated by Bromure AC -- see bromure-agentd.py (_RUNC_CA_HELPER).
+import json, os, subprocess, sys, time
+
+CA_PEM = os.environ.get("BROMURE_CA_PEM") or "/etc/ssl/certs/bromure-ca.pem"
+VM_ROOTS = os.environ.get("BROMURE_VM_ROOTS") or "/etc/ssl/certs/ca-certificates.crt"
+REAL_RUNC = os.environ.get("BROMURE_REAL_RUNC") or (
+    "/usr/sbin/runc" if os.access("/usr/sbin/runc", os.X_OK) else "/usr/bin/runc")
+LOG = os.environ.get("BROMURE_RUNC_CA_LOG") or "/run/bromure-runc-ca.log"
+MOUNT = "/dev/bromure-ca"
+ANNOTATION = "io.bromure.ca"
+BUNDLE_FILE, CA_FILE = "ca-certificates.crt", "bromure-ca.pem"
+ENV_BUNDLE = ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PIP_CERT",
+              "GIT_SSL_CAINFO", "CARGO_HTTP_CAINFO", "AWS_CA_BUNDLE", "DENO_CERT",
+              "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH")
+# An image's own trust store, wherever its distribution keeps it.
+IMAGE_STORES = ("etc/ssl/certs/ca-certificates.crt", "etc/pki/tls/certs/ca-bundle.crt",
+                "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "etc/ssl/ca-bundle.pem",
+                "etc/ssl/cert.pem")
+MAX_STORE = 8 << 20
+GLOBAL_VALUED = {"--root", "--log", "--log-format", "--criu", "--rootless"}
+
+
+def log(msg):
+    try:
+        with open(LOG, "a") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
+    except OSError:
+        pass
+
+
+def parse(argv):
+    """(global options, subcommand, its arguments)."""
+    glob, i = {}, 0
+    while i < len(argv):
+        a = argv[i]
+        if not a.startswith("-"):
+            return glob, a, argv[i + 1:]
+        name, eq, val = a.partition("=")
+        if name in GLOBAL_VALUED and not eq:
+            val = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+        glob[name] = val
+        i += 1
+    return glob, None, []
+
+
+def option(args, names):
+    """A subcommand option's value (`--bundle X`, `-b X`, `--bundle=X`)."""
+    for i, a in enumerate(args):
+        name, eq, val = a.partition("=")
+        if name in names:
+            return val if eq else (args[i + 1] if i + 1 < len(args) else None)
+    return None
+
+
+def env_vars(present):
+    """The CA variables not already set (`present`: names set)."""
+    wanted = {k: MOUNT + "/" + BUNDLE_FILE for k in ENV_BUNDLE}
+    wanted["NODE_EXTRA_CA_CERTS"] = MOUNT + "/" + CA_FILE
+    return ["%s=%s" % (k, v) for k, v in wanted.items() if k not in present]
+
+
+def names(env):
+    return {e.split("=", 1)[0] for e in env or []}
+
+
+def resolve_in(root, rel):
+    """`rel` inside `root`, its symlinks followed within `root` only (an
+    absolute link is taken from `root`, `..` stops there): never a path
+    outside the image. None when it isn't a regular file."""
+    parts, done, hops = [p for p in rel.split("/") if p], [], 0
+    while parts:
+        p = parts.pop(0)
+        if p == ".":
+            continue
+        if p == "..":
+            if done:
+                done.pop()
+            continue
+        here = os.path.join(root, *done, p)
+        if os.path.islink(here):
+            hops += 1
+            if hops > 40:
+                return None
+            target = os.readlink(here)
+            if target.startswith("/"):
+                done = []
+            parts = [q for q in target.split("/") if q] + parts
+            continue
+        done.append(p)
+    path = os.path.join(root, *done)
+    return path if os.path.isfile(path) and not os.path.islink(path) else None
+
+
+def read_capped(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        return os.read(fd, MAX_STORE).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def ca_bundle(rootfs, ca):
+    """The image's own roots plus the CA (the VM's roots when the image has none)."""
+    roots = ""
+    for rel in IMAGE_STORES:
+        path = resolve_in(rootfs, rel)
+        if path:
+            roots = read_capped(path)
+            if roots.strip():
+                break
+    if not roots.strip():
+        try:
+            roots = read_capped(VM_ROOTS)
+        except OSError:
+            roots = ""
+    if ca.strip() in roots:
+        return roots
+    return roots.rstrip("\n") + ("\n" if roots.strip() else "") + ca.strip() + "\n"
+
+
+def write(path, text, mode):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def has_dev_tmpfs(spec):
+    return any(m.get("destination") == "/dev" and m.get("type") == "tmpfs"
+               for m in spec.get("mounts") or [])
+
+
+def on_create(args):
+    bundle = option(args, ("--bundle", "-b")) or os.getcwd()
+    config = os.path.join(bundle, "config.json")
+    with open(config) as f:
+        spec = json.load(f)
+    if (spec.get("annotations") or {}).get(ANNOTATION) == "1":
+        return
+    process = spec.get("process")
+    if not isinstance(process, dict) or not has_dev_tmpfs(spec):
+        return  # no process to give it to, or a /dev that isn't the container's own
+    if any(m.get("destination") == MOUNT for m in spec.get("mounts") or []):
+        return
+    try:
+        with open(CA_PEM) as f:
+            ca = f.read()
+    except OSError:
+        return  # no proxy CA in this VM
+    if "BEGIN CERTIFICATE" not in ca:
+        return
+    rootfs = (spec.get("root") or {}).get("path") or "rootfs"
+    if not rootfs.startswith("/"):
+        rootfs = os.path.join(bundle, rootfs)
+    out = os.path.join(bundle, "bromure-ca")
+    os.makedirs(out, mode=0o755, exist_ok=True)
+    write(os.path.join(out, BUNDLE_FILE), ca_bundle(rootfs, ca), 0o644)
+    write(os.path.join(out, CA_FILE), ca.strip() + "\n", 0o644)
+    spec.setdefault("mounts", []).append({
+        "destination": MOUNT, "type": "bind", "source": out,
+        "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]})
+    process["env"] = list(process.get("env") or []) + env_vars(names(process.get("env")))
+    spec.setdefault("annotations", {})[ANNOTATION] = "1"
+    write(config, json.dumps(spec), os.stat(config).st_mode & 0o7777)
+
+
+def on_exec(glob, args):
+    proc_file = option(args, ("--process", "-p"))
+    if not proc_file or not args:
+        return
+    cid = args[-1]
+    cmd = [REAL_RUNC] + (["--root", glob["--root"]] if glob.get("--root") else []) + ["state", cid]
+    state = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                                      check=True).stdout)
+    annotations = state.get("annotations") or {}
+    if not annotations and state.get("bundle"):
+        with open(os.path.join(state["bundle"], "config.json")) as f:
+            annotations = json.load(f).get("annotations") or {}
+    if annotations.get(ANNOTATION) != "1":
+        return
+    with open(proc_file) as f:
+        process = json.load(f)
+    add = env_vars(names(process.get("env")))
+    if add:
+        process["env"] = list(process.get("env") or []) + add
+        write(proc_file, json.dumps(process), os.stat(proc_file).st_mode & 0o7777)
+
+
+def main(argv):
+    glob, cmd, args = parse(argv)
+    if cmd in ("create", "run"):
+        on_create(args)
+    elif cmd == "exec":
+        on_exec(glob, args)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except Exception as e:
+        log("%s: %s: %s" % (" ".join(sys.argv[1:3]), type(e).__name__, e))
+    sys.exit(0)
+'''
+
+
+def _install_file_atomic(path, content, mode="755"):
+    """Put `content` at `path` (root's, `mode`) by a rename, so a reader --
+    a container's runc starting right now -- sees the old file or the new
+    one, never a half-written one. Nothing to do when it's already there."""
+    try:
+        with open(path) as f:
+            if f.read() == content:
+                return True
+    except OSError:
+        pass
+    staged = path + ".bromure-new"
+    try:
+        subprocess.run(["sudo", "sh", "-c",
+                        'umask 022 && mkdir -p "$(dirname "$2")" && cat > "$1" '
+                        '&& chmod "$3" "$1" && mv -f "$1" "$2"',
+                        "sh", staged, path, mode],
+                       input=content, text=True, stdout=_DEVNULL, stderr=_DEVNULL,
+                       check=True, timeout=30)
+        return True
+    except Exception as e:
+        log("session", "could not install %s: %s" % (path, e))
+        return False
+
+
 def task_install_ca():
     """Install the host's MITM CA into the system trust store so every TLS
     client in the VM trusts the forged per-host leaves the proxy presents."""
@@ -8368,6 +8702,12 @@ def task_install_ca():
     _sudo_write(_JAVA_CA_APT_HOOK_PATH, _JAVA_CA_APT_HOOK)
     if _sudo([_JAVA_CA_SYNC_PATH]).returncode == 0 and shutil.which("keytool"):
         log("session", "synced MITM CA into Java trust store")
+
+    # Containers: the runc wrapper and its helper (see _RUNC_WRAPPER). The
+    # helper first, so the wrapper never finds a half-installed one.
+    if (_install_file_atomic(_RUNC_CA_HELPER_PATH, _RUNC_CA_HELPER)
+            and _install_file_atomic(_RUNC_WRAPPER_PATH, _RUNC_WRAPPER)):
+        log("session", "installed the MITM CA for containers (runc wrapper)")
 
     log("session", "installed MITM CA")
 

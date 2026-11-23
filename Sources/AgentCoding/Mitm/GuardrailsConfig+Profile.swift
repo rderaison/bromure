@@ -63,6 +63,7 @@ extension GuardrailsConfig {
                                       databases: databases,
                                       egressPolicy: profile.resolvedEgressPolicy,
                                       allowInsecureBypass: g.allowInsecureBypass)
+        config.pinnedCertificates = g.pinnedCertificateFingerprints
         config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
         config.strictCredentials = profile.effectiveStrictCredentials
         return config

@@ -1,0 +1,229 @@
+---
+title: "Bromure Sidecar for Windows"
+description: "Turn a Windows PC into a native machine for Bromure Agentic Coding: install Bromure Sidecar, sign in to bromure.io, attach it to your Mac, install coding agents, run sessions, and keep it updated."
+order: 14.5
+---
+
+# Bromure Sidecar for Windows
+
+**Bromure Sidecar** turns a Windows PC into a **native machine** for Bromure Agentic Coding. Your Mac's machines are Linux VMs. A Sidecar machine is a real Windows PC, running coding agents — Claude Code, Codex, Grok Build, Kimi Code, Oh My Pi — directly on Windows, in your own Windows account.
+
+Once the PC is signed in to the same bromure.io account as your Mac and **attached** to it, it shows up in Bromure Agentic Coding as one more machine. Its sessions appear on the Mac beside the ones running in VMs: you can start them from the Mac, watch them, chat with them, and delegate to them. You can also start sessions on the PC itself, from the Sidecar's tray icon.
+
+The PC and the Mac talk **peer-to-peer through bromure.io**. The PC only ever dials out, so there is no port to forward, no VPN, and no address to type.
+
+> **Note:** Because agents on a Sidecar run directly on the PC, they don't go through a machine's wire boundary. Squelch, credential injection, tracing and the sandbox policy are features of [machines](06f-machines.mdx) (the Linux VMs) and don't apply to a native machine. A Sidecar agent has the access your Windows account has; choose its approval level accordingly (see [Approval levels](#approval-levels)).
+
+This chapter covers installing the Sidecar, signing in and attaching, installing agents, running sessions, settings, updates, uninstalling, the command line, and troubleshooting. For the Mac side of remote access, see [Remote Access & Clients](14-remote-access.mdx).
+
+## Requirements
+
+| | |
+|---|---|
+| **Windows** | Windows 10 version 1809 or later, or Windows 11. 64-bit, on Intel/AMD (**x64**) or ARM (**ARM64**). |
+| **Git for Windows** | Required: agents and Bromure Agentic Coding's commands run under Git Bash. The installer offers to install it if it is missing. |
+| **Microsoft Edge WebView2 Runtime** | Required for the Sidecar's window. Built into Windows 11; the installer offers it if it is missing. |
+| **An account** | A bromure.io account — the one your Mac's Bromure Agentic Coding is signed in to. |
+| **Administrator rights** | Not needed. Everything installs in your own account. |
+
+On Windows 11 version 22H2 and later the Sidecar's windows use the translucent Windows 11 style; on older versions they look plain but work the same.
+
+## Installing
+
+Download the installer for your PC:
+
+| PC | Download |
+|---|---|
+| Intel or AMD (most PCs) | [BromureSidecar-x64.exe](https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-x64.exe) |
+| ARM (for example Snapdragon laptops) | [BromureSidecar-arm64.exe](https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-arm64.exe) |
+
+These links always point to the latest version. Not sure which one you need? Open **Settings → System → About** and look at **System type**: "x64-based processor" means x64, "ARM-based processor" means ARM64. The ARM64 installer refuses to run on an x64 PC, and tells you so.
+
+Run the installer. It is signed by **Seclio LLC**, so Windows shows that publisher. Then:
+
+1. If Git for Windows or the WebView2 Runtime is missing, the installer lists them as components. Leave them ticked to install them too: Git comes from winget, and WebView2 from Microsoft. When both are already there, this page is skipped.
+2. The installer copies Bromure Sidecar to `%LOCALAPPDATA%\Programs\Bromure Sidecar`.
+3. On the last page, leave **Start Bromure Sidecar** ticked.
+
+The installer also:
+- adds a **Bromure Sidecar** shortcut to the Start menu;
+- makes the Sidecar start when you sign in to Windows;
+- registers the `bromure-agent-host://` link type that bromure.io uses to hand the sign-in back to the PC;
+- adds an entry to **Settings → Apps → Installed apps**, for uninstalling.
+
+## The tray icon and the flyout
+
+Bromure Sidecar lives in the notification area of the taskbar. If you don't see its icon, click the **^** arrow; you can drag the icon onto the taskbar to keep it visible.
+
+The icon tells you the state at a glance:
+
+| Icon | Meaning |
+|---|---|
+| Grey | The Sidecar isn't running, or the PC isn't attached to a Bromure Agentic Coding. |
+| Coloured | Attached. Hover for the name of the Mac it's attached to. |
+| With a dot | An agent needs you: it is waiting for an answer or an approval. |
+
+**Left-click** the icon to open the **flyout**, the Sidecar's panel. Click anywhere else, or press **Esc**, to close it. **Right-click** for a menu with **Open Bromure Sidecar**, **Coding Agents…**, and **Quit Bromure Sidecar**.
+
+The flyout shows, from top to bottom:
+- **The header**: "Bromure Sidecar" and a status line, such as "Not signed in to bromure.io", "Signed in as *pc-name*", or "Attached to *Mac* as *pc-name*". Its two buttons open **Coding agents** and **Settings**.
+- **Banners**, when they apply: "Git for Windows is needed", with an **Install** button, or "Bromure Sidecar *version* is available", with an **Update** button.
+- **The connection card**: signing in, or attaching to a Mac.
+- **Sessions**: the agents running on this PC.
+- **The footer**: **Coding Agents** and **Quit**.
+
+## Signing in to bromure.io
+
+The flyout's connection card reads **Reach this PC from Bromure AC**.
+
+1. Click **Sign in to bromure.io**. Your browser opens bromure.io's sign-in page.
+2. Sign in with the account your Mac uses, and approve adding this PC.
+3. bromure.io hands the sign-in back to the Sidecar through a `bromure-agent-host://` link; your browser may ask whether to open Bromure Sidecar. Allow it.
+
+The status line changes to "Signing in…", then to "Signed in as *pc-name*".
+
+**If the browser can't open the Sidecar** (for example, you finished signing in on another computer), copy the `bromure-agent-host://` link from the page, then click **Paste link** in the flyout.
+
+> **Security:** The Sidecar only accepts the sign-in it started itself. A `bromure-agent-host://` link must carry the code of the sign-in you began with **Sign in to bromure.io**, whether it arrives from the browser or is pasted; anything else is refused with "that sign-in link wasn't started here — sign in again from the menu". This stops a web page or a message from slipping this PC into somebody else's account. If you see that message, click **Sign in to bromure.io** again and finish that sign-in.
+
+The machine name is how Bromure Agentic Coding lists this PC. It defaults to the computer's name followed by `-native`; you can change it in [Settings](#settings).
+
+## Attaching to Bromure Agentic Coding
+
+Signed in, the connection card lists **your account's servers**: the Macs whose Bromure Agentic Coding is online, each with **Online** or **Offline** and an **Attach** button. If none is listed, "No Bromure AC server is online in your account": open Bromure Agentic Coding on your Mac (signed in to the same account, with remote access through bromure.io turned on — see [Remote Access & Clients](14-remote-access.mdx)).
+
+Click **Attach** next to your Mac:
+
+1. The card shows **Connecting**.
+2. The first time, it shows **Waiting for approval**: "Allow this PC in Bromure AC's fleet dialog on *Mac*." On the Mac, approve the PC when Bromure Agentic Coding asks.
+3. The card shows **Attached**, and the tray icon turns from grey to coloured.
+
+The PC now appears among the Mac's machines, under **Native Machines**. The attachment survives restarts: the Sidecar reconnects on its own the next time it starts. Click **Detach** to stop; the Mac then forgets this PC until you attach again.
+
+If attaching fails, the card says why:
+- "Can't reach *Mac*" — the Mac is offline or unreachable.
+- "*Mac* didn't accept this machine (is it up to date?)" — update Bromure Agentic Coding on the Mac.
+- "*Mac* refused this machine" — the PC was declined on the Mac; the Sidecar tries again after two minutes.
+
+## Coding agents
+
+The Sidecar doesn't come with any agent. Open **Coding Agents** (the button in the flyout, or **Coding Agents…** in the tray menu) to choose which ones this PC runs:
+
+| Agent | Maker | Notes |
+|---|---|---|
+| **Claude Code** | Anthropic | Fully integrated: live status, chat and delegation in Bromure Agentic Coding. |
+| **Codex** | OpenAI | |
+| **Grok Build** | xAI | |
+| **Kimi Code** | Moonshot AI | |
+| **Oh My Pi** | Open source | |
+
+Each card shows the agent's status (**Installed · *version***, **Not installed**, **Installing**, **Queued**, **Failed**) and the exact command its installer runs, with a copy button.
+
+- **Install** / **Update** runs the agent's own installer, downloaded from its maker, in your account, without administrator rights. Bromure doesn't bundle or host any of them. Installs run one at a time. Most agents keep themselves up to date afterwards.
+- **Sign in…** signs the agent in to its provider. The Sidecar shows a one-time code with **Copy** and **Open sign-in page**; for Claude Code, paste back the code the page shows and click **Submit**. "*Agent*: signed in" confirms it. (Oh My Pi has no sign-in step here.)
+- **Check again** rescans what is installed, for example after you installed an agent yourself.
+
+### Approval levels
+
+Each agent card has an approval setting. It applies to new and resumed sessions:
+
+| Level | What the agent does |
+|---|---|
+| **Ask** | Asks before acting — the agent's own default. |
+| **Auto** | Asks only when an action is risky. For Codex: never asks, but keeps Codex's own sandbox. For Kimi Code: asks only when needed. |
+| **Full** | Never asks, with no limits. |
+
+Oh My Pi offers only **Ask** and **Full**.
+
+> **Warning:** On a Sidecar, **Full** means the agent can do anything your Windows account can, without asking. Prefer **Ask** or **Auto** unless the PC is dedicated to the agents.
+
+## Sessions
+
+The flyout's **Sessions** list shows every agent running on this PC — started from the Mac or from the PC — with its title, agent, folder, and a status: **Working**, **Needs you**, or **Idle**. A plain terminal shows as **Shell**.
+
+- **Click a session** to open it in a terminal window (Windows Terminal when it is installed). Close the terminal window whenever you like: the session keeps running.
+- **New** starts a session on the PC: pick an installed agent, browse to the folder it should work in, and click **Start in this folder**. A terminal opens on it, and it also appears in Bromure Agentic Coding on the Mac.
+- **End this session** (the power button that appears when you hover a row) stops it.
+
+From the Mac, a Sidecar machine works like any other: start a session on it, open its terminal, chat with a Claude Code session, or delegate to it. Paths are shown the Linux way: your Windows profile folder is `/home/ubuntu`, and `D:\src` is `/d/src`.
+
+**Agents outlive the Sidecar.** They run in a separate background process: quitting Bromure Sidecar, or installing an update, doesn't stop them. While the Sidecar is quit, though, the Mac can't reach them; it warns you when you quit with agents running. Restarting Windows, signing out of Windows, or uninstalling does stop them.
+
+## Settings
+
+Open **Settings** from the flyout's header:
+
+- **Start at login** — start the Sidecar when you sign in to Windows, so agents stay reachable after a restart. On by default.
+- **Machine name** — how Bromure Agentic Coding lists this PC. Clear it to go back to the default (*computer-name*-native).
+- **SSH host key** — the fingerprint of this PC's SSH host key, with a copy button, for checking it from the Mac.
+- **bromure.io account** — who the PC is signed in as, and **Sign out**. Signing out also detaches the PC and removes the account's keys from it.
+
+The footer shows the Sidecar's version and the address of its SSH server (see [Security](#security)).
+
+## Updates
+
+The Sidecar checks for a new version two minutes after it starts and then every 12 hours. When there is one, the flyout shows "Bromure Sidecar *version* is available — Agents keep running while it installs." Click **Update**: the Sidecar downloads the new installer, checks it, and installs it silently. The Sidecar restarts on its own a few seconds later; running agents are not interrupted.
+
+Nothing updates without you clicking **Update**. You can also install a new version at any time by running the latest installer from the [download links](#installing) over the existing one.
+
+## Uninstalling
+
+Open **Settings → Apps → Installed apps**, find **Bromure Sidecar**, and choose **Uninstall**. If agents are still running, the uninstaller asks first: "Agents are still running in Bromure Sidecar. Uninstalling stops them. Continue?"
+
+Uninstalling removes the program, the Start menu shortcut, the start-at-login entry and the `bromure-agent-host://` link type. It keeps your data folder, `%LOCALAPPDATA%\BromureSidecar` (sign-in, settings, logs): delete that folder too for a clean slate. To also remove the PC from your bromure.io account, sign out (in [Settings](#settings)) before uninstalling.
+
+## Security
+
+- **Dial-out only.** The PC opens no port to the network. Its SSH server listens only on `127.0.0.1` (port 2223), and the Mac reaches it through the bromure.io relay that the PC itself connects to.
+- **Keys, not passwords.** SSH logins are by key only, and only for your own Windows user name. The keys come from your bromure.io account's devices; the Sidecar keeps them in sync every three minutes, and removes them when you sign out.
+- **Approval on the Mac.** A Mac lets a Sidecar attach only after you approve it there.
+- **Your data stays yours.** The Sidecar's folder is readable only by your account and Windows itself.
+- **Signed software.** The installer and every program in it are signed by Seclio LLC and timestamped; updates are checked against the published SHA-256 before they run.
+- **No wire boundary.** As noted at the top, native machines don't get the Linux VMs' gateway protections. Treat a Sidecar like your own terminal, and pick agents' approval levels accordingly.
+
+## The command line
+
+`bromure-sidecar.exe`, in the install folder, is the Sidecar's command-line tool. Its `ctl` command talks to the running Sidecar:
+
+| Command | What it does |
+|---|---|
+| `bromure-sidecar ctl health` | Is the Sidecar running? |
+| `bromure-sidecar ctl status` | Version, machine name, account, attachment, SSH port and fingerprint, running agents. |
+| `bromure-sidecar ctl signin` | Open the bromure.io sign-in page. |
+| `bromure-sidecar ctl enroll <code-or-link>` | Sign in with a code or link you copied (like **Paste link**). |
+| `bromure-sidecar ctl signout` | Sign out of bromure.io (also detaches). |
+| `bromure-sidecar ctl servers` | List the account's servers. |
+| `bromure-sidecar ctl attach {"id":"<server-id>"}` | Attach to a server. |
+| `bromure-sidecar ctl detach` | Detach. |
+| `bromure-sidecar ctl machine-name <name>` | Rename the PC. |
+| `bromure-sidecar ctl install-state` | The agents' install status. |
+| `bromure-sidecar ctl quit` | Stop the Sidecar (agents keep running). |
+| `bromure-sidecar claude` | Start Claude Code in the current folder as a Sidecar session, and attach to it here. Press **Ctrl-B**, then **D**, to leave it running. |
+| `bromure-sidecar version` | Print the version. |
+
+In PowerShell, put JSON arguments in single quotes: `bromure-sidecar ctl attach '{"id":"<server-id>"}'`.
+
+## Files and folders
+
+| Path | What's there |
+|---|---|
+| `%LOCALAPPDATA%\Programs\Bromure Sidecar` | The programs. |
+| `%LOCALAPPDATA%\BromureSidecar` | Your data: sign-in, settings, sessions, SSH keys. |
+| `%LOCALAPPDATA%\BromureSidecar\settings.json` | Settings, including some with no button: `sshPort` (default 2223) and `updateFeed` (set it to `""` to turn update checks off). Quit and restart the Sidecar after editing it. |
+| `%LOCALAPPDATA%\BromureSidecar\logs\bromure-sidecar.log` | The log. |
+
+## Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| "Bromure Sidecar isn't running" | Start **Bromure Sidecar** from the Start menu. Your agents were not stopped. |
+| "Git for Windows is needed" banner, or commands fail with "Git for Windows isn't installed on this machine" | Click **Install** in the banner (it runs `winget install --id Git.Git -e --scope user`), or install Git for Windows yourself, then try again. |
+| "WebView2 isn't available" | Install the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), then start the Sidecar again. |
+| "that sign-in link wasn't started here — sign in again from the menu" | Click **Sign in to bromure.io** and finish that sign-in; see [Signing in](#signing-in-to-bromureio). |
+| "This machine was removed from your bromure.io account." | The PC was removed on bromure.io. Sign in again. |
+| "Enrolled without the agent-host capability…" | Sign out in Settings, then sign in again with **Sign in to bromure.io**. |
+| "No Bromure AC server is online in your account." | Start Bromure Agentic Coding on the Mac, signed in to the same account, with remote access through bromure.io on. |
+| Stuck on **Waiting for approval** | Approve the PC on the Mac, in Bromure Agentic Coding. |
+| An agent says it isn't installed | Install it from **Coding Agents**. If the installer finished but the agent still isn't found, click **Check again**, or sign out of Windows and back in. |
+| The Settings view shows "Couldn't start the SSH server" | Another program uses port 2223. Set another `sshPort` in `settings.json`, then quit and restart the Sidecar. |
+| Anything else | Quit and restart the Sidecar from the tray menu (agents keep running), then look at the log file. `bromure-sidecar ctl status` shows the Sidecar's state in one go. |

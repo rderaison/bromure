@@ -1,0 +1,141 @@
+// Bromure Sidecar for Windows (sidecar/, Go), built entirely on the Mac
+// builder: tests, cross-compile, the per-user NSIS installers (x64, arm64),
+// Authenticode signing (SSL.com eSigner through jsign), and optionally
+// publishing them to DO Spaces with the update feed the Sidecar's updater
+// reads:
+//
+//   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-x64.exe     (stable link)
+//   https://dl.bromure.io/releases-sidecar-windows/BromureSidecar-arm64.exe
+//   https://dl.bromure.io/releases-sidecar-windows/latest.json                (update feed)
+//
+// The version is sidecar/VERSION (X.Y.Z); bump it to release. No secrets
+// live here: signing and upload use Jenkins credentials by id.
+//
+// Agent macosx-builder: Go (any 1.21+: go.mod's toolchain line fetches
+// 1.27.4), git, node (Release) and Homebrew. scripts/installer.sh installs
+// what it misses: makensis, and for SIGN openjdk, osslsigncode and jsign 7.6
+// (downloaded once, SHA-256 checked). It runs on Linux too (apt), should
+// the job move to a Linux builder.
+// Credentials (only when used):
+//   ESIGNER_USERNAME / ESIGNER_PASSWORD / ESIGNER_CREDENTIAL_ID /
+//   ESIGNER_TOTP_SECRET  secret-text credentials, SSL.com eSigner — SIGN
+//   DO_SPACES_KEY / DO_SPACES_SECRET — PUSH_RELEASE
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        booleanParam(
+            name: 'SIGN',
+            defaultValue: false,
+            description: 'Authenticode-sign the executables, the installers and the uninstaller (SSL.com eSigner via jsign; ESIGNER_* credentials).'
+        )
+        booleanParam(
+            name: 'PUSH_RELEASE',
+            defaultValue: false,
+            description: 'Upload the installers and the update feed to DigitalOcean Spaces (releases-sidecar-windows/). Installed Sidecars offer the update within 12 hours.'
+        )
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        CGO_ENABLED = '0'
+        GOTOOLCHAIN = 'auto'
+    }
+
+    stages {
+        stage('Test & build') {
+            steps {
+                script {
+                    env.SIDECAR_WIN_VERSION = readFile('sidecar/VERSION').trim()
+                    if (!(env.SIDECAR_WIN_VERSION ==~ /^\d+\.\d+\.\d+$/)) {
+                        error("sidecar/VERSION must be X.Y.Z, got '${env.SIDECAR_WIN_VERSION}'")
+                    }
+                    echo "Building Bromure Sidecar for Windows ${env.SIDECAR_WIN_VERSION}"
+                }
+                dir('sidecar') {
+                    sh '''
+                        set -euo pipefail
+                        command -v go >/dev/null || { echo "ERROR: go is not on PATH" >&2; exit 1; }
+                        go version
+                        test -z "$(gofmt -l .)" || { gofmt -l .; echo "ERROR: gofmt" >&2; exit 1; }
+                        go vet ./...
+                        GOOS=windows GOARCH=amd64 go vet ./...
+                        GOOS=windows GOARCH=arm64 go vet ./...
+                        # Includes the tmux contract test, which reads ../Sources/AgentCoding.
+                        # On failure, repeat the failing tests at the end of the log.
+                        go test -count=1 ./... 2>&1 | tee go-test.log || {
+                            echo "===== go test failures ====="
+                            grep -E -B2 -A25 '^(--- FAIL|panic:|FAIL[[:space:]])' go-test.log || true
+                            exit 1
+                        }
+                        go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+                        bash scripts/build.sh "$SIDECAR_WIN_VERSION"
+                    '''
+                }
+            }
+        }
+
+        stage('Installers') {
+            steps {
+                script {
+                    // Homebrew's prefixes (Apple silicon, Intel) for makensis & co.
+                    withEnv(["PATH+BREW=/opt/homebrew/bin:/usr/local/bin"]) {
+                        if (params.SIGN) {
+                            // installer.sh hands these to jsign through the
+                            // environment only (never argv or the log).
+                            withCredentials([
+                                string(credentialsId: 'ESIGNER_USERNAME',      variable: 'ESIGNER_USERNAME'),
+                                string(credentialsId: 'ESIGNER_PASSWORD',      variable: 'ESIGNER_PASSWORD'),
+                                string(credentialsId: 'ESIGNER_CREDENTIAL_ID', variable: 'ESIGNER_CREDENTIAL_ID'),
+                                string(credentialsId: 'ESIGNER_TOTP_SECRET',   variable: 'ESIGNER_TOTP_SECRET')
+                            ]) {
+                                sh 'bash sidecar/scripts/installer.sh --require-sign "$SIDECAR_WIN_VERSION"'
+                            }
+                        } else {
+                            sh 'bash sidecar/scripts/installer.sh "$SIDECAR_WIN_VERSION"'
+                        }
+                    }
+                }
+                archiveArtifacts artifacts: 'sidecar/dist/**', fingerprint: true
+            }
+        }
+
+        stage('Release') {
+            when { expression { return params.PUSH_RELEASE } }
+            environment {
+                DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+                DO_SPACES_REGION      = 'nyc3'
+                DO_SPACES_BUCKET      = 'bromure-dl'
+                DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        (cd tools && if [ -f package-lock.json ]; then \
+                                        npx --yes @socketsecurity/cli npm ci --silent; \
+                                     else \
+                                        npx --yes @socketsecurity/cli npm install --silent; \
+                                     fi)
+                        v="$SIDECAR_WIN_VERSION"
+                        # The installers first: the feed must never name a file
+                        # that isn't there yet.
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-x64 \
+                            --file "sidecar/dist/BromureSidecar-$v-x64.exe" --version "$v"
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-arm64 \
+                            --file "sidecar/dist/BromureSidecar-$v-arm64.exe" --version "$v"
+                        node tools/release-upload.mjs --product bromure-sidecar-windows-feed \
+                            --file "sidecar/dist/latest-$v.json" --version "$v"
+                    '''
+                }
+            }
+        }
+    }
+}

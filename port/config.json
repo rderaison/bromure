@@ -8,6 +8,7 @@
     "Sources/AgentCoding/AWSConfigParser.swift",
     "Sources/AgentCoding/AWSSSOResolver.swift",
     "Sources/AgentCoding/ActivitySummary.swift",
+    "Sources/AgentCoding/AgentConfigScan.swift",
     "Sources/AgentCoding/AgentDelegation.swift",
     "Sources/AgentCoding/AgentInterrupt.swift",
     "Sources/AgentCoding/AgentLabels.swift",

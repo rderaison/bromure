@@ -101,10 +101,20 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// off to forbid the header outright.
     public var allowInsecureBypass: Bool
 
+    /// Upstream server certificates the USER pinned for self-signed / private
+    /// endpoints (GitHub issue #65). A host whose presented leaf certificate
+    /// matches one of its pinned SHA-256 fingerprints is trusted like any
+    /// publicly-valid upstream — so, unlike `X-bromure-insecure`, credential
+    /// swapping and injection stay on. Configured on the host only (Guardrails
+    /// settings): the guest can't add a pin, so an agent can't talk its way
+    /// past a forged certificate by echoing its fingerprint back.
+    public var trustedCertificates: [TrustedUpstreamCertificate]
+
     public init(kubernetes: Mode = .off, aws: Mode = .off,
                 digitalOcean: Mode = .off, docker: Mode = .off,
                 github: Mode = .off, gitlab: Mode = .off, bitbucket: Mode = .off,
-                allowInsecureBypass: Bool = true) {
+                allowInsecureBypass: Bool = true,
+                trustedCertificates: [TrustedUpstreamCertificate] = []) {
         self.kubernetes = kubernetes
         self.aws = aws
         self.digitalOcean = digitalOcean
@@ -113,6 +123,7 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         self.gitlab = gitlab
         self.bitbucket = bitbucket
         self.allowInsecureBypass = allowInsecureBypass
+        self.trustedCertificates = trustedCertificates
     }
 
     /// Construction default used when creating a *new* profile.
@@ -136,7 +147,7 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// "this block holds non-default state", not "guardrails restrict
     /// something" (see `BromureAC.guardrailsRestrict` for that).
     public var isActive: Bool {
-        allowInsecureBypass
+        allowInsecureBypass || !trustedCertificates.isEmpty
             || [kubernetes, aws, digitalOcean, docker, github, gitlab, bitbucket]
                 .contains { $0 != .off }
     }
@@ -145,7 +156,7 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     // JSON loads cleanly, and only non-default modes are persisted.
     enum CodingKeys: String, CodingKey {
         case kubernetes, aws, digitalOcean, docker, github, gitlab, bitbucket
-        case allowInsecureBypass
+        case allowInsecureBypass, trustedCertificates
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -162,6 +173,8 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         // Default ON (the header is a per-request opt-in). Absent key ⇒ on;
         // only the non-default OFF state is written (see encode()).
         allowInsecureBypass = try c.decodeIfPresent(Bool.self, forKey: .allowInsecureBypass) ?? true
+        trustedCertificates = try c.decodeIfPresent([TrustedUpstreamCertificate].self,
+                                                    forKey: .trustedCertificates) ?? []
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -177,6 +190,93 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         // all-modes-off profile with the bypass turned OFF would serialize an
         // empty block, get dropped, and reload as the ON default.
         if !allowInsecureBypass { try c.encode(false, forKey: .allowInsecureBypass) }
+        if !trustedCertificates.isEmpty { try c.encode(trustedCertificates, forKey: .trustedCertificates) }
+    }
+
+    /// The runtime pin table: lowercased host → normalized SHA-256 fingerprints.
+    /// Entries with an empty host or a malformed fingerprint are dropped (the
+    /// settings UI flags them), so a typo never pins anything.
+    public var pinnedCertificateFingerprints: [String: Set<String>] {
+        var out: [String: Set<String>] = [:]
+        for cert in trustedCertificates {
+            guard let host = cert.normalizedHost,
+                  let fp = TrustedUpstreamCertificate.normalizeFingerprint(cert.sha256) else { continue }
+            out[host, default: []].insert(fp)
+        }
+        return out
+    }
+}
+
+/// One user-pinned upstream certificate: the host it is for and the SHA-256
+/// fingerprint of the leaf certificate that host presents — what
+/// `openssl x509 -noout -fingerprint -sha256` prints, or the "SHA-256
+/// fingerprint" a browser's certificate viewer shows.
+public struct TrustedUpstreamCertificate: Codable, Equatable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    /// Hostname the pin applies to (exact match, case-insensitive; any port).
+    public var host: String
+    /// SHA-256 fingerprint, hex — colons, spaces and case are ignored.
+    public var sha256: String
+
+    public init(id: UUID = UUID(), host: String, sha256: String) {
+        self.id = id
+        self.host = host
+        self.sha256 = sha256
+    }
+
+    enum CodingKeys: String, CodingKey { case id, host, sha256 }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        sha256 = try c.decodeIfPresent(String.self, forKey: .sha256) ?? ""
+    }
+
+    /// The host as the proxy compares it: trimmed and lowercased, with a
+    /// pasted scheme, path or port stripped. nil when nothing usable is left.
+    public var normalizedHost: String? {
+        var h = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let r = h.range(of: "://") { h = String(h[r.upperBound...]) }
+        if let slash = h.firstIndex(of: "/") { h = String(h[..<slash]) }
+        if h.hasPrefix("[") {
+            // [v6]:port → v6
+            if let close = h.firstIndex(of: "]") { h = String(h[h.index(after: h.startIndex)..<close]) }
+        } else if h.filter({ $0 == ":" }).count == 1, let colon = h.firstIndex(of: ":") {
+            h = String(h[..<colon])
+        }
+        if h.hasSuffix(".") { h.removeLast() }
+        return h.isEmpty ? nil : h
+    }
+
+    /// Normalize a pasted fingerprint to 64 lowercase hex characters, or nil
+    /// when it isn't a SHA-256 fingerprint. Accepts `AB:CD:…`, `ab cd …`,
+    /// plain hex, and the `sha256 Fingerprint=` / `SHA256:` prefixes openssl
+    /// and other tools print.
+    public static func normalizeFingerprint(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let eq = s.lastIndex(of: "=") { s = String(s[s.index(after: eq)...]) }
+        if s.hasPrefix("sha256:") { s = String(s.dropFirst("sha256:".count)) }
+        if s.hasPrefix("sha-256:") { s = String(s.dropFirst("sha-256:".count)) }
+        let hex = s.filter { !($0 == ":" || $0 == " " || $0 == "-" || $0 == "\t") }
+        guard hex.count == 64, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return hex
+    }
+
+    /// Lowercase hex SHA-256 of a DER certificate.
+    public static func fingerprint(ofDER der: Data) -> String {
+        SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// `AB:CD:…` — the colon-separated uppercase form shown to people.
+    public static func displayFingerprint(_ hex: String) -> String {
+        var parts: [String] = []
+        var i = hex.startIndex
+        while i < hex.endIndex {
+            let j = hex.index(i, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+            parts.append(String(hex[i..<j]).uppercased())
+            i = j
+        }
+        return parts.joined(separator: ":")
     }
 }
 
@@ -222,6 +322,17 @@ public struct GuardrailsConfig: Sendable {
     /// The guest may opt a request out of upstream cert validation with the
     /// `X-bromure-insecure` header. See `GuardrailsPolicy.allowInsecureBypass`.
     public let allowInsecureBypass: Bool
+
+    /// User-pinned upstream certificates: lowercased host → normalized SHA-256
+    /// leaf fingerprints. See `GuardrailsPolicy.trustedCertificates`.
+    public var pinnedCertificates: [String: Set<String>] = [:]
+
+    /// The pinned fingerprints for `host` (empty when it has none).
+    public func pinnedFingerprints(for host: String) -> Set<String> {
+        var h = host.lowercased()
+        if h.hasSuffix(".") { h.removeLast() }
+        return pinnedCertificates[h] ?? []
+    }
 
     /// The workspace turned off the credential-exfiltration alert
     /// (`Profile.disableExfiltrationAlerts`): a leak is still blocked, but the

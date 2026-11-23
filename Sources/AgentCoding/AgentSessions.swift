@@ -352,6 +352,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// resumed. Archiving ends the agent (a running one, or one found
     /// running later).
     var archivedAt: Date?
+    /// Screenshots only (`DemoMode.seed`): the state a fixture session
+    /// shows (a `SessionBucket` raw value), carried in the record so a
+    /// remote client's mirror shows it too. Never set otherwise.
+    var demoBucket: Int?
     /// The user deleted it. Hidden everywhere at once; the record itself
     /// stays until its tab is gone from the roster (killed now, or when
     /// the machine wakes), so the dying tab isn't adopted as a stranger.
@@ -847,6 +851,36 @@ final class AgentSessionStore {
         // session read "agent alive" with its machine off — S3-5).
         if archived { sessions[i].agentAlive = nil; deadSince[id] = nil }
         save()
+    }
+
+    /// Whether a workspace is gone for good (deleted, by any path), for the
+    /// sessions it leaves behind: they stay archived — no resume, no
+    /// unarchive brings back a session there is no machine to run — and
+    /// out of every peer's reach. The app sets it (the loaded workspaces
+    /// and their directories); never gone until then.
+    @ObservationIgnored var workspaceGone: (UUID) -> Bool = { _ in false }
+
+    /// Archive the sessions of workspaces that are gone (deleted, by any
+    /// path): "Paused" says a message carries on, but there's no machine
+    /// left to wake, and peers shouldn't be offered them (the delegation
+    /// tools never reach an archived session). `gone` answers per
+    /// workspace id. Returns the sessions archived.
+    @discardableResult
+    func archiveSessions(ofGoneWorkspaces gone: (UUID) -> Bool, now: Date = Date()) -> [UUID] {
+        var verdict: [UUID: Bool] = [:]
+        var archived: [UUID] = []
+        for i in sessions.indices where !sessions[i].isArchived && !sessions[i].isDeleted {
+            let pid = sessions[i].profileID
+            let isGone = verdict[pid] ?? gone(pid)
+            verdict[pid] = isGone
+            guard isGone else { continue }
+            sessions[i].archivedAt = now
+            sessions[i].agentAlive = nil
+            deadSince[sessions[i].id] = nil
+            archived.append(sessions[i].id)
+        }
+        if !archived.isEmpty { save() }
+        return archived
     }
 
     /// Sessions on machines that aren't attached (off, suspended): no
@@ -2072,6 +2106,9 @@ enum SessionHome {
 
     @MainActor
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
+        // Manual / App Store screenshots: a fixture session's state, here
+        // and in a remote client's mirror.
+        if let raw = s.demoBucket, let demo = SessionBucket(rawValue: raw) { return demo }
         if isGone(s, in: model) { return .ended }
         #if os(macOS)
         if let demo = DemoMode.bucket(for: s.id) { return demo }   // manual screenshots

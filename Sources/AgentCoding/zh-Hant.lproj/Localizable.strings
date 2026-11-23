@@ -4373,3 +4373,44 @@
 
 /* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
 "Powers Hermes Agent only." = "僅供 Hermes Agent 使用。";
+
+/* Remote sign-in progress */
+"Signing in to %@…" = "正在登入 %@…";
+"Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "正在 %@ 上啟動一台私人登入機器。準備就緒後，登入頁面會在你的瀏覽器中開啟，通常在一分鐘內。";
+"Hide" = "隱藏";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "基礎映像…";
+"Base Image" = "基礎映像";
+"Base image" = "基礎映像";
+"Skip Permanently" = "永久略過";
+"To install only some of them, or later, use Workspaces › Base Image…" = "如需只安裝其中一部分或稍後安裝，請使用「工作區 › 基礎映像…」。";
+"Version" = "版本";
+"Source" = "來源";
+"Updated" = "更新時間";
+"Size on disk" = "佔用空間";
+"Packages" = "套件";
+"Installing…" = "正在安裝…";
+"Install Selected" = "安裝所選項目";
+"Choose Workspaces to Update…" = "選擇要更新的工作區…";
+"Skipped" = "已略過";
+"Don't Skip" = "不再略過";
+"Not installed" = "未安裝";
+"Not started yet" = "尚未啟動";
+"v%@ · current" = "v%@ · 最新";
+"v%@ · updates at its next start" = "v%@ · 下次啟動時更新";
+"v%@ · kept" = "v%@ · 保留";
+"v%@ · older" = "v%@ · 舊版";
+"Published image %@" = "已發布映像 %@";
+"Built on this Mac" = "在此 Mac 上建置";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "此機器上尚未為 %@ 設定模型。請在機器的設定 › 模型 中選擇一個。";
+"No model set up (settings › Models)" = "未設定模型（設定 › 模型）";
+"Base unknown" = "基礎映像未知";
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "信任自簽署伺服器的特定憑證，讓憑據仍能送達。";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "適用於使用自簽署或私有 CA 憑證、但仍需取得真實憑據的內部伺服器。輸入其主機名稱，以及它所出示憑證的 SHA-256 指紋（`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`，或瀏覽器憑證檢視器中顯示的指紋）。當該主機出示的正是此憑證時，Bromure 會像對待任何有效憑證一樣信任它，並照常替換與注入憑據。其他任何憑證都依一般方式驗證。釘選之前請在伺服器本身核對指紋：只有你可以新增釘選，代理程式永遠不行。立即生效。";
+"Trusted upstream certificates" = "受信任的上游憑證";
+"SHA-256 fingerprint" = "SHA-256 指紋";
+"Add certificate" = "新增憑證";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "需要主機名稱與 64 個字元的 SHA-256 指紋；在此之前會被忽略。";

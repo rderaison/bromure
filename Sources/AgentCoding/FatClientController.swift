@@ -238,6 +238,9 @@ final class RemoteHostController {
     /// window opens a pop-out terminal; other platforms present their own.
     var onRegistrationTerminal: ((_ sessionID: UUID, _ provider: String) -> Void)?
     var onRegistrationTerminalClosed: (() -> Void)?
+    /// A sign-in page from the host just opened in this Mac's browser: the
+    /// "Starting a sign-in machine…" progress can go.
+    var onRegistrationPageOpened: (() -> Void)?
     /// Minimal mirrored profiles (id/name/color/tool) — the grid needs a
     /// `Profile` for appearance and the deleted-workspace check.
     private(set) var profilesByID: [Profile.ID: Profile] = [:]
@@ -347,12 +350,24 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
-    /// The provider this client asked the host to sign in to
-    /// (`beginRemoteRegistration`): its device page, code and all, opens
-    /// here unasked; any other run's doesn't (`GuestURLGate.disposition`).
-    private var requestedRegistrationProvider: String?
-    /// The host has shown that run in flight: its end clears the request.
-    private var sawRequestedRegistration = false
+    /// Sign-in URLs refused so far, only so the refusal is logged once: kept
+    /// apart from the opened ones, since the refusal may not last -- /state
+    /// can show this client's run before the host's reply binds it here
+    /// (Finding "Early state poll permanently suppresses this client's
+    /// device-code page").
+    private var refusedRegistrationURLs: Set<String> = []
+    /// The sign-in run this client started, as the host accepted it (its
+    /// run id from `/subscriptions/register`) with its provider: that run's
+    /// device page, code and all, opens here unasked; any other run's --
+    /// another client's, one the host refused this client -- asks first
+    /// (`GuestURLGate.disposition`; Finding CWE-345, "Remote sign-in opens
+    /// another client's prefilled device-code URL after a rejected request").
+    private(set) var ownRegistration: (id: String, provider: String)?
+    /// Sign-in requests sent, numbered, and the one whose accepted run is
+    /// `ownRegistration`: a reply only binds if it answers a later request
+    /// than the bound one, so a reply that comes late can't take over.
+    private var registrationRequestsSent = 0
+    private var boundRegistrationRequest = 0
     /// Sign-ins this client started, by the host's run id, each told how it
     /// ended (/state's `registrationEnded`): a refused or failed run
     /// otherwise just left /state, its reason shown only on the host.
@@ -442,26 +457,67 @@ final class RemoteHostController {
     /// `ended` hears how it ends (a host too old to say never calls it).
     func beginRemoteRegistration(provider: String, profileID: UUID?,
                                  ended: ((_ success: Bool, _ message: String?) -> Void)? = nil) {
-        requestedRegistrationProvider = provider
-        sawRequestedRegistration = false
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
         let host = self.host
+        registrationRequestsSent += 1
+        let request = registrationRequestsSent
         Task { @MainActor [weak self] in
             let resp = try? await Task.detached(priority: .userInitiated) {
                 try RemoteTransport.client(for: host).request("POST", "/subscriptions/register", body: body)
             }.value
             guard let self else { return }
+            self.adoptRegistrationReply(run: resp?.json["registration"] as? String, provider: provider, request: request)
             self.pollOnce()
             guard let ended else { return }
             if let run = resp?.json["registration"] as? String {
-                self.awaitRegistration(run, ended)
+                // A run this client gave up ends quietly: the user knows.
+                self.awaitRegistration(run) { [weak self] ok, message in
+                    if !ok, self?.cancelledRegistrations.remove(run) != nil { return }
+                    ended(ok, message)
+                }
             } else if resp.map({ $0.status >= 400 }) ?? true {
                 // The host's refusal says why (no proxy, one in flight).
                 let why = (resp?.json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 ended(false, why ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in"))
             }
         }
+    }
+
+    /// Give up the sign-in this client started: the host ends that run (its
+    /// machine, its credential wait), so the next sign-in -- this
+    /// workspace's or another's -- isn't refused as "already in progress".
+    /// Nothing when this client has no run in flight; a run that already
+    /// ended, or another client's, isn't touched (the host checks the id).
+    func cancelOwnRegistration() {
+        guard let own = ownRegistration else { return }
+        cancelledRegistrations.insert(own.id)
+        send("POST", "/subscriptions/cancel", body: ["registration": own.id])
+    }
+    /// Runs this client cancelled itself, until their end is heard.
+    private(set) var cancelledRegistrations: Set<String> = []
+
+    /// The host's answer to this client's sign-in request `request`: an
+    /// accepted run is this client's (by its id). A refused one binds
+    /// nothing -- and unbinds nothing: the host refuses a second request
+    /// while a run is in flight, which may be this client's own, still
+    /// waiting to publish its page (Finding "Refused retry clears an active
+    /// sign-in's run binding"); the binding ends with its run
+    /// (`applyRegistrationEnded`). Matching by run id, a binding kept never
+    /// opens another client's page. A reply to an earlier request than the
+    /// bound one, or for a run already over, comes late and changes nothing.
+    func adoptRegistrationReply(run: String?, provider: String, request: Int) {
+        guard let run, !run.isEmpty, request > boundRegistrationRequest,
+              registrationEnds[run] == nil else { return }
+        ownRegistration = (run, provider)
+        boundRegistrationRequest = request
+    }
+
+    /// The agent whose sign-in this client started, for the run `reg`
+    /// (/state's pending registration): only when it is that very run.
+    func signInFor(pendingRegistration reg: [String: Any]) -> String? {
+        guard let own = ownRegistration, (reg["id"] as? String) == own.id else { return nil }
+        return own.provider
     }
 
     /// Tell `ended` how the host's sign-in run `id` ends — at once if it
@@ -509,6 +565,7 @@ final class RemoteHostController {
         let success = d["success"] as? Bool ?? false
         let message = d["message"] as? String
         registrationEnds[id] = (success, message)
+        if ownRegistration?.id == id { ownRegistration = nil }
         if registrationEnds.count > 64, let any = registrationEnds.keys.first(where: { registrationWaiters[$0] == nil }) {
             registrationEnds.removeValue(forKey: any)
         }
@@ -538,18 +595,38 @@ final class RemoteHostController {
         if subscriptionStatus != out { subscriptionStatus = out }
     }
 
+    enum RegistrationPage: Equatable {
+        /// No URL, or one already opened.
+        case none
+        /// Not to open here (GuestURLGate) -- for now: a later snapshot,
+        /// once the host's reply has bound this client's run, may open it.
+        case refused
+        /// Open it now; it counts as opened from here on.
+        case open(URL)
+    }
+
+    /// What to do with the sign-in URL of the run `reg` (/state's pending
+    /// registration), given what this client has opened and its binding.
+    func registrationPage(_ reg: [String: Any]) -> RegistrationPage {
+        guard let s = reg["url"] as? String, let url = URL(string: s) else { return .none }
+        guard GuestURLGate.disposition(for: url, signInFor: signInFor(pendingRegistration: reg)) == .open else {
+            if refusedRegistrationURLs.insert(s).inserted {
+                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
+            }
+            return .refused
+        }
+        return openedRegistrationURLs.insert(s).inserted ? .open(url) : .none
+    }
+
     /// React to the remote's in-flight registration: stand the callback tunnel
     /// up as soon as we know the VM + port, then open the sign-in page here.
     private func applyPendingRegistration(_ reg: [String: Any]?) {
         guard let reg else {
-            if sawRequestedRegistration {
-                requestedRegistrationProvider = nil
-                sawRequestedRegistration = false
-            }
             // Flow ended (captured or cancelled) — drop the listener + terminal.
             registrationCallback?.stop()
             registrationCallback = nil
             openedRegistrationURLs.removeAll()
+            refusedRegistrationURLs.removeAll()
             if registrationTerminalID != nil {
                 registrationTerminalID = nil
                 onRegistrationTerminalClosed?()
@@ -574,12 +651,8 @@ final class RemoteHostController {
         // and no callback tunnel stands up for it. An older server published
         // such URLs, and Bromure Remote (iPhone, iPad, Vision Pro) opened them
         // unchecked. The VM's terminal (shown above) still has the URL.
-        if requestedRegistrationProvider != nil { sawRequestedRegistration = true }
-        if let s = reg["url"] as? String, let url = URL(string: s),
-           GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) != .open {
-            if openedRegistrationURLs.insert(s).inserted {
-                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
-            }
+        let page = registrationPage(reg)
+        if page == .refused {
             registrationCallback?.stop()
             registrationCallback = nil
             return
@@ -601,20 +674,16 @@ final class RemoteHostController {
         // If a sign-in URL was published (Claude's flow), open it once — /state
         // repeats it every poll until sign-in lands. Codex has none; the user
         // reads its URL from the VM terminal shown above instead.
-        guard let urlString = reg["url"] as? String,
-              let url = URL(string: urlString),
-              !openedRegistrationURLs.contains(urlString) else { return }
-        openedRegistrationURLs.insert(urlString)
+        guard case .open(let url) = page else { return }
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
-        // Checked above, before the tunnel.
-        guard GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) == .open else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
         UIApplication.shared.open(url)
 #endif
+        onRegistrationPageOpened?()
     }
 
     /// Pages a workspace's guest opened on a server with no screen of its
@@ -3875,6 +3944,9 @@ final class RemoteHostWindow: NSWindow {
     /// its attach controller. Only one registration runs at a time.
     private var registrationTerminalWindow: NSWindow?
     private var registrationTerminalController: TerminalSessionController?
+    /// The flow, not the user, is closing the sign-in window (the run
+    /// ended): no cancel to send.
+    private var registrationTerminalClosedByFlow = false
 
     // Browser pane (fat-client): a local Chromium VM per remote workspace whose
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
@@ -4860,9 +4932,18 @@ final class RemoteHostWindow: NSWindow {
         a.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         a.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        // The page takes a while (the remote boots a sign-in machine and
+        // the agent's login starts in it -- ~30 s for Hermes): say so on the
+        // window the click came from, until the page opens or the run ends,
+        // rather than nothing at all.
+        let progress = RemoteSignInProgress.show(
+            provider: provider.displayName, host: controller.host.name,
+            on: NSApp.keyWindow ?? self)
+        controller.onRegistrationPageOpened = { progress.close() }
         // A run that ends without its credential says why here: the host's
         // own notice lands on a Mac nobody may be sitting at.
         controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID) { [weak self] ok, message in
+            progress.close()
             guard !ok, let self else { return }
             let failed = NSAlert()
             failed.alertStyle = .warning
@@ -5063,6 +5144,7 @@ final class RemoteHostWindow: NSWindow {
         // Remote editors keep the "— host" suffix: with several mirrors open,
         // which machine the workspace lands on is the thing you can't guess.
         let hostName = controller.host.name
+        let c = controller
         win.title = "\(draft.name) — \(hostName)"
         win.center()
         win.isReleasedWhenClosed = false
@@ -5077,6 +5159,31 @@ final class RemoteHostWindow: NSWindow {
             },
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
+            // Sign-ins from a workspace not created yet: the host gives the
+            // new workspace its own id (never the draft's), so a login scoped
+            // to the draft would be stranded. They go to the remote's shared
+            // account -- what its new workspace uses -- as from the remote's
+            // Preferences.
+            claudeAccountSavedAt: { [weak c] in c?.subscriptionStatus["claude"]?.registeredAt },
+            claudeReauthRequiredAt: { [weak c] in c?.subscriptionStatus["claude"]?.reauthRequiredAt },
+            codexReauthRequiredAt: { [weak c] in c?.subscriptionStatus["codex"]?.reauthRequiredAt },
+            grokReauthRequiredAt: { [weak c] in c?.subscriptionStatus["grok"]?.reauthRequiredAt },
+            kimiReauthRequiredAt: { [weak c] in c?.subscriptionStatus["kimi"]?.reauthRequiredAt },
+            onRegisterClaude: { [weak self] in self?.beginRemoteRegistration(.claude, nil) },
+            onForgetClaude: { [weak c] in c?.forgetRemoteSubscription(provider: "claude", profileID: nil) },
+            codexAccountSavedAt: { [weak c] in c?.subscriptionStatus["codex"]?.registeredAt },
+            onRegisterCodex: { [weak self] in self?.beginRemoteRegistration(.codex, nil) },
+            onForgetCodex: { [weak c] in c?.forgetRemoteSubscription(provider: "codex", profileID: nil) },
+            grokAccountSavedAt: { [weak c] in c?.subscriptionStatus["grok"]?.registeredAt },
+            onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, nil) },
+            onForgetGrok: { [weak c] in c?.forgetRemoteSubscription(provider: "grok", profileID: nil) },
+            kimiAccountSavedAt: { [weak c] in c?.subscriptionStatus["kimi"]?.registeredAt },
+            onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, nil) },
+            onForgetKimi: { [weak c] in c?.forgetRemoteSubscription(provider: "kimi", profileID: nil) },
+            nousAccountSavedAt: { [weak c] in c?.subscriptionStatus["hermes"]?.registeredAt },
+            nousReauthRequiredAt: { [weak c] in c?.subscriptionStatus["hermes"]?.reauthRequiredAt },
+            onRegisterNous: { [weak self] in self?.beginRemoteRegistration(.nous, nil) },
+            onForgetNous: { [weak c] in c?.forgetRemoteSubscription(provider: "hermes", profileID: nil) },
             localModelsRemoteAny: remoteModelBackend(),
             modelsPane: .workspace(global: remoteGlobalModels),
             newHomeDefaultGB: newHomeDefaultGB)
@@ -6310,6 +6417,9 @@ final class RemoteHostWindow: NSWindow {
             },
             onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) },
             listFolders: { pid, path in await c.listSessionFolders(profileID: pid, path: path) },
+            // What the host can start (its readyTools): an agent it can't --
+            // Hermes with no model -- is greyed out here too.
+            readyTools: { [weak c] p in Set((c?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)) },
             peerMentions: { [weak c] _ in
                 guard let c else { return [] }
                 return PeerMention.candidates(c.sessionStore.sessions, excluding: nil,
@@ -7406,10 +7516,17 @@ final class RemoteHostWindow: NSWindow {
     }
 
     /// Flow ended → close the window (triggers `reapRegistrationTerminal`).
-    private func closeRegistrationTerminal() { registrationTerminalWindow?.close() }
+    private func closeRegistrationTerminal() {
+        registrationTerminalClosedByFlow = true
+        registrationTerminalWindow?.close()
+    }
 
-    /// Window gone (user closed it, or the flow closed it) → clean up.
+    /// Window gone (user closed it, or the flow closed it) → clean up. The
+    /// user closing it gives the sign-in up, as closing a sign-in window
+    /// does on the host itself.
     private func reapRegistrationTerminal() {
+        if !registrationTerminalClosedByFlow { controller.cancelOwnRegistration() }
+        registrationTerminalClosedByFlow = false
         registrationTerminalController?.retireAll()
         registrationTerminalController = nil
         registrationTerminalWindow = nil

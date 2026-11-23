@@ -1,0 +1,6 @@
+# Go source stays LF on every checkout (Windows ones convert to CRLF
+# otherwise, and gofmt -l then flags every file).
+*.go text eol=lf
+# The build scripts run under bash on macOS/Linux (and Git Bash).
+*.sh text eol=lf
+*.nsi text eol=lf

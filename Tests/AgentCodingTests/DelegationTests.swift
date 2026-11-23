@@ -1480,6 +1480,88 @@ struct DelegationTests {
         _ = try? await f.engine.post(d.id, from: .parent, kind: .cancel, text: "Never mind.")
     }
 
+    /// A session left Paused by a workspace that was then deleted: archived,
+    /// so peers stop seeing it and a request to it is refused — not a wake
+    /// of a machine that no longer exists.
+    @Test("a deleted workspace's paused session is archived: off the peer list, a request refused")
+    func deletedWorkspaceArchived() async throws {
+        let f = fixture()
+        let gone = UUID(), kept = UUID()
+        f.engine.profiles = { [self.ws(f.profileID, "Dev"), self.ws(kept, "Lab")] }
+        var paused = peer(in: f, workspace: gone, nick: "orphan", window: 2)
+        paused.windowIndex = nil
+        paused.agentAlive = nil
+        paused.endedAt = Date()
+        f.sessions.upsert(paused)
+        let alive = peer(in: f, workspace: kept, nick: "lab", window: 4)
+        func nicks() async -> Set<String> {
+            let peers = json(parse(await f.server.handle(line: call("list_peers"), branch: "w3")))
+            return Set((peers["peers"] as? [[String: Any]] ?? []).compactMap { $0["nickname"] as? String })
+        }
+        #expect(await nicks().contains("@orphan"), "before: still offered, Paused")
+
+        // The workspace's directory is gone, Lab's isn't.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("profiles-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(kept.uuidString), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(f.profileID.uuidString), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profiles = ProfileStore(rootDir: root)
+        #expect(!profiles.hasDirectory(gone) && profiles.hasDirectory(kept))
+        let archived = f.sessions.archiveSessions(ofGoneWorkspaces: { !profiles.hasDirectory($0) })
+        #expect(archived == [paused.id])
+        #expect(f.sessions.session(paused.id)?.isArchived == true)
+        #expect(f.sessions.session(alive.id)?.isArchived == false)
+        #expect(f.sessions.session(f.parentID)?.isArchived == false)
+        // Idempotent: nothing more to archive.
+        #expect(f.sessions.archiveSessions(ofGoneWorkspaces: { !profiles.hasDirectory($0) }).isEmpty)
+
+        #expect(await nicks() == ["@lab"])
+        let refused = parse(await f.server.handle(line: call("request", ["to": "@orphan", "text": "hi", "timeout_seconds": 1]), branch: "w3"))
+        #expect(isError(refused))
+        #expect(text(refused).contains("archived"))
+        #expect(f.store.delegations(parent: f.parentID).isEmpty)
+    }
+
+    /// Finding: a resume (or unarchive) of a deleted workspace's archived
+    /// session cleared its archive mark before the workspace failed to
+    /// boot — and it was back on every peer's list. It stays archived, and
+    /// even un-archived by any other path, no peer reaches it.
+    @Test("a deleted workspace's session stays archived on resume or unarchive, and unreachable regardless")
+    func deletedWorkspaceStaysArchived() async throws {
+        let f = fixture()
+        let gone = UUID()
+        f.engine.profiles = { [self.ws(f.profileID, "Dev")] }
+        f.sessions.workspaceGone = { $0 == gone }
+        var orphan = peer(in: f, workspace: gone, nick: "orphan", window: 2)
+        orphan.windowIndex = nil
+        f.sessions.upsert(orphan)
+        #expect(f.sessions.archiveSessions(ofGoneWorkspaces: f.sessions.workspaceGone) == [orphan.id])
+
+        f.engine.sessionEngine.resume(orphan.id, message: "wake up")
+        #expect(f.sessions.session(orphan.id)?.isArchived == true)
+        #expect(f.sessions.session(orphan.id)?.launchingSince == nil)
+        #expect(f.sessions.session(orphan.id)?.lastError?.contains("deleted") == true)
+        f.engine.sessionEngine.unarchive(orphan.id)
+        #expect(f.sessions.session(orphan.id)?.isArchived == true)
+
+        // Un-archived some other way: still nobody's peer.
+        f.sessions.setArchived(orphan.id, false)
+        let peers = json(parse(await f.server.handle(line: call("list_peers"), branch: "w3")))
+        let nicks = (peers["peers"] as? [[String: Any]] ?? []).compactMap { $0["nickname"] as? String }
+        #expect(!nicks.contains("@orphan"))
+        let refused = parse(await f.server.handle(line: call("request", ["to": "@orphan", "text": "hi", "timeout_seconds": 1]), branch: "w3"))
+        #expect(isError(refused) && text(refused).contains("archived"))
+        await #expect(throws: DelegationRefusal.self) {
+            _ = try await f.engine.requestFromBoard(to: orphan.id, title: "t", text: "do it")
+        }
+        #expect(f.store.delegations(parent: f.parentID).isEmpty)
+        // A workspace that's there: its sessions resume and unarchive as ever.
+        let kept = peer(in: f, workspace: f.profileID, nick: "kept", window: 5)
+        f.sessions.setArchived(kept.id, true)
+        f.engine.sessionEngine.unarchive(kept.id)
+        #expect(f.sessions.session(kept.id)?.isArchived == false)
+    }
+
     @Test("the reach policy is the workspace's word: only the workspaces it names, and none of the rest")
     func reachPolicy() async {
         let f = fixture()

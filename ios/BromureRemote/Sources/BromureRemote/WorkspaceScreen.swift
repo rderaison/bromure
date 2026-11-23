@@ -1548,7 +1548,7 @@ struct TailFollowingScroll<Content: View>: View {
             .modifier(InitialBottomAnchor())
             // A drag on the conversation puts the keyboard away -- and with
             // it back come the bars that step aside while typing.
-            .scrollDismissesKeyboard(.interactively)
+            .modifier(DismissKeyboardOnDrag())
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
                 viewport = h
                 if let y = follow.tailY { tailMoved(y, proxy) }   // the keyboard, a rotation
@@ -1677,6 +1677,17 @@ private struct UserScrollPhase: ViewModifier {
 }
 
 /// Opens at the bottom; on iOS 18+ only the opening offset is anchored.
+/// scrollDismissesKeyboard is unavailable on visionOS.
+private struct DismissKeyboardOnDrag: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(visionOS)
+        content
+        #else
+        content.scrollDismissesKeyboard(.interactively)
+        #endif
+    }
+}
+
 private struct InitialBottomAnchor: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, visionOS 2.0, *) {

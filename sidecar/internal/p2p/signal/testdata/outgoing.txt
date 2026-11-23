@@ -1,0 +1,13 @@
+# Outgoing signaling frames, written by hand from P2PSignaling.swift /
+# P2PCandidate.swift: OutgoingSignalFrame {connectionId, seq, kind, payload},
+# P2PSignalPayload {v, candidates?, candidate?, note?}, P2PCandidate
+# {kind, proto, ip, port, prio, ttl?} — synthesized Codable, declaration
+# order, nil optionals omitted. prio = typePref<<16 | protoPref<<8 | fam<<4:
+#   srflx/tcp/v4 = 100<<16|2<<8 = 6554112; relay/tcp/v4 = 0|1<<8 = 256;
+#   host/tcp/v6 = 126<<16|2<<8|1<<4 = 8258064.
+# Format: name<TAB>json
+offer	{"connectionId":"conn-1","seq":1,"kind":"offer","payload":{"v":1,"note":"connect"}}
+answer_relay_only	{"connectionId":"conn-1","seq":1,"kind":"answer","payload":{"v":1,"candidates":[]}}
+srflx_trickle	{"connectionId":"conn-1","seq":2,"kind":"candidate","payload":{"v":1,"candidate":{"kind":"srflx","proto":"tcp","ip":"198.51.100.20","port":61000,"prio":6554112}}}
+relay_trickle	{"connectionId":"conn-1","seq":2,"kind":"candidate","payload":{"v":1,"candidate":{"kind":"relay","proto":"tcp","ip":"203.0.113.50","port":49152,"prio":256,"ttl":600}}}
+host_bundle_v6	{"connectionId":"conn-1","seq":1,"kind":"answer","payload":{"v":1,"candidates":[{"kind":"host","proto":"tcp","ip":"2001:db8::5","port":2223,"prio":8258064}]}}

@@ -4404,3 +4404,44 @@
 
 /* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
 "Powers Hermes Agent only." = "Powers Hermes Agent only.";
+
+/* Remote sign-in progress */
+"Signing in to %@…" = "Signing in to %@…";
+"Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute.";
+"Hide" = "Hide";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "Base Image…";
+"Base Image" = "Base Image";
+"Base image" = "Base image";
+"Skip Permanently" = "Skip Permanently";
+"To install only some of them, or later, use Workspaces › Base Image…" = "To install only some of them, or later, use Workspaces › Base Image…";
+"Version" = "Version";
+"Source" = "Source";
+"Updated" = "Updated";
+"Size on disk" = "Size on disk";
+"Packages" = "Packages";
+"Installing…" = "Installing…";
+"Install Selected" = "Install Selected";
+"Choose Workspaces to Update…" = "Choose Workspaces to Update…";
+"Skipped" = "Skipped";
+"Don't Skip" = "Don't Skip";
+"Not installed" = "Not installed";
+"Not started yet" = "Not started yet";
+"v%@ · current" = "v%@ · current";
+"v%@ · updates at its next start" = "v%@ · updates at its next start";
+"v%@ · kept" = "v%@ · kept";
+"v%@ · older" = "v%@ · older";
+"Published image %@" = "Published image %@";
+"Built on this Mac" = "Built on this Mac";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ has no model set up on this machine. Choose one in the machine's settings › Models.";
+"No model set up (settings › Models)" = "No model set up (settings › Models)";
+"Base unknown" = "Base unknown";
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "Trusts a self-signed server's exact certificate, so credentials still reach it.";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live.";
+"Trusted upstream certificates" = "Trusted upstream certificates";
+"SHA-256 fingerprint" = "SHA-256 fingerprint";
+"Add certificate" = "Add certificate";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then.";

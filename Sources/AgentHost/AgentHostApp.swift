@@ -499,14 +499,15 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        P2PAccount.shared.complete(field.stringValue)
+        P2PAccount.shared.completeManual(field.stringValue)
     }
 
-    /// `bromure-agent-host://enroll?…` — bromure.io handing back the code.
+    /// `bromure-agent-host://enroll?…` — bromure.io handing back the code
+    /// (only the sign-in this Mac started is accepted).
     @objc private func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue else { return }
         AgentHostLog.log("url: \(s.prefix(40))…")
-        P2PAccount.shared.complete(s)
+        P2PAccount.shared.completeHandoff(s)
     }
 
     @objc private func setApprovals(_ sender: NSMenuItem) {

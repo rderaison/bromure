@@ -186,6 +186,41 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
     }
 }
 
+// MARK: - User-pinned upstream certificate fingerprints
+
+/// Trust decision for an upstream the user pinned by certificate fingerprint
+/// (Guardrails → Trusted upstream certificates; GitHub issue #65). Shared by
+/// the URLSession path (`ClientCertChallengeDelegate`) and the raw upgrade
+/// path (`TLSClientStream`) so `kubectl exec` / WebSockets reach the same
+/// verdict as ordinary requests.
+public enum PinnedUpstreamCertificate {
+    /// SHA-256 (lowercase hex) of the leaf certificate `trust` carries.
+    public static func leafFingerprint(_ trust: SecTrust) -> String? {
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first else { return nil }
+        return TrustedUpstreamCertificate.fingerprint(
+            ofDER: SecCertificateCopyData(leaf) as Data)
+    }
+
+    /// Whether the upstream's leaf certificate is one the user pinned for
+    /// this host. Only the LEAF counts: the rest of a presented chain is
+    /// whatever the server chose to send, and matching a CA cert it merely
+    /// includes (without checking signatures) would let an impostor append
+    /// the genuine CA to its own chain. An exact leaf pin needs no chain,
+    /// name or validity check — it is the certificate the user vouched for.
+    public static func matches(_ trust: SecTrust, fingerprints: Set<String>, host: String) -> Bool {
+        guard !fingerprints.isEmpty, let fp = leafFingerprint(trust) else { return false }
+        guard fingerprints.contains(fp) else {
+            FileHandle.standardError.write(Data(
+                "[mitm] \(host): leaf certificate \(fp) is not a pinned certificate for this host — using normal validation\n".utf8))
+            return false
+        }
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host): leaf certificate matches a user-pinned fingerprint — trusted\n".utf8))
+        return true
+    }
+}
+
 // MARK: - Pinned cluster-CA trust evaluation
 
 /// Server-trust evaluation against a user-pinned cluster CA, shared by

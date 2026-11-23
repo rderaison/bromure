@@ -74,6 +74,6 @@ Savings are kept per machine in `~/Library/Application Support/BromureAC/squelch
 
 ## Limits
 
-- **Machines only.** Squelch lives in the proxy that every machine's AI traffic goes through. A native machine (a Mac running Bromure Sidecar) sends its agents' traffic straight to the provider, so Squelch doesn't apply there.
+- **Machines only.** Squelch lives in the proxy that every machine's AI traffic goes through. A native machine (a Mac or [Windows PC](14a-sidecar-windows.mdx) running Bromure Sidecar) sends its agents' traffic straight to the provider, so Squelch doesn't apply there.
 - **Patterns, not judgment.** The filters recognise the output formats of the common tools. An unusual test runner or a custom build script gets only the generic cleaning (escapes, progress bars, repeated lines).
 - **A command the request doesn't name.** When a Codex turn continues an earlier one on the server, a result can arrive without the call that produced it. Squelch matches it with the call the model announced in its reply; a result whose call it never saw — after a restart of Bromure, say — is left as it is, since its text alone can't tell a test run from a `cat` of a test log.

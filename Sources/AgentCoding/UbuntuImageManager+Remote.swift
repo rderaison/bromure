@@ -94,7 +94,7 @@ extension UbuntuImageManager {
                     continue
                 }
                 if !fresh, let missing = Self.stockMissingSteps(
-                    stock: loadStockState(), imageUUID: image.uuid, steps: fetched.sortedSteps) {
+                    stock: loadStockState(), imageUUID: image.uuid, steps: fetched.baseImageSteps()) {
                     catalog = fetched
                     reusedStockMissing = missing
                     break
@@ -115,7 +115,7 @@ extension UbuntuImageManager {
                 }
             }
             guard let catalog, let image = catalog.image else { throw lastError }
-            let steps = catalog.sortedSteps
+            let steps = catalog.baseImageSteps()
 
             // 1b. The self-contained provisioner published with the image,
             //     so the postinstall boots below need nothing from the

@@ -318,15 +318,19 @@ final class TLSClientStream: MitmClientStream, @unchecked Sendable {
     private let ctx: SSLContext
     private let peerName: String
     private let pinnedCA: SecCertificate?
+    /// SHA-256 leaf fingerprints the user pinned for `peerName`.
+    private let pinnedFingerprints: Set<String>
     /// Serializes `SSLRead`/`SSLWrite` on `ctx` in pump mode (see TLSServerStream).
     private let ioLock = NSLock()
 
     init(fd: Int32, peerName: String,
          clientIdentity: SecIdentity? = nil,
-         pinnedCA: SecCertificate? = nil) throws {
+         pinnedCA: SecCertificate? = nil,
+         pinnedFingerprints: Set<String> = []) throws {
         self.fd = fd
         self.peerName = peerName
         self.pinnedCA = pinnedCA
+        self.pinnedFingerprints = pinnedFingerprints
         guard let ctx = SSLCreateContext(nil, .clientSide, .streamType) else {
             throw MitmError.tlsHandshakeFailed(errSSLInternal)
         }
@@ -359,7 +363,9 @@ final class TLSClientStream: MitmClientStream, @unchecked Sendable {
         // `evaluatePinnedServerTrust` can anchor it at the user's cluster
         // CA. Without the break, SecureTransport evaluates against the
         // system trust store and fails a private k8s root outright.
-        if pinnedCA != nil {
+        // A pinned leaf fingerprint needs the same break: a self-signed
+        // upstream would fail SecureTransport's built-in evaluation first.
+        if pinnedCA != nil || !pinnedFingerprints.isEmpty {
             status = SSLSetSessionOption(ctx, .breakOnServerAuth, true)
             if status != errSecSuccess { throw MitmError.tlsHandshakeFailed(status) }
         }
@@ -403,13 +409,27 @@ final class TLSClientStream: MitmClientStream, @unchecked Sendable {
     /// Anchor the upstream's server cert at the pinned cluster CA, using
     /// the same verdict logic as the URLSession path.
     private func evaluatePinnedServerTrust() throws {
-        guard let pinnedCA else { return }
+        guard pinnedCA != nil || !pinnedFingerprints.isEmpty else { return }
         var trust: SecTrust?
         let status = SSLCopyPeerTrust(ctx, &trust)
         guard status == errSecSuccess, let trust else {
             throw MitmError.tlsHandshakeFailed(status)
         }
-        guard PinnedClusterTrust.evaluate(trust, ca: pinnedCA, host: peerName) else {
+        if PinnedUpstreamCertificate.matches(trust, fingerprints: pinnedFingerprints, host: peerName) {
+            return
+        }
+        if let pinnedCA {
+            guard PinnedClusterTrust.evaluate(trust, ca: pinnedCA, host: peerName) else {
+                throw MitmError.tlsHandshakeFailed(errSSLXCertChainInvalid)
+            }
+            return
+        }
+        // Fingerprint pin only, and it didn't match: `.breakOnServerAuth`
+        // turned off SecureTransport's own check, so run the system-trust
+        // evaluation it would have (SSL policy, hostname-bound) ourselves.
+        SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, peerName as CFString))
+        var err: CFError?
+        guard SecTrustEvaluateWithError(trust, &err) else {
             throw MitmError.tlsHandshakeFailed(errSSLXCertChainInvalid)
         }
     }

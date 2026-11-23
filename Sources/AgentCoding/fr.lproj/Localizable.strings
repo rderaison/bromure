@@ -4370,3 +4370,44 @@
 
 /* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
 "Powers Hermes Agent only." = "Sert uniquement à Hermes Agent.";
+
+/* Remote sign-in progress */
+"Signing in to %@…" = "Connexion à %@…";
+"Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Démarrage d’une machine de connexion privée sur %@. La page de connexion s’ouvrira dans votre navigateur dès qu’elle sera prête, en général en moins d’une minute.";
+"Hide" = "Masquer";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "Image de base…";
+"Base Image" = "Image de base";
+"Base image" = "Image de base";
+"Skip Permanently" = "Ignorer définitivement";
+"To install only some of them, or later, use Workspaces › Base Image…" = "Pour n’en installer que certains, ou plus tard, utilisez Espaces de travail › Image de base…";
+"Version" = "Version";
+"Source" = "Source";
+"Updated" = "Mise à jour";
+"Size on disk" = "Taille sur le disque";
+"Packages" = "Paquets";
+"Installing…" = "Installation…";
+"Install Selected" = "Installer la sélection";
+"Choose Workspaces to Update…" = "Choisir les espaces de travail à mettre à jour…";
+"Skipped" = "Ignoré";
+"Don't Skip" = "Ne plus ignorer";
+"Not installed" = "Non installé";
+"Not started yet" = "Pas encore démarré";
+"v%@ · current" = "v%@ · à jour";
+"v%@ · updates at its next start" = "v%@ · mis à jour au prochain démarrage";
+"v%@ · kept" = "v%@ · conservé";
+"v%@ · older" = "v%@ · plus ancienne";
+"Published image %@" = "Image publiée %@";
+"Built on this Mac" = "Créée sur ce Mac";
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ n’a aucun modèle configuré sur cette machine. Choisissez-en un dans les réglages de la machine › Modèles.";
+"No model set up (settings › Models)" = "Aucun modèle configuré (réglages › Modèles)";
+"Base unknown" = "Base inconnue";
+/* Guardrails — trusted upstream certificates (GitHub #65) */
+"Trusts a self-signed server's exact certificate, so credentials still reach it." = "Fait confiance au certificat exact d’un serveur auto-signé, pour que les identifiants l’atteignent quand même.";
+"For an internal server with a self-signed or private-CA certificate that should still get real credentials. Enter its hostname and the SHA-256 fingerprint of the certificate it presents (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, or the fingerprint a browser's certificate viewer shows). When that host presents exactly this certificate, Bromure trusts it like any valid one and swaps and injects credentials as usual. Any other certificate is checked normally. Check the fingerprint against the server itself before pinning it: only you can add a pin, never the agent. Applies live." = "Pour un serveur interne doté d’un certificat auto-signé ou d’une CA privée qui doit tout de même recevoir les vrais identifiants. Saisissez son nom d’hôte et l’empreinte SHA-256 du certificat qu’il présente (`openssl s_client -connect host:443 </dev/null | openssl x509 -noout -fingerprint -sha256`, ou l’empreinte affichée par le visualiseur de certificats d’un navigateur). Quand cet hôte présente exactement ce certificat, Bromure lui fait confiance comme à n’importe quel certificat valide et substitue et injecte les identifiants normalement. Tout autre certificat est vérifié normalement. Vérifiez l’empreinte auprès du serveur lui-même avant de l’épingler : vous seul pouvez ajouter un épinglage, jamais l’agent. S’applique immédiatement.";
+"Trusted upstream certificates" = "Certificats amont de confiance";
+"SHA-256 fingerprint" = "Empreinte SHA-256";
+"Add certificate" = "Ajouter un certificat";
+"Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Nécessite un nom d’hôte et une empreinte SHA-256 de 64 caractères ; ignoré d’ici là.";
