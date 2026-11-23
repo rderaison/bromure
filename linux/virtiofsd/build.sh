@@ -44,7 +44,7 @@ done
 
 if [ ! -d "$SRC/.git" ]; then
     mkdir -p "$(dirname "$SRC")"
-    git clone -q --branch "$TAG" --depth 1 "$URL" "$SRC"
+    git -c advice.detachedHead=false clone -q --branch "$TAG" --depth 1 "$URL" "$SRC"
 fi
 cd "$SRC"
 git fetch -q --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true

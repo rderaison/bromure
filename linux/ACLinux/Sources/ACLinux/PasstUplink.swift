@@ -53,7 +53,10 @@ public final class PasstUplink: Uplink {
         /// Host interface for outbound sockets (default: the default route's).
         public var outboundInterface: String?
         public var logPath: String?
-        public var binary = "/usr/bin/passt"
+        /// BROMURE_PASST, else the package's beside bromure-ac
+        /// (linux/passt/build.sh: Ubuntu 24.04's passt refuses
+        /// --map-host-loopback and the rest of arguments()), else the system's.
+        public var binary = MachineConfig.bundledHelper("passt", env: "BROMURE_PASST", system: "/usr/bin/passt")
         /// Diagnosis: write every frame passt sees to this pcap (`--pcap`).
         /// (`--log-file` can't be used: Ubuntu's AppArmor profile for passt
         /// denies the read it needs, and passt exits.)

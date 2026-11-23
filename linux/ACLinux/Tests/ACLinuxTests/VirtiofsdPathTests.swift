@@ -22,6 +22,16 @@ struct VirtiofsdPathTests {
         #expect(MachineConfig.resolveVirtiofsd(env: nil, executable: nil, isExecutable: { _ in true }) == "/usr/libexec/virtiofsd")
     }
 
+    @Test func passtTheSameWay() {
+        let exe = "/usr/lib/bromure-ac/bin/bromure-ac"
+        #expect(MachineConfig.resolveHelper("passt", env: nil, executable: exe, system: "/usr/bin/passt",
+                                            isExecutable: { $0 == "/usr/lib/bromure-ac/bin/passt" }) == "/usr/lib/bromure-ac/bin/passt")
+        #expect(MachineConfig.resolveHelper("passt", env: nil, executable: exe, system: "/usr/bin/passt",
+                                            isExecutable: { $0 == "/usr/lib/bromure-ac/bin/virtiofsd" }) == "/usr/bin/passt")
+        #expect(MachineConfig.resolveHelper("passt", env: "/p", executable: exe, system: "/usr/bin/passt",
+                                            isExecutable: { _ in true }) == "/p")
+    }
+
     @Test func theErrorCarriesVirtiofsdsOwnWords() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vfs-\(UUID().uuidString)").path
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)

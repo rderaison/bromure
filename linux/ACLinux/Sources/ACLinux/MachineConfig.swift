@@ -114,19 +114,32 @@ public struct MachineConfig: Sendable {
     /// options virtiofsdArguments passes), else the system's.
     // @port-skip linux-only: virtiofsd supervision
     public static var defaultVirtiofsd: String {
-        resolveVirtiofsd(env: ProcessInfo.processInfo.environment["BROMURE_VIRTIOFSD"],
-                         executable: try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"),
-                         isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
+        bundledHelper("virtiofsd", env: "BROMURE_VIRTIOFSD", system: "/usr/libexec/virtiofsd")
+    }
+
+    /// A helper the package ships beside bromure-ac (virtiofsd, passt): `env`
+    /// when set, else the one beside this executable, else the system's.
+    // @port-skip linux-only: helper binaries
+    public static func bundledHelper(_ name: String, env: String, system: String) -> String {
+        resolveHelper(name, env: ProcessInfo.processInfo.environment[env],
+                      executable: try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"),
+                      system: system, isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
+    // @port-skip linux-only: helper binaries
+    static func resolveHelper(_ name: String, env: String?, executable: String?, system: String,
+                              isExecutable: (String) -> Bool) -> String {
+        if let env, !env.isEmpty { return env }
+        if let executable {
+            let beside = (executable as NSString).deletingLastPathComponent + "/" + name
+            if isExecutable(beside) { return beside }
+        }
+        return system
     }
 
     // @port-skip linux-only: virtiofsd supervision
     static func resolveVirtiofsd(env: String?, executable: String?, isExecutable: (String) -> Bool) -> String {
-        if let env, !env.isEmpty { return env }
-        if let executable {
-            let beside = (executable as NSString).deletingLastPathComponent + "/virtiofsd"
-            if isExecutable(beside) { return beside }
-        }
-        return "/usr/libexec/virtiofsd"
+        resolveHelper("virtiofsd", env: env, executable: executable, system: "/usr/libexec/virtiofsd", isExecutable: isExecutable)
     }
     /// linux/firecracker/build.sh's output, unless BROMURE_FIRECRACKER says otherwise.
     public var firecrackerBinary = Self.defaultFirecrackerBinary

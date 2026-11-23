@@ -13,6 +13,12 @@ case "$1" in
         echo "bromure-ac: /etc/systemd/system/$u is a source install's (it runs /usr/local/lib/bromure-ac) and overrides this package's: remove it (and /usr/local/lib/bromure-ac), then dpkg-reconfigure bromure-ac" >&2
       fi
     done
+    # The helpers' user namespaces (Ubuntu restricts them to programs with
+    # a profile): loaded before any daemon starts them.
+    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+      apparmor_parser -r -T -W /etc/apparmor.d/bromure-ac \
+        || echo "bromure-ac: the AppArmor profile didn't load: users' VMs may fail to start (their virtiofsd and passt need user namespaces)" >&2
+    fi
     "$L/libexec/configure.sh" --bin "$L/bin/bromure-ac"
     if [ -n "$2" ]; then
       systemctl try-restart 'bromure-ac@*.service' || true

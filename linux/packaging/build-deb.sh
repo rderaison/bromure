@@ -116,6 +116,18 @@ env "${VFS_ENV[@]}" "$ROOT/linux/virtiofsd/build.sh" "$L/bin"
 file "$L/bin/virtiofsd" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )" \
   || die "virtiofsd isn't a $TARGET_ARCH binary: $(file "$L/bin/virtiofsd")"
 
+# --- passt ----------------------------------------------------------------------------
+# Pinned, not the system's: Ubuntu 24.04's (2024-02-20) refuses the options
+# the daemon passes it (linux/passt/build.sh). Static, no libraries.
+step "passt ($TARGET_ARCH)"
+BROMURE_PASST_ARCH="$TARGET_ARCH" BROMURE_PASST_SRC="$WORK/passt-src" "$ROOT/linux/passt/build.sh" "$L/bin"
+file "$L/bin/passt" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )" \
+  || die "passt isn't a $TARGET_ARCH binary: $(file "$L/bin/passt")"
+# Their user namespaces: allowed by an AppArmor profile (Ubuntu restricts
+# them for programs without one).
+install -d -m 755 "$PKG/etc/apparmor.d"
+install -m 644 "$ROOT/linux/packaging/apparmor/bromure-ac" "$PKG/etc/apparmor.d/bromure-ac"
+
 # --- the PII model, the resources -------------------------------------------------
 step "PII model"
 BROMURE_PII_CACHE=$WORK/pii "$ROOT/scripts/fetch-pii-model.sh" "$L/bin/pii-rampart" >/dev/null
@@ -144,6 +156,9 @@ install -m 644 "$ROOT/linux/packaging/README.Debian" "$PKG/usr/share/doc/bromure
 
 # --- DEBIAN/ --------------------------------------------------------------------------
 for s in postinst prerm postrm; do install -m 755 "$ROOT/linux/packaging/debian/$s" "$PKG/DEBIAN/$s"; done
+# The AppArmor profile is configuration (/etc): kept over upgrades if edited.
+echo /etc/apparmor.d/bromure-ac > "$PKG/DEBIAN/conffiles"
+chmod 644 "$PKG/DEBIAN/conffiles"
 SIZE=$(du -sk --exclude=DEBIAN "$PKG" | cut -f1)
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: bromure-ac
@@ -153,7 +168,7 @@ Maintainer: Bromure <support@bromure.io>
 Installed-Size: $SIZE
 Section: admin
 Priority: optional
-Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libcurl4t64 | libcurl4, passt, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
+Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libcurl4t64 | libcurl4, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
 Recommends: btrfs-progs, libpam0g, curl
 Suggests: libonnxruntime1.23
 Homepage: https://bromure.io
@@ -161,7 +176,7 @@ Description: Bromure Agentic Coding server (multi-user, Firecracker)
  Runs coding agents (Claude Code, Codex, Grok, Kimi, omp, Hermes) in
  disposable Firecracker microVMs, one daemon per user, driven from the
  Bromure apps over SSH. Includes the SSH gateway, the LAN address helper,
- Firecracker, virtiofsd and the Swift runtime.
+ Firecracker, virtiofsd, passt and the Swift runtime.
  .
  After installing: bromure-setup-environment (btrfs storage),
  bromure-image-install (the guest image), bromure-ac admin add <user>.

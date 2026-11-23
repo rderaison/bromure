@@ -4,6 +4,15 @@
 # (/var/lib/bromure-ac) and the guest image are never deleted here.
 set -e
 case "$1" in
+  remove)
+    # The profile (a conffile) is still there on remove: unload it.
+    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ] \
+        && [ -e /etc/apparmor.d/bromure-ac ]; then
+      apparmor_parser -R /etc/apparmor.d/bromure-ac >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+case "$1" in
   purge)
     rm -rf /etc/bromure-ac /var/lib/bromure-gw /etc/sysctl.d/60-bromure-lan.conf
     getent passwd bromure >/dev/null && userdel bromure || true

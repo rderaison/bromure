@@ -1,0 +1,21 @@
+# AppArmor for the helpers bromure-ac ships (/usr/lib/bromure-ac/bin): their
+# sandboxes need user namespaces, which Ubuntu (24.04 on) allows only to
+# programs with a profile that grants them
+# (kernel.apparmor_restrict_unprivileged_userns). Without it, as a user's
+# daemon (not root) runs them: virtiofsd "Error entering sandbox:
+# Permission denied", and passt can't isolate itself. The same grant as
+# Ubuntu's own profile for its virtiofsd; nothing else is confined.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bromure-ac-virtiofsd /usr/lib/bromure-ac/bin/virtiofsd flags=(unconfined) {
+  userns,
+
+  include if exists <local/bromure-ac-virtiofsd>
+}
+
+profile bromure-ac-passt /usr/lib/bromure-ac/bin/passt{,.avx2} flags=(unconfined) {
+  userns,
+
+  include if exists <local/bromure-ac-passt>
+}
