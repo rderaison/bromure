@@ -1818,14 +1818,35 @@ def configure_services(cfg, ca_count):
             run("/usr/bin/dbus-daemon --system")
 
         # Start warp-svc early so it can boot while Chrome starts
-        if os.path.isfile("/bin/warp-svc"):
+        # Skip if warp-agent already started it (both race at boot).
+        if os.path.isfile("/bin/warp-svc") and run("pgrep -x warp-svc")[0] != 0:
+            # warp-svc also keeps its own logs and stats files here (~2.3 MB
+            # an hour in total). Point them at /dev/null before it starts:
+            # it writes through the links and keeps them. Same list as
+            # warp-agent.py's WARP_LOG_FILES, which covers its own spawn.
+            warp_lib = "/var/lib/cloudflare-warp"
+            os.makedirs(warp_lib, exist_ok=True)
+            for name in ("cfwarp_service_log.txt",
+                         "cfwarp_service_connection_stats.txt",
+                         "cfwarp_service_network_health_stats.txt",
+                         "cfwarp_route_change_log.txt",
+                         "cfwarp_service_dns_stats.txt",
+                         "cfwarp_service_dynamic_log.txt",
+                         "cfwarp_daemon_dns.txt"):
+                path = os.path.join(warp_lib, name)
+                try:
+                    if os.path.lexists(path):
+                        os.unlink(path)
+                    os.symlink("/dev/null", path)
+                except OSError as e:
+                    print(f"config-agent: warp log link {name}: {e}", file=sys.stderr)
             warp_env = dict(os.environ, LANG="C", LC_ALL="C", LANGUAGE="C")
-            svc_log = open("/tmp/bromure/warp-svc.log", "a")
+            # warp-svc logs ~4 MB/hour to stdout; keep it off the disk.
             subprocess.Popen(
                 ["/bin/warp-svc"],
                 env=warp_env,
-                stdout=svc_log,
-                stderr=svc_log)
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
 
     # WireGuard: write config and boot markers for wireguard-agent.
     # The agent handles bringing up the wg0 tunnel at boot and on
