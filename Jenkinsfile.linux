@@ -16,6 +16,10 @@
 //      runtime it links, Firecracker (static musl), the PII model, the
 //      resources, the units, the maintainer scripts, `dpkg-deb`.
 //   3. Archive: the .deb and its .sha256 (and a dpkg-deb listing in the log).
+//   4. PUSH_RELEASE: publish them to the APT repository on DigitalOcean
+//      Spaces, https://dl.bromure.io/apt, suite RELEASE_CHANNEL (stable or
+//      beta), with tools/apt-publish.mjs in a node container; then apt
+//      itself reads the repository back through dl.bromure.io.
 //
 // The guest image isn't built here (it is baked for the server's KVM, or
 // downloaded: `bromure-image-install` after the install).
@@ -38,6 +42,21 @@ pipeline {
             description: 'The packages to build: both, or one (x86_64 = amd64, cross-built on the arm64 builder; aarch64 = arm64, native).')
         string(name: 'SWIFT_IMAGE', defaultValue: 'swift:6.4-noble',
             description: 'The Swift image the toolchain is built on (its Swift version is the SDK\'s).')
+        booleanParam(name: 'PUSH_RELEASE', defaultValue: false,
+            description: 'Publish the packages to the APT repository on DigitalOcean Spaces (https://dl.bromure.io/apt).')
+        choice(name: 'RELEASE_CHANNEL', choices: ['stable', 'beta'],
+            description: 'The APT suite they go to. Only used when PUSH_RELEASE is checked. A version already in the other suite is promoted: this suite gets that package, not this build\'s.')
+    }
+
+    environment {
+        // Non-secret Spaces config (as Jenkinsfile.ac). The secrets are
+        // Jenkins credentials: DO_SPACES_KEY, DO_SPACES_SECRET, and
+        // APT_SIGNING_KEY (a secret file: the armored OpenPGP secret key,
+        // without a passphrase, that signs the repository).
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
     }
 
     stages {
@@ -161,6 +180,69 @@ pipeline {
                     ls -l deb-ci/out
                     (cd deb-ci/out && sha256sum -c ./*.sha256)
                 '''
+            }
+        }
+
+        stage('Publish (APT)') {
+            when { expression { return params.PUSH_RELEASE } }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET'),
+                    file(credentialsId:   'APT_SIGNING_KEY',  variable: 'APT_KEY_FILE')
+                ]) {
+                    sh '''
+                        set -eu
+                        export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                        suite="${RELEASE_CHANNEL:-stable}"
+                        # The publisher image: node, the release tools (socket.dev-
+                        # wrapped install, like the other pipelines), dpkg-deb, gpg
+                        # and apt (Debian's), and this run's packages.
+                        rm -rf deb-ci/pub && mkdir -p deb-ci/pub/tools deb-ci/pub/debs
+                        cp tools/package.json tools/package-lock.json tools/apt-publish.mjs deb-ci/pub/tools/
+                        cp deb-ci/out/*.deb deb-ci/pub/debs/
+                        printf '%s\\n' \\
+                            'FROM node:22-bookworm-slim' \\
+                            'RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends gnupg curl ca-certificates && rm -rf /var/lib/apt/lists/*' \\
+                            'WORKDIR /work' \\
+                            'COPY tools/package.json tools/package-lock.json tools/' \\
+                            'RUN cd tools && (npx --yes @socketsecurity/cli npm ci --silent || npx --yes @socketsecurity/cli npm install --silent)' \\
+                            'COPY . .' > deb-ci/pub/Dockerfile
+                        docker build -q -t "bromure-apt-publisher:$BUILD_NUMBER" deb-ci/pub
+                        # The key goes in as an environment variable (no bind mounts here).
+                        APT_SIGNING_KEY=$(cat "$APT_KEY_FILE")
+                        export APT_SIGNING_KEY
+                        docker run --rm \\
+                            -e DO_SPACES_KEY -e DO_SPACES_SECRET -e APT_SIGNING_KEY \\
+                            -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET -e DO_SPACES_PUBLIC_BASE \\
+                            "bromure-apt-publisher:$BUILD_NUMBER" \\
+                            sh -c 'node tools/apt-publish.mjs publish --suite "$0" debs/*.deb' "$suite"
+                        unset APT_SIGNING_KEY
+
+                        # Read back as a server would, through dl.bromure.io: the
+                        # version this run built, for the architectures it built.
+                        version=$(ls deb-ci/out/*.deb | head -1 | sed 's#.*/bromure-ac-##; s#_[^_]*[.]deb$##')
+                        arches=$(sed 's/x86_64/amd64/; s/aarch64/arm64/; s/ /,/g' deb-ci/arches)
+                        ok=0
+                        for attempt in 1 2 3 4 5 6 7 8; do
+                            if docker run --rm "bromure-apt-publisher:$BUILD_NUMBER" \\
+                                node tools/apt-publish.mjs verify --url "$DO_SPACES_PUBLIC_BASE/apt" \\
+                                    --suite "$suite" --expect "$version" --arches "$arches"; then
+                                ok=1; break
+                            fi
+                            echo "not visible yet (attempt $attempt); retrying in 15 s"
+                            sleep 15
+                        done
+                        docker rmi "bromure-apt-publisher:$BUILD_NUMBER" >/dev/null || true
+                        [ "$ok" = 1 ] || { echo "the published repository doesn't read back as $version ($arches) in $suite"; exit 1; }
+                        echo
+                        echo "bromure-ac $version is in $suite. On a server:"
+                        echo "  sudo install -d -m 755 /etc/apt/keyrings"
+                        echo "  curl -fsSL $DO_SPACES_PUBLIC_BASE/apt/bromure-archive-keyring.gpg | sudo tee /etc/apt/keyrings/bromure.gpg >/dev/null"
+                        echo "  echo 'deb [signed-by=/etc/apt/keyrings/bromure.gpg] $DO_SPACES_PUBLIC_BASE/apt $suite main' | sudo tee /etc/apt/sources.list.d/bromure.list"
+                        echo "  sudo apt update && sudo apt install bromure-ac"
+                    '''
+                }
             }
         }
     }
