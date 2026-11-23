@@ -462,10 +462,14 @@ struct DaemonTests {
         #expect(try marker() == "kept", "the disk was kept")
         #expect(try w.vm("dr")?["baseImageVersion"]?.stringValue == "201")
         #expect(try w.cli("vm", "kill", "dr").0 == 0)
-        // Not asked again for 201.1.
+        // Not asked again for 201.1 (other prompts, such as the catalog's
+        // recommended packages, may be pending: not this one).
         _ = state()
         #expect(try w.cli("vm", "start", "dr").0 == 0)
-        if case .array(let prompts)? = state()?["pendingPrompts"] { #expect(prompts.isEmpty, "\(prompts)") }
+        if case .array(let prompts)? = state()?["pendingPrompts"] {
+            let drift = prompts.filter { $0["title"]?.stringValue == "A newer base image is available." }
+            #expect(drift.isEmpty, "\(drift)")
+        }
         #expect(try await ready())
         #expect(try w.cli("vm", "kill", "dr").0 == 0)
 
