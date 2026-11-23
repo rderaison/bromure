@@ -24,7 +24,7 @@ public enum ImageInstall {
     /// partial files beside the image; the live one is replaced only by the
     /// bake's promotion.
     // partial: no stock.img checkpoint (each install downloads, then runs every step); no provisioner (the installer is the Alpine netboot)
-    // @port UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void) h=0308e22859fb7f05 @7bae22e1
+    // @port UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void) h=ff0f06e0adaf762d @a16c5931e
     public static func download(_ o: InterimBake.Options, store: ImageCatalogStore, steps: Bool = true,
                                 progress: @escaping @Sendable (String) -> Void = { _ in },
                                 output: @escaping @Sendable (Data) -> Void = { _ in }) async throws -> InterimBake.Result {
@@ -66,7 +66,7 @@ public enum ImageInstall {
                 continue
             }
             var b = o
-            b.postinstallSteps = steps ? catalog.linuxSortedSteps : []
+            b.postinstallSteps = steps ? catalog.linuxBaseImageSteps() : []
             b.downloaded = .init(disk: disk.path, imageUUID: image.uuid, version: image.version)
             let r = try await InterimBake.bake(b, progress: progress, output: output)
             progress("Base image ready at \(o.outputDir)/base.img (\(image.description))")

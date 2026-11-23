@@ -185,6 +185,7 @@ private struct KubeRig {
     let clusterCA: TestCA
     let clientCA: TestCA
     let server: MTLSServer
+    let serverLeaf: String
     var target: String { "\(ip):\(server.port)" }
 
     /// The API server's certificate: an IP SAN of the dialed address, of
@@ -194,7 +195,9 @@ private struct KubeRig {
     /// `publicRoots`: the cluster CA stands in for a public root (trusted
     /// by the proxy's own context, nothing pinned) and the server asks for
     /// no client certificate: the path of every non-kube IP-literal upstream.
-    init(dns: [String] = ["kubernetes"], san: SAN = .dialed, publicRoots: Bool = false) throws {
+    /// `selfSigned`: nothing trusts the server's CA and it asks for no
+    /// client certificate (a self-signed private endpoint, as users pin).
+    init(dns: [String] = ["kubernetes"], san: SAN = .dialed, publicRoots: Bool = false, selfSigned: Bool = false) throws {
         guard let ip = Daemon.primaryIPv4() else { throw RigSkip() }
         self.ip = ip
         dir = try shortTempDir()
@@ -207,7 +210,21 @@ private struct KubeRig {
         listenerB = try proxy.serve(udsPath: dir + "/vmb.sock", profileID: pidB, fdStoreName: "kt-\(pidB)")
         let sanIP: String? = switch san { case .dialed: ip; case .other(let o): o; case .none: nil }
         let leaf = try cluster.leaf("apiserver", dns: dns, ip: sanIP, client: false)
-        server = try MTLSServer(host: ip, leaf: leaf, clientCA: publicRoots ? nil : clients.nio)
+        serverLeaf = leaf.0
+        server = try MTLSServer(host: ip, leaf: leaf, clientCA: publicRoots || selfSigned ? nil : clients.nio)
+    }
+
+    /// The server's leaf, as a user would pin it (SHA-256, lowercase hex).
+    var leafFingerprint: String {
+        let der = try! NIOSSLCertificate(bytes: Array(serverLeaf.utf8), format: .pem).toDERBytes()
+        return TrustedUpstreamCertificate.fingerprint(ofDER: Data(der))
+    }
+
+    /// Guardrails › Trusted upstream certificates for workspace A.
+    func pinCertificates(_ fingerprints: Set<String>, host: String? = nil) {
+        var g = GuardrailsConfig(kubernetes: .off, kubeHosts: [])
+        g.pinnedCertificates = [host ?? ip: fingerprints]
+        proxy.setGuardrailsConfig(g, for: pid)
     }
 
     func client() throws -> (String, String) { try clientCA.leaf("system:admin", client: true) }
@@ -243,6 +260,31 @@ struct KubeUpstreamTrustTests {
         rig.pin(identity: try rig.client())
         let out = try rig.get()
         #expect(out.hasPrefix("HTTP/1.1 200") && out.hasSuffix("kube ok"), "got: \(out.prefix(300))")
+    }
+
+    @Test func aPinnedLeafCertificateIsTrustedAndCredentialsFlow() throws {
+        let rig = try KubeRig(selfSigned: true); defer { rig.stop() }
+        rig.pinCertificates([rig.leafFingerprint])
+        let out = try rig.get()
+        #expect(out.hasPrefix("HTTP/1.1 200") && out.hasSuffix("kube ok"), "got: \(out.prefix(300))")
+    }
+
+    @Test func unpinnedTheRefusalNamesThePresentedCertificateAndHowToPinIt() throws {
+        let rig = try KubeRig(selfSigned: true); defer { rig.stop() }
+        let out = try rig.get()
+        #expect(out.hasPrefix("HTTP/1.1 502"), "got: \(out.prefix(300))")
+        #expect(out.contains("is signed by a CA the host running Bromure AC does not trust"), "\(out.prefix(400))")
+        #expect(out.contains("Trusted upstream certificates"), "the pin is offered")
+        #expect(out.contains("presented has SHA-256 fingerprint " + TrustedUpstreamCertificate.displayFingerprint(rig.leafFingerprint) + "."),
+                "the presented leaf is named: \(out)")
+    }
+
+    @Test func anotherCertificatesPinOrAnotherHostsIsNotTrusted() throws {
+        let rig = try KubeRig(selfSigned: true); defer { rig.stop() }
+        rig.pinCertificates([String(repeating: "ab", count: 32)])
+        #expect(try rig.get().hasPrefix("HTTP/1.1 502"), "a pin of another certificate")
+        rig.pinCertificates([rig.leafFingerprint], host: "another.example.test")
+        #expect(try rig.get().hasPrefix("HTTP/1.1 502"), "the right certificate pinned for another host")
     }
 
     @Test func nothingPinnedFailsClosed() throws {

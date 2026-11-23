@@ -229,6 +229,7 @@
     "Sources/AgentCoding/PolicyHistory.swift",
     "Sources/AgentCoding/PolicyNotes.swift",
     "Sources/AgentCoding/PolicySteering.swift",
+    "Sources/AgentCoding/PostinstallSkips.swift",
     "Sources/AgentCoding/Profile.swift",
     "Sources/AgentCoding/ProfileDocument.swift",
     "Sources/AgentCoding/ProfileEdits.swift",

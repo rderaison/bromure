@@ -4,10 +4,12 @@ import Foundation
 /// Models (macOS: the automation server's /subscriptions routes and
 /// /state's `subscriptions`), over the proxy's stores.
 extension Daemon {
-    /// `POST /subscriptions/register|forget`; nil for any other path.
+    /// `POST /subscriptions/register|cancel|forget`; nil for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/register"): h=660996cce7a181e6 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/forget"): h=588a794720f01642 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/cancel"): h=be7cca29b4bc2f1a @1d74379cb
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCancelRegistration h=3fc9abc130177888 @1d74379cb
     func subscriptionsRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let provider = body["provider"]?.stringValue ?? ""
         let pid = body["profileId"]?.stringValue.flatMap(UUID.init(uuidString:))
@@ -25,6 +27,19 @@ extension Daemon {
             var reply: [String: JSONValue] = ["ok": .bool(refused == nil), "error": .string(refused ?? "")]
             if let run { reply["registration"] = .string(run) }
             return ControlResponse(refused == nil ? 202 : 409, .object(reply))
+        // A fat client gave up its sign-in (closed the sign-in machine's
+        // window): end that run now, rather than leave it holding the one
+        // sign-in slot until its credential wait runs out.
+        case ("POST", "/subscriptions/cancel"):
+            let run = body["registration"]?.stringValue ?? ""
+            guard !run.isEmpty else { return .error(400, "Missing 'registration'") }
+            let ok = await MainActor.run { () -> Bool in
+                guard let host = LinuxSessionHost.shared, RemoteRegistrationBroker.shared.pending?.id.uuidString == run,
+                      host.registration != nil else { return false }
+                host.teardownSubscriptionRegistration(reason: .cancelled)
+                return true
+            }
+            return ControlResponse(ok ? 200 : 404, ["ok": .bool(ok)])
         case ("POST", "/subscriptions/forget"):
             guard let p = SubscriptionProvider(rawValue: provider) else { return .error(400, "Missing 'provider'") }
             let ok = await MainActor.run { () -> Bool in

@@ -8,11 +8,11 @@ import SandboxEngine
 /// published image is a full update instead, which re-applies every step:
 /// no steps are offered under it.
 extension Daemon {
-    static let newPostinstallStepsButtons = ["Install", "Later"]
+    static let newPostinstallStepsButtons = ["Install", "Later", "Skip Permanently"]
 
     /// The question, as macOS's alert words it.
-    // partial: the alert's words and buttons, asked through the fat client (PendingPromptBroker)
-    // @port ACAppDelegate.promptNewPostinstallSteps(_: [PostinstallStep]) h=98b616ebcbb086f8 @d7bd69f51
+    // partial: the alert's words and buttons, asked through the fat client (PendingPromptBroker); no "Workspaces › Base Image…" line (that window is the Mac's own image)
+    // @port ACAppDelegate.promptNewPostinstallSteps(_: [PostinstallStep]) h=8350a2228e02052b @1d74379cb
     static func newPostinstallStepsPromptParts(_ steps: [PostinstallStep]) -> (title: String, message: String) {
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
         return ("New recommended packages",
@@ -30,7 +30,7 @@ extension Daemon {
             if let p = Int(published), let i = Int(installed) { newer = p > i } else { newer = published != installed }
             if newer { return [] }
         }
-        return catalog.linuxPendingSteps(appliedUUIDs: applied)
+        return catalog.linuxPendingBaseImageSteps(appliedUUIDs: applied)
     }
 
     /// The steps the image has: its image-state.json, or for an image that
@@ -51,7 +51,8 @@ extension Daemon {
     /// At the daemon's start: the steps published since the image was
     /// built, asked about once a fat client is there (nobody to ask yet, or
     /// the client gone before an answer: asked again when one is). "Later"
-    /// asks again at the next start, as macOS's next launch.
+    /// asks again at the next start, as macOS's next launch; "Skip
+    /// Permanently" never asks about these again.
     // @port-skip linux-only: the launch check, asked when a client is connected (macOS: at launch, on its own screen)
     func offerNewPostinstallSteps(every poll: Duration = .seconds(5)) async {
         let dir = config.imageDir
@@ -87,6 +88,12 @@ extension Daemon {
             case 0?:
                 await applyPostinstallSteps(steps)
                 return
+            case 2?:
+                // Never asked about again, never in a new image of this user's.
+                PostinstallSkips().skip(steps.map(\.uuid))
+                Daemon.flushDefaults()
+                FileHandle.standardError.write(Data("bromure-ac daemon: [image] skipped for good: \(steps.map(\.uuid).joined(separator: ","))\n".utf8))
+                return
             case _?:
                 return
             case nil:
@@ -105,8 +112,8 @@ extension Daemon {
 
     /// The accepted steps into base.img, in the background (macOS: an
     /// APFS clone amended and swapped in; workspaces keep running).
-    // partial: no progress window (the daemon's log has the steps); remote access isn't paused (the image is promoted by rename)
-    // @port ACAppDelegate.startPostinstall(_: [PostinstallStep]) h=f6ec1de66eb5007b @d3ebbda2
+    // partial: no progress window (the daemon's log has the steps); remote access stays up (as macOS's now: the image is promoted by rename)
+    // @port ACAppDelegate.startPostinstall(_: [PostinstallStep]) h=29c8313f26e6ae77 @1d74379cb
     func applyPostinstallSteps(_ steps: [PostinstallStep]) async {
         let env = ProcessInfo.processInfo.environment
         // From the image in use into this user's own (the same dir unless

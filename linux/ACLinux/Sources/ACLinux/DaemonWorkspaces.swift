@@ -143,7 +143,10 @@ extension Daemon {
             PassphraseKeychain.delete(profileID: p.id, filename: key.filename)
         }
         // As the sidebar's own delete does: its cluster access goes too.
-        await MainActor.run { SessionStores.shared?.kubeEngine?.workspaceDeleted(p.id) }
+        await MainActor.run {
+            SessionStores.shared?.kubeEngine?.workspaceDeleted(p.id)
+            Daemon.archiveSessionsOfGoneWorkspaces()
+        }
         Self.refreshSquelchSettings()
         return ["ok": true, "name": p.name]
     }

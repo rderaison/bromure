@@ -451,7 +451,7 @@ struct Image: AsyncParsableCommand {
         var downloadOnly = false
 
         // partial: no --fresh (no stock.img checkpoint: each install downloads); the fallback is the Firecracker bake
-        // @port Init.run() h=6f7d8002583ccf31 @d3ebbda2
+        // @port Init.run() h=191c594ea3f5e72b @1d74379cb
         func run() async throws {
             _ = acl_unblock_term_signals()
             let o = try await bake.options()
@@ -536,7 +536,7 @@ struct Image: AsyncParsableCommand {
                 let store = ImageCatalogStore(distribution: .agentCoding(imageVersion: version),
                                               supportDir: URL(fileURLWithPath: o.outputDir))
                 _ = await store.refresh()
-                o.postinstallSteps = store.effective().sortedSteps
+                o.postinstallSteps = store.effective().linuxBaseImageSteps()
             }
             if let path = customizeScript {
                 guard let text = try? String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8) else {

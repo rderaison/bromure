@@ -15,6 +15,8 @@ enum UpstreamFailure: Equatable {
     // @port-skip linux-only: NIO / NIOSSL error classes
     init(_ error: Error) {
         switch error {
+        case let e as UpstreamCertificateRefused:
+            self = UpstreamFailure(e.underlying)
         case is ProxyDestinationUnresolved:
             self = .unresolved
         case let e as NIOSSLExtraError where e == .failedToValidateHostname || e == .serverHostnameImpossibleToMatch:
@@ -63,10 +65,21 @@ enum UpstreamFailure: Equatable {
     }
 }
 
+/// A certificate the upstream presented and normal validation refused, not
+/// one the user pinned for that host: the failure, and the leaf's SHA-256
+/// (lowercase hex) for the guest to name.
+// @port-skip linux-only: carries macOS's NSURLErrorFailingURLPeerTrustErrorKey (the presented trust) on the NIO error
+struct UpstreamCertificateRefused: Error, CustomStringConvertible {
+    let underlying: Error
+    let presentedFingerprint: String?
+    // @port-skip linux-only: the error's log text
+    var description: String { "\(underlying)" }
+}
+
 /// The guest's explanation of an upstream failure: macOS's reasons, word
 /// for word, and its body; never the library's own text (it names host
 /// paths and internals). The trust advice is this host's (no keychain).
-// @port describeUpstreamError(_: Error, host: String, dialerFailure: String?, allowInsecureHint: Bool) h=067aa323ec4ca2d3 @f127f8ab
+// @port describeUpstreamError(_: Error, host: String, dialerFailure: String?, allowInsecureHint: Bool) h=17ce75276f97f946 @1d74379cb
 func describeUpstreamError(_ error: Error, host: String, allowInsecureHint: Bool = false) -> (isTrust: Bool, reason: String, body: String) {
     let kind = UpstreamFailure(error)
     let reason: String
@@ -104,6 +117,22 @@ func describeUpstreamError(_ error: Error, host: String, allowInsecureHint: Bool
         a Kubernetes API server, set the cluster's CA in the workspace's \
         kubeconfig — then retry.
         """
+        // Self-signed / private endpoint the user wants credentials to reach:
+        // the user (not the agent — it's a host-side setting) can pin the
+        // exact certificate. Name the one presented so they can compare it
+        // against the server's real fingerprint out of band.
+        body += """
+        \n
+        Or ask the user to pin \(host)'s certificate in Bromure (the workspace's \
+        settings → Guardrails → Trusted upstream certificates). A pinned \
+        certificate is trusted like any valid one, so credentials are injected \
+        as usual. Only the user can add a pin; they should first check the \
+        fingerprint against the server itself.
+        """
+        if let presented = (error as? UpstreamCertificateRefused)?.presentedFingerprint {
+            body += "\nThe certificate \(host) presented has SHA-256 fingerprint "
+                + TrustedUpstreamCertificate.displayFingerprint(presented) + "."
+        }
         if allowInsecureHint {
             body += """
             \n

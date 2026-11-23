@@ -14,7 +14,7 @@ import NIOConcurrencyHelpers
 /// announce or serve another user's port.
 extension Daemon {
     // partial: the front door's port on a single-user server; on a multi-user one, this user's ingress into the gateway
-    // @port ACAppDelegate.startRemoteAccessIfNeeded() h=1b169b783684295d @d3ebbda2
+    // @port ACAppDelegate.startRemoteAccessIfNeeded() h=b060acd9891247b4 @1d74379cb
     /// false: P2P is on but couldn't be served (no ingress port), so the
     /// watcher tries again; `quiet` doesn't log that again.
     @discardableResult

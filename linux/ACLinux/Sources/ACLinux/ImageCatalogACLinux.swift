@@ -82,7 +82,7 @@ enum ImageState {
 // @port-skip linux-only: Bundle.main's CFBundleShortVersionString, which a Linux binary has no Info.plist for
 enum LinuxAppVersion {
     // @port-skip linux-only: see the type
-    static let short = "5.4.5"
+    static let short = "5.4.6"
 }
 
 extension ImageCatalog {
@@ -95,5 +95,23 @@ extension ImageCatalog {
     func linuxPendingSteps(appliedUUIDs: some Sequence<String>) -> [PostinstallStep] {
         let applied = Set(appliedUUIDs)
         return linuxSortedSteps.filter { !applied.contains($0.uuid) }
+    }
+
+    /// `baseImageSteps()` for this build: its steps, less those this user
+    /// skipped for good (PostinstallSkips, this user's defaults).
+    // @port-skip linux-only: ImageCatalog.baseImageSteps with the Linux build's app version
+    public func linuxBaseImageSteps() -> [PostinstallStep] { linuxBaseImageSteps(skipping: PostinstallSkips().uuids) }
+
+    // @port-skip linux-only: ImageCatalog.baseImageSteps with the Linux build's app version
+    func linuxBaseImageSteps(skipping skipped: Set<String>) -> [PostinstallStep] {
+        linuxSortedSteps.filter { !skipped.contains($0.uuid) }
+    }
+
+    /// `pendingBaseImageSteps(appliedUUIDs:)` for this build: neither
+    /// applied to the image nor skipped.
+    // @port-skip linux-only: ImageCatalog.pendingBaseImageSteps with the Linux build's app version
+    func linuxPendingBaseImageSteps(appliedUUIDs: some Sequence<String>,
+                                    skipping skipped: Set<String> = PostinstallSkips().uuids) -> [PostinstallStep] {
+        linuxPendingSteps(appliedUUIDs: Set(appliedUUIDs).union(skipped))
     }
 }

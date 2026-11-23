@@ -548,6 +548,13 @@ final class MitmProxy: @unchecked Sendable {
         // this upstream's certificate, for this connection only.
         let endpoint = insecure ? nil : profileID.flatMap { kubeTrust.endpoint(for: host, port: port, profileID: $0) }
         let ctx = insecure ? insecureUpstreamContext : endpoint?.context ?? upstreamContext
+        // The leaf certificates the user pinned for this host (Guardrails ›
+        // Trusted upstream certificates): one of them is trusted as a valid
+        // certificate would be, so credentials still flow to a self-signed
+        // endpoint (macOS: TLSClientStream's and ClientCertChallengeDelegate's
+        // pinnedFingerprints).
+        let pins: Set<String> = insecure || !routed.tls ? []
+            : profileID.flatMap { guardrailsConfig(for: $0)?.pinnedFingerprints(for: host) } ?? []
         // A client certificate the proxy presents for the guest: on the
         // Security Timeline once the handshake with it succeeded (macOS:
         // emitClientCertEvent; NIOSSL can't say whether the server asked).
@@ -569,7 +576,7 @@ final class MitmProxy: @unchecked Sendable {
             ?? checkDestination(host: host, port: port, profileID: profileID, identity: identity, on: loop)
         return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
-                return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop).map(presented)
+                return dialTrusting(host: host, to: [to], tls: routed.tls, ctx: ctx, pins: pins, on: loop).map(presented)
             }
             if refusesRealUpstreams {
                 FileHandle.standardError.write(Data("[mitm] ✗ e2e mode: the test upstream isn't usable: refused \(host):\(port)\n".utf8))
@@ -577,7 +584,46 @@ final class MitmProxy: @unchecked Sendable {
                     host: host, port: port, reason: "e2e mode: the test upstream isn't usable, so no real host is dialed"))
             }
             let addrs = resolved.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
-            return dial(host: host, to: addrs, tls: routed.tls, ctx: ctx, on: loop).map(presented)
+            return dialTrusting(host: host, to: addrs, tls: routed.tls, ctx: ctx, pins: pins, on: loop).map(presented)
+        }
+    }
+
+    /// `dial`, and when the certificate is refused, once more to look at it:
+    /// a leaf the user pinned for `host` is trusted then (no chain, name or
+    /// validity check: it is the certificate the user vouched for -- the
+    /// LEAF only, never a CA a server merely includes in its chain);
+    /// otherwise the refusal carries the presented leaf's fingerprint, for
+    /// the error the guest reads (macOS: PinnedUpstreamCertificate.matches,
+    /// which runs before normal validation: the same verdicts).
+    // partial: normal validation first, then the pin on a second handshake (NIOSSL can't fall back from a custom verifier to its own)
+    // @port PinnedUpstreamCertificate.static matches(_: SecTrust, fingerprints: Set<String>, host: String) h=412bb83d0a7b9ccf @1d74379cb
+    // partial: the leaf of the chain the custom verifier is handed
+    // @port PinnedUpstreamCertificate.static leafFingerprint(_: SecTrust) h=fd0f96fb4534cc8f @1d74379cb
+    private func dialTrusting(host: String, to addresses: [SocketAddress], tls: Bool, ctx: NIOSSLContext,
+                              pins: Set<String>, on loop: EventLoop) -> EventLoopFuture<Channel> {
+        let first = dial(host: host, to: addresses, tls: tls, ctx: ctx, on: loop)
+        guard tls else { return first }
+        return first.flatMapError { [self] refused in
+            guard UpstreamFailure(refused) == .untrusted else { return loop.makeFailedFuture(refused) }
+            let seen = NIOLockedValueBox<String?>(nil)
+            let verify: NIOSSLCustomVerificationCallback = { chain, promise in
+                guard let der = try? chain.first?.toDERBytes() else { promise.succeed(.failed); return }
+                let fp = TrustedUpstreamCertificate.fingerprint(ofDER: Data(der))
+                seen.withLockedValue { $0 = fp }
+                guard pins.contains(fp) else {
+                    if !pins.isEmpty {
+                        FileHandle.standardError.write(Data(
+                            "[mitm] \(host): leaf certificate \(fp) is not a pinned certificate for this host — using normal validation\n".utf8))
+                    }
+                    promise.succeed(.failed); return
+                }
+                FileHandle.standardError.write(Data(
+                    "[mitm] \(host): leaf certificate matches a user-pinned fingerprint — trusted\n".utf8))
+                promise.succeed(.certificateVerified)
+            }
+            return dial(host: host, to: addresses, tls: true, ctx: ctx, verify: verify, on: loop).flatMapErrorThrowing { _ in
+                throw UpstreamCertificateRefused(underlying: refused, presentedFingerprint: seen.withLockedValue { $0 })
+            }
         }
     }
 
@@ -588,12 +634,13 @@ final class MitmProxy: @unchecked Sendable {
     // partial: returns the last NIO error, no per-address failure list
     // @port UpstreamPinning.static connectFailure(_: [IPAddress], port: Int, failures: [String]) h=962de51ed1e47b91 @578d196d
     private func dial(host: String, to addresses: [SocketAddress], tls: Bool, ctx: NIOSSLContext,
+                      verify: NIOSSLCustomVerificationCallback? = nil,
                       on loop: EventLoop) -> EventLoopFuture<Channel> {
         guard let first = addresses.first else {
             return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: 0))
         }
-        return dialOne(host: host, to: first, tls: tls, ctx: ctx, on: loop).flatMapError { [self] e in
-            addresses.count > 1 ? dial(host: host, to: Array(addresses.dropFirst()), tls: tls, ctx: ctx, on: loop)
+        return dialOne(host: host, to: first, tls: tls, ctx: ctx, verify: verify, on: loop).flatMapError { [self] e in
+            addresses.count > 1 ? dial(host: host, to: Array(addresses.dropFirst()), tls: tls, ctx: ctx, verify: verify, on: loop)
                                 : loop.makeFailedFuture(e)
         }
     }
@@ -601,6 +648,7 @@ final class MitmProxy: @unchecked Sendable {
     // partial: TCP_NODELAY channel option; SIGPIPE ignored daemon-wide
     // @port UpstreamPinning.static prepared(_: Int32) h=c7efcd6348fead01 @578d196d
     private func dialOne(host: String, to target: SocketAddress, tls: Bool, ctx: NIOSSLContext,
+                         verify: NIOSSLCustomVerificationCallback? = nil,
                          on loop: EventLoop) -> EventLoopFuture<Channel> {
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }
         let ready = OncePromise(loop.makePromise(of: Channel.self))
@@ -613,8 +661,10 @@ final class MitmProxy: @unchecked Sendable {
                     // No SNI for an IP literal (RFC 6066); its certificate is
                     // still bound to the address (`.fullVerification`: an IP SAN
                     // equal to the connected address, or the handshake fails).
+                    let sni = isIP ? nil : host
                     return ch.pipeline.addHandlers([
-                        try NIOSSLClientHandler(context: ctx, serverHostname: isIP ? nil : host),
+                        try verify.map { try NIOSSLClientHandler(context: ctx, serverHostname: sni, customVerificationCallback: $0) }
+                            ?? NIOSSLClientHandler(context: ctx, serverHostname: sni),
                         HandshakeWaiter(ready),
                     ])
                 } catch { return ch.eventLoop.makeFailedFuture(error) }
@@ -1569,7 +1619,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     }
 
     // partial: the upgrade's dial, held bytes and gates as NIO handlers (ResponseRelay switches, WSClientFilter / OpenShellWebSocket gate the guest's frames)
-    // @port HTTPMitmConnection.handleWebSocketUpgrade(serverTLS: MitmServerStream, rawRequest: Data, host: String, port: Int, cleartext: Bool, captureBody: Bool, messagePolicy: ((String)->OpenShellWebSocket.MessageVerdict)?, messageTransform: ((String)->OpenShellWebSocket.MessageTransform)?, onViolation: @escaping@Sendable(String,Bool)->Void, binaryPolicy: (()->OpenShellWebSocket.MessageVerdict)?, contentGuard: WSContentGuard?, squelchLearnFor: UUID?, onUpstreamMessage: (@Sendable(WSMessage)->Void)?) h=1f8ae9be73ba6ba7 @003f61e7
+    // @port HTTPMitmConnection.handleWebSocketUpgrade(serverTLS: MitmServerStream, rawRequest: Data, host: String, port: Int, cleartext: Bool, captureBody: Bool, messagePolicy: ((String)->OpenShellWebSocket.MessageVerdict)?, messageTransform: ((String)->OpenShellWebSocket.MessageTransform)?, onViolation: @escaping@Sendable(String,Bool)->Void, binaryPolicy: (()->OpenShellWebSocket.MessageVerdict)?, contentGuard: WSContentGuard?, squelchLearnFor: UUID?, onUpstreamMessage: (@Sendable(WSMessage)->Void)?) h=f69fa5624005228a @1d74379cb
     private func send(_ plan: Plan, trace: Trace?, channel: Channel, host: String, port: Int, tls: Bool, session: UInt64) {
         switch plan {
         case .answer(let reply):

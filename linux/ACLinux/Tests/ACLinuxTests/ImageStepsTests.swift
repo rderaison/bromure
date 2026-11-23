@@ -37,12 +37,32 @@ struct ImageStepsTests {
         #expect(Daemon.postinstallStepsToOffer(try Self.catalog(image: nil, [a]), installedStamp: "201", applied: []) == [a])
     }
 
+    /// "Skip Permanently": a skipped step is neither offered nor put in a
+    /// new image of this user's; the skip list is kept in defaults.
+    @Test func skippedStepsAreNeitherOfferedNorInstalled() throws {
+        let a = Self.step("aaaa", 1, "Claude Code"), b = Self.step("bbbb", 2, "Hermes Agent")
+        let c = try Self.catalog(image: "201", [b, a])
+        #expect(c.linuxPendingBaseImageSteps(appliedUUIDs: [], skipping: ["bbbb"]) == [a])
+        #expect(c.linuxPendingBaseImageSteps(appliedUUIDs: ["aaaa"], skipping: ["bbbb"]).isEmpty)
+        #expect(c.linuxBaseImageSteps(skipping: ["aaaa"]) == [b])
+        #expect(c.linuxBaseImageSteps(skipping: []) == [a, b], "in execution order")
+
+        let suite = "bromure-skips-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let skips = PostinstallSkips(defaults: defaults)
+        skips.skip(["bbbb"])
+        #expect(skips.uuids == ["bbbb"])
+        skips.unskip(PostinstallSkips.installed(["bbbb"], applied: ["aaaa", "bbbb"]))
+        #expect(skips.uuids.isEmpty, "installed: off the list")
+    }
+
     /// macOS's alert, word for word (promptNewPostinstallSteps).
     @Test func theQuestionIsMacOSs() {
         let (title, message) = Daemon.newPostinstallStepsPromptParts([Self.step("a", 1, "Claude Code"), Self.step("b", 2, "Codex")])
         #expect(title == "New recommended packages")
         #expect(message == "New packages are recommended to be installed:\n\n• Claude Code\n• Codex\n\nBromure installs them into the base image (a few minutes, in the background VM). Existing workspaces keep running; each one's drift prompt will offer a reset to pick them up.")
-        #expect(Daemon.newPostinstallStepsButtons == ["Install", "Later"])
+        #expect(Daemon.newPostinstallStepsButtons == ["Install", "Later", "Skip Permanently"])
     }
 
     @Test func anAmendAddsToTheAppliedSteps() {

@@ -40,6 +40,7 @@ extension Daemon {
                 host?.listModel.profileRows.first { $0.id == id }?.name
             }
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
+            Daemon.archiveSessionsOfGoneWorkspaces()
             // The coding board and the scheduled automations (macOS: the app
             // delegate's lazy engines, started at launch); the repository
             // watches over them once the dispatcher exists.
@@ -165,12 +166,48 @@ extension Daemon {
         return ControlResponse(200, v)
     }
 
+    /// A deleted workspace's sessions are archived, not left Paused (nothing
+    /// to wake; no peer may reach them), and stay so: resume, unarchive and
+    /// the delegation tools ask `workspaceGone` again. At the engine's start
+    /// (ones deleted before it ran too) and after each delete. Gone = no
+    /// directory (macOS: not loaded either; a server loads none up front).
+    // partial: at the engine's start and after a delete (macOS: each profiles reload); gone = no profile directory
+    // @port ACAppDelegate.var profiles h=b9a4b2b111c1b6ee @1d74379cb
+    @MainActor static func archiveSessionsOfGoneWorkspaces() {
+        guard let store = SessionStores.shared?.sessions else { return }
+        let gone: (UUID) -> Bool = { !ProfileStore().hasDirectory($0) }
+        store.workspaceGone = gone
+        store.archiveSessions(ofGoneWorkspaces: gone)
+    }
+
+    /// Why an agent that needs a model can't start (macOS: the new-session
+    /// screen's words).
+    // @port NewSessionView.static needsModelMessage(_: Profile.Tool) h=582c56b53b72b814 @1d74379cb
+    static func needsModelMessage(_ tool: Profile.Tool) -> String {
+        String(format: NSLocalizedString(
+            "%@ has no model set up on this machine. Choose one in the machine's settings › Models.",
+            comment: "new session: agent can't start; %@ = agent name"), tool.displayName)
+    }
+
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=e9f46815d56751bf @1d74379cb
     // partial: the "read" action, incl. attached-machine branch
     // @port ACAppDelegate.markSessionRead(_: UUID, upTo: Int?) h=faf9f887be5a3588 @d3ebbda2
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
+        // Hermes with no model set up: refused, whichever client asks (an
+        // older one doesn't grey it out).
+        if id == nil, action == "start", let key = doc["profile"] as? String,
+           let tool = (doc["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)), tool.needsModelToStart,
+           let profile = Self.workspace(key) {
+            let subscribed = subscribedProviders(for: profile)
+            let ready = await MainActor.run {
+                profile.readyToolSpecs(ModelSettingsStore.shared.effective(for: profile), subscribed: subscribed)
+            }
+            if !ready.contains(where: { $0.tool == tool }) {
+                return ControlResponse(400, ["error": .string(Self.needsModelMessage(tool))])
+            }
+        }
         let r: [String: Any] = await MainActor.run {
             guard let stores = SessionStores.shared, let engine = stores.engine else { return ["error": "no session engine"] }
             let store = stores.sessions

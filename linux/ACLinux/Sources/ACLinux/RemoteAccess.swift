@@ -260,8 +260,8 @@ extension Daemon {
     }
 
     /// `POST /remote`: port, bindAddress, passwordAuth, pubkeyAuth, enabled.
-    // partial: no P2P advertising, no base-image-install guard (the daemon has no install step)
-    // @port ACAppDelegate.remoteAccessApply(_: [String:Any]) h=3a0c28ae8f0a1d24 @7dd92fdf
+    // partial: no P2P advertising, no "no base image yet" refusal (the SSH server is independent of the image here)
+    // @port ACAppDelegate.remoteAccessApply(_: [String:Any]) h=2077c15e46900d13 @1d74379cb
     // partial: enabled=false stops the server; P2P serving follows refreshP2PServing
     // @port ACAppDelegate.stopRemoteAccess() h=c8dee5fec42c01b8 @d3ebbda2
     // partial: no cloudflared, no install guard

@@ -127,7 +127,6 @@ extension LinuxSessionHost: ProfileEditHost {
         profile(for: id)?.browserDisabled ?? true
     }
 
-    // @port ACAppDelegate.var profiles h=2645ec771dff4d93 @d3ebbda2
     // partial: no sidebar/browser reboot (screen-only); boot-at-startup handled by DaemonBootAtStartup
     // @port ACAppDelegate.profilesDidChange(saved: Profile?, editing: Profile?) h=b9c5f326a372bba7 @d7bd69f5
     func profilesDidChange(saved: Profile?, editing: Profile?) {

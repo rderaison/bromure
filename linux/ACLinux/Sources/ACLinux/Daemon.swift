@@ -372,7 +372,7 @@ public actor Daemon {
     }
 
     // partial: server-side launch is spread over Daemon.start/startSessionEngine. Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (macOS-legacy data)
-    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=fb4bcbb5835e3cda @d7bd69f51
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=c269a7e75cf65893 @1d74379cb
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
         // A state dir with no registry and no workspaces yet: a new user's
@@ -649,7 +649,7 @@ public actor Daemon {
 
     /// The control socket's router: the subset of macOS's routes the Linux
     /// daemon has, same paths and JSON; anything else is 404 with a JSON error.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) h=50682b813d59b62f @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) h=4d6baf51bc4e9285 @1d74379cb
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"): h=5085e35fd033de06 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/remote"): h=b6276f976a98e550 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/remote"): h=d60f95389e82ca48 @f127f8ab
@@ -665,7 +665,7 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / default: h=be4becd88b5244ad @f127f8ab
     // partial: router calls daemon functions directly
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=98d6aa483c3d82e9 @d7bd69f5
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=c8cf3c5d89f304d2 @1d74379cb
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         // A mutating request moves /state's generation on as it starts and
         // as its response goes out (macOS: route's noteMutation pair).
