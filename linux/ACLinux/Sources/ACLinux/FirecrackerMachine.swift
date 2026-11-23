@@ -310,7 +310,9 @@ public actor FirecrackerMachine {
             daemons.append((share.tag, d))
             let deadline = ContinuousClock.now + .seconds(5)
             while !FileManager.default.fileExists(atPath: sock) {
-                if !d.isRunning || ContinuousClock.now > deadline { throw MachineError.virtiofsdNotReady(share.tag) }
+                if !d.isRunning || ContinuousClock.now > deadline {
+                    throw MachineError.virtiofsdNotReady(share.tag, Self.lastWords(log, binary: config.virtiofsd))
+                }
                 try await Task.sleep(for: .milliseconds(5))
             }
             let tag = share.tag
@@ -423,5 +425,20 @@ extension MachineConfig {
         return await withCheckedContinuation { cont in
             DispatchQueue.global().async { cont.resume(returning: acl_hybrid_vsock_connect(path, port, timeoutMs)) }
         }
+    }
+}
+
+extension FirecrackerMachine {
+    /// A helper's log, for an error, and which binary it was: its error
+    /// lines (a too-old virtiofsd prints "Error: unexpected argument…" and
+    /// then a long usage), else its last few lines; short either way.
+    // @port-skip linux-only: virtiofsd supervision
+    static func lastWords(_ logPath: String, binary: String, lines: Int = 3, limit: Int = 600) -> String {
+        let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
+        let all = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.allSatisfy(\.isWhitespace) }
+        let errors = all.filter { $0.range(of: "error", options: .caseInsensitive) != nil }
+        var tail = (errors.isEmpty ? all : errors).suffix(lines).joined(separator: " | ")
+        if tail.count > limit { tail = "…" + tail.suffix(limit) }
+        return tail.isEmpty ? "(\(binary): no output)" : "\(binary): \(tail)"
     }
 }

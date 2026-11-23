@@ -98,6 +98,24 @@ step "Firecracker ($TARGET_ARCH)"
 BROMURE_FC_ARCH=$TARGET_ARCH BROMURE_FC_SRC=$WORK/firecracker-src "$ROOT/linux/firecracker/build.sh" "$L/bin"
 file "$L/bin/firecracker" | grep -Eq 'static(-pie)? linked|statically linked' || die "firecracker isn't static: $(file "$L/bin/firecracker")"
 
+# --- virtiofsd ------------------------------------------------------------------------
+# Pinned, not the system's: Ubuntu 24.04's (1.10) refuses the options the
+# daemon passes it (linux/virtiofsd/build.sh). Cross: the target's static
+# libseccomp and libcap-ng, from the toolchain's /opt/target-debs.
+step "virtiofsd ($TARGET_ARCH)"
+VFS_ENV=(BROMURE_VFS_ARCH="$TARGET_ARCH" BROMURE_VFS_SRC="$WORK/virtiofsd-src")
+if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
+  root=$WORK/target-root
+  for d in /opt/target-debs/libseccomp-dev_*.deb /opt/target-debs/libcap-ng-dev_*.deb; do
+    [ -f "$d" ] || die "the target's libseccomp-dev/libcap-ng-dev aren't in /opt/target-debs (rebuild Dockerfile.toolchain)"
+    dpkg-deb -x "$d" "$root"
+  done
+  VFS_ENV+=(BROMURE_VFS_LIBDIR="$root/usr/lib/$TARGET_ARCH-linux-gnu")
+fi
+env "${VFS_ENV[@]}" "$ROOT/linux/virtiofsd/build.sh" "$L/bin"
+file "$L/bin/virtiofsd" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )" \
+  || die "virtiofsd isn't a $TARGET_ARCH binary: $(file "$L/bin/virtiofsd")"
+
 # --- the PII model, the resources -------------------------------------------------
 step "PII model"
 BROMURE_PII_CACHE=$WORK/pii "$ROOT/scripts/fetch-pii-model.sh" "$L/bin/pii-rampart" >/dev/null
@@ -135,7 +153,7 @@ Maintainer: Bromure <support@bromure.io>
 Installed-Size: $SIZE
 Section: admin
 Priority: optional
-Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libcurl4t64 | libcurl4, passt, virtiofsd, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
+Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libcurl4t64 | libcurl4, passt, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
 Recommends: btrfs-progs, libpam0g, curl
 Suggests: libonnxruntime1.23
 Homepage: https://bromure.io
@@ -143,7 +161,7 @@ Description: Bromure Agentic Coding server (multi-user, Firecracker)
  Runs coding agents (Claude Code, Codex, Grok, Kimi, omp, Hermes) in
  disposable Firecracker microVMs, one daemon per user, driven from the
  Bromure apps over SSH. Includes the SSH gateway, the LAN address helper,
- Firecracker and the Swift runtime.
+ Firecracker, virtiofsd and the Swift runtime.
  .
  After installing: bromure-setup-environment (btrfs storage),
  bromure-image-install (the guest image), bromure-ac admin add <user>.

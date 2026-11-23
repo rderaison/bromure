@@ -14,6 +14,9 @@
 #       musl's specs file), and the amd64 kernel UAPI headers
 #       (linux-libc-dev:amd64). All of it runs on the builder: musl.cc's
 #       cross toolchains are x86_64-hosted.
+#     - for virtiofsd (linux/virtiofsd/build.sh): the same cross gcc, and
+#       the target's libseccomp-dev and libcap-ng-dev packages (their
+#       static libraries), kept in /opt/target-debs with zlib's and brotli's.
 #   TARGET_ARCH = the builder's arch: a native build, none of that.
 ARG SWIFT_IMAGE=swift:6.4-noble
 FROM ${SWIFT_IMAGE}
@@ -26,7 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 perl xz-utils zstd file binutils \
         dpkg-dev fakeroot build-essential pkg-config \
-        zlib1g-dev libbrotli-dev libseccomp-dev musl-tools \
+        zlib1g-dev libbrotli-dev libseccomp-dev libcap-ng-dev musl-tools \
         libsqlite3-dev rsync \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,7 +63,8 @@ RUN set -eux; \
     printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' > /tmp/t.c; \
     "$TARGET_ARCH-linux-musl-gcc" -static -O2 -o /tmp/t /tmp/t.c; file /tmp/t | grep -Eq 'statically linked|static-pie linked'; rm -f /tmp/t /tmp/t.c; \
     mkdir -p /opt/target-debs; cd /opt/target-debs; \
-    apt-get download "zlib1g:$deb" "zlib1g-dev:$deb" "libbrotli1:$deb" "libbrotli-dev:$deb"; \
+    apt-get download "zlib1g:$deb" "zlib1g-dev:$deb" "libbrotli1:$deb" "libbrotli-dev:$deb" \
+        "libseccomp-dev:$deb" "libcap-ng-dev:$deb"; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

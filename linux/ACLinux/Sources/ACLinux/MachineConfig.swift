@@ -9,7 +9,8 @@ public enum MachineError: Error, CustomStringConvertible, Equatable {
     case notRunning
     case alreadyStarted
     case exitedDuringStart(Int32, String)
-    case virtiofsdNotReady(String)
+    /// The share's tag, then virtiofsd's own last words (its log), if any.
+    case virtiofsdNotReady(String, String = "")
     case snapshotMissing(String)
     case snapshotMismatch(state: String, overlay: String)
 
@@ -23,7 +24,8 @@ public enum MachineError: Error, CustomStringConvertible, Equatable {
         case .notRunning: return "VM is not running"
         case .alreadyStarted: return "VM was already started"
         case .exitedDuringStart(let s, let log): return "Firecracker exited \(s) during start: \(log)"
-        case .virtiofsdNotReady(let tag): return "virtiofsd for '\(tag)' did not come up"
+        case .virtiofsdNotReady(let tag, let log):
+            return "virtiofsd for '\(tag)' did not come up" + (log.isEmpty ? "" : ": \(log)")
         case .snapshotMissing(let p): return "no snapshot identity at \(p)"
         case .snapshotMismatch(let s, let o): return "\(s) was not saved with \(o) as it is now; refusing to restore"
         }
@@ -106,7 +108,26 @@ public struct MachineConfig: Sendable {
     /// read end Firecracker's stdin takes, the write end its stdout goes to.
     /// FirecrackerMachine.start closes both here once Firecracker has them.
     public var consolePipes: (input: Int32, output: Int32)?
-    public var virtiofsd = "/usr/libexec/virtiofsd"
+    public var virtiofsd = Self.defaultVirtiofsd
+    /// BROMURE_VIRTIOFSD, else the one installed beside this executable (the
+    /// package's, linux/virtiofsd/build.sh: Ubuntu 24.04's 1.10 refuses the
+    /// options virtiofsdArguments passes), else the system's.
+    // @port-skip linux-only: virtiofsd supervision
+    public static var defaultVirtiofsd: String {
+        resolveVirtiofsd(env: ProcessInfo.processInfo.environment["BROMURE_VIRTIOFSD"],
+                         executable: try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"),
+                         isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
+    // @port-skip linux-only: virtiofsd supervision
+    static func resolveVirtiofsd(env: String?, executable: String?, isExecutable: (String) -> Bool) -> String {
+        if let env, !env.isEmpty { return env }
+        if let executable {
+            let beside = (executable as NSString).deletingLastPathComponent + "/virtiofsd"
+            if isExecutable(beside) { return beside }
+        }
+        return "/usr/libexec/virtiofsd"
+    }
     /// linux/firecracker/build.sh's output, unless BROMURE_FIRECRACKER says otherwise.
     public var firecrackerBinary = Self.defaultFirecrackerBinary
     // @port-skip linux-only: Firecracker backend
