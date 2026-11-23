@@ -33,6 +33,21 @@ const SPACES_ORIGIN = "bromure-dl.nyc3.digitaloceanspaces.com";     // no DO CDN
 const SPACES_CDN = "bromure-dl.nyc3.cdn.digitaloceanspaces.com";    // DO CDN
 
 function policyFor(pathname) {
+  // The APT repository (tools/apt-publish.mjs). Its indexes (InRelease,
+  // Release, Packages…) are rewritten in place on every publish, and a
+  // stale InRelease would hold servers on the old version: from the origin,
+  // 1s like the manifests. Exceptions, immutable and cached like any
+  // artifact: dists/…/by-hash/ (keyed by content hash) and pool/ (one file
+  // per version). The keyring changes only on a key rotation: 5 minutes.
+  if (pathname.startsWith("/apt/")) {
+    if (pathname.startsWith("/apt/pool/") || pathname.includes("/by-hash/")) {
+      return { hostname: SPACES_CDN, ttl: 86400 };
+    }
+    if (pathname.startsWith("/apt/bromure-archive-keyring.")) {
+      return { hostname: SPACES_ORIGIN, ttl: 300 };
+    }
+    return { hostname: SPACES_ORIGIN, ttl: 1 };
+  }
   if (pathname.endsWith(".json")) {
     return { hostname: SPACES_ORIGIN, ttl: 1 };
   }
