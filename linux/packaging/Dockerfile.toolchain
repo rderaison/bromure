@@ -14,7 +14,9 @@
 #       musl's specs file), and the amd64 kernel UAPI headers
 #       (linux-libc-dev:amd64). All of it runs on the builder: musl.cc's
 #       cross toolchains are x86_64-hosted.
-#     - for virtiofsd (linux/virtiofsd/build.sh): the same cross gcc, and
+#     - for virtiofsd and passt (linux/virtiofsd, linux/passt): the same
+#       cross gcc with the target's glibc (libc6-dev-amd64-cross: its crt
+#       files and libc.a; --no-install-recommends leaves it out), and
 #       the target's libseccomp-dev and libcap-ng-dev packages (their
 #       static libraries), kept in /opt/target-debs with zlib's and brotli's.
 #   TARGET_ARCH = the builder's arch: a native build, none of that.
@@ -56,7 +58,10 @@ RUN set -eux; \
         "$mirror" "$deb" > /etc/apt/sources.list.d/target.sources; \
     apt-get update; \
     gnu=$(echo "$TARGET_ARCH" | tr _ -)-linux-gnu; \
-    apt-get install -y --no-install-recommends "linux-libc-dev:$deb" "musl-dev:$deb" "gcc-$gnu"; \
+    apt-get install -y --no-install-recommends "linux-libc-dev:$deb" "musl-dev:$deb" "gcc-$gnu" "libc6-dev-$deb-cross"; \
+    printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' > /tmp/g.c; \
+    "$TARGET_ARCH-linux-gnu-gcc" -O2 -o /tmp/g /tmp/g.c && "$TARGET_ARCH-linux-gnu-gcc" -static -O2 -o /tmp/gs /tmp/g.c; \
+    file /tmp/g | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )"; rm -f /tmp/g /tmp/gs /tmp/g.c; \
     specs=/usr/lib/$TARGET_ARCH-linux-musl/musl-gcc.specs; [ -f "$specs" ]; \
     printf '#!/bin/sh\nexec %s-linux-gnu-gcc "$@" -specs %s\n' "$TARGET_ARCH" "$specs" > "/usr/local/bin/$TARGET_ARCH-linux-musl-gcc"; \
     chmod 755 "/usr/local/bin/$TARGET_ARCH-linux-musl-gcc"; \
