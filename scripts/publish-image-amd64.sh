@@ -2,11 +2,17 @@
 #
 # publish-image-amd64.sh — the amd64 counterpart of publish-image.sh: the
 # free-software Firecracker image a Linux server's `bromure-ac image
-# install` downloads. Prepared, not wired into Jenkins.
+# install` downloads. Jenkins runs it weekly (Jenkinsfile.image-amd64).
 #
 # A DRY RUN unless --push is given: it bakes (or takes --image-dir),
-# compresses, checksums and writes an UNSIGNED preview catalog, then prints
-# what it would upload and delete. Nothing leaves this machine.
+# boot-checks, compresses, checksums and writes an UNSIGNED preview
+# catalog, then prints what it would upload and delete. Nothing leaves this
+# machine.
+#
+# The boot check (as publish-image.sh's verify-image): `bromure-ac image
+# verify` installs a copy of the disk as a client would (the download's
+# postinstall boot) and boots it offline to the login prompt. The disk
+# that is checksummed and uploaded is never booted.
 #
 # With --push (and the publish env, as publish-image.sh's), under
 # $DO_SPACES_PUBLIC_BASE:
@@ -84,7 +90,12 @@ if ! python3 -I -c 'import json,sys;sys.exit(0 if json.load(open(sys.argv[1])).g
     exit 1
 fi
 
-# --- 2. Compress, checksum ------------------------------------------------
+# --- 2. Boot-check a copy ---------------------------------------------------
+echo "=== Client install + boot check (on a disposable copy) ==="
+"$AC" image verify --dir "$IMAGE_DIR" --work "$STAGING/verify" --timeout 300 \
+    --vm-setup Sources/AgentCoding/Resources/vm-setup
+
+# --- 2b. Compress, checksum ------------------------------------------------
 echo "=== Compressing image ==="
 UNCOMPRESSED_BYTES=$(stat -c%s "$BASE_IMG")
 GZ="$OUT/base.img.gz"

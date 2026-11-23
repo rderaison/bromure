@@ -1,0 +1,195 @@
+// Jenkinsfile.image-amd64 — the x86-64 counterpart of Jenkinsfile.image: build
+// the free-software Firecracker image weekly and publish it to the
+// DigitalOcean Space a Linux server's `bromure-ac image install` downloads
+// from (https://dl.bromure.io/images/<major>/amd64/…).
+//
+// The work is scripts/publish-image-amd64.sh: bake (no agent CLIs), the boot
+// check on a disposable copy (`bromure-ac image verify`: installed as a
+// client would, then booted offline to the login prompt), compress, sign the
+// catalog (the Sparkle key, magic bromure-img-catalog-amd64-v1), upload the
+// disk then the catalog (1s TTL), smoke-test the origin and the CDN, and only
+// then retire the previous image.
+//
+// The bromure-ac that bakes is the one servers get: the amd64 .deb the Linux
+// package job (Jenkinsfile.linux) archived, unpacked (not installed), with
+// its own Firecracker, passt and virtiofsd. The repository is checked out at
+// the commit that .deb was built from, so setup.sh and the catalog's steps
+// match the binary.
+//
+// The agent (label linux-kvm-amd64), set up once:
+//   - x86_64 Ubuntu 24.04 or newer; /dev/kvm read-write for the Jenkins user
+//     (the kvm group); git, python3, curl, dpkg-deb, node 20+ (npm), pigz
+//     optional; ~40 GB free in the workspace.
+//   - The Copy Artifact plugin, allowed to copy from the package job.
+//   - /opt/bromure-image-ci owned by the Jenkins user (the .deb is unpacked
+//     there: a fixed path, for the AppArmor profile below).
+//   - The package's AppArmor profile for that path (Ubuntu lets only
+//     programs with a profile create user namespaces, which passt's and
+//     virtiofsd's sandboxes need), from a checkout:
+//       sed -e 's|/usr/lib/bromure-ac|/opt/bromure-image-ci/usr/lib/bromure-ac|g' \
+//           -e 's|profile bromure-ac-|profile bromure-image-ci-|' \
+//           -e 's|local/bromure-ac-|local/bromure-image-ci-|' \
+//           linux/packaging/apparmor/bromure-ac | sudo tee /etc/apparmor.d/bromure-image-ci
+//       sudo apparmor_parser -r -T -W /etc/apparmor.d/bromure-image-ci
+//     The Preflight stage checks both sandboxes start, and says so if not.
+pipeline {
+    agent { label 'linux-kvm-amd64' }
+
+    triggers {
+        // Weekly, as the arm64 image (Monday early morning, hash-spread).
+        cron('H 4 * * 1')
+    }
+
+    options {
+        // Bake (~10 min) + client install and boot check (~5) + gzip +
+        // multi-GB upload + up to 1h of CDN polling.
+        timeout(time: 3, unit: 'HOURS')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    parameters {
+        booleanParam(name: 'DRY_RUN', defaultValue: false,
+            description: 'Build, boot-check and compress the image, write an unsigned preview catalog, but upload and delete nothing.')
+        booleanParam(name: 'KEEP_PREVIOUS', defaultValue: false,
+            description: 'Publish the new image but keep the previous images/<major>/amd64/<uuid>/ objects.')
+        string(name: 'PACKAGE_JOB', defaultValue: 'bromure-linux',
+            description: 'The Jenkins job that runs Jenkinsfile.linux (its archived amd64 .deb is the bromure-ac that bakes).')
+        string(name: 'PACKAGE_BUILD', defaultValue: '',
+            description: 'That job\'s build number to take the .deb from. Empty: its last successful build.')
+    }
+
+    environment {
+        // Same bucket and public base as every publish pipeline; this writes
+        // under images/<major>/amd64/. Secrets come from Jenkins credentials.
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+        // Where the .deb is unpacked (the AppArmor profile names this path).
+        CI_ROOT               = '/opt/bromure-image-ci'
+    }
+
+    stages {
+        stage('Package') {
+            steps {
+                script {
+                    def selector = params.PACKAGE_BUILD?.trim() ? specific(params.PACKAGE_BUILD.trim()) : lastSuccessful()
+                    copyArtifacts(projectName: params.PACKAGE_JOB, selector: selector,
+                                  filter: 'deb-ci/out/bromure-ac-*_amd64.deb, deb-ci/out/bromure-ac-*_amd64.deb.sha256',
+                                  flatten: true, target: 'image-ci/pkg', fingerprintArtifacts: true)
+                }
+                sh '''
+                    set -eu
+                    cd image-ci/pkg
+                    debs=$(ls bromure-ac-*_amd64.deb)
+                    [ "$(echo "$debs" | wc -l)" = 1 ] || { echo "expected one amd64 .deb, got: $debs"; exit 1; }
+                    sha256sum -c ./*.sha256
+                    cd "$WORKSPACE"
+                    # A fresh unpack each run (only what's under CI_ROOT/usr).
+                    [ -d "$CI_ROOT" ] && [ -w "$CI_ROOT" ] || { echo "$CI_ROOT must exist and be the Jenkins user's (see the header)"; exit 1; }
+                    rm -rf "$CI_ROOT/usr"
+                    dpkg-deb -x "image-ci/pkg/$debs" "$CI_ROOT"
+                    B="$CI_ROOT/usr/lib/bromure-ac/bin"
+                    for f in bromure-ac firecracker passt virtiofsd; do
+                        [ -x "$B/$f" ] || { echo "the .deb has no $f"; exit 1; }
+                    done
+                    cat "$B/bromure-ac.build-info.json"
+                    python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' \
+                        "$B/bromure-ac.build-info.json" > image-ci/commit
+                '''
+                // The repository at the .deb's commit: its setup.sh and catalog
+                // steps are the ones that binary expects.
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
+                    keyFileVariable: 'SSH_KEY')]) {
+                    sh '''
+                        set -eu
+                        commit=$(cat image-ci/commit)
+                        if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+                            export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                            git fetch --quiet origin
+                        fi
+                        git -c advice.detachedHead=false checkout --quiet --detach "$commit"
+                        echo "checked out $(git rev-parse --short=8 HEAD) (the .deb's commit)"
+                    '''
+                }
+            }
+        }
+
+        stage('Preflight') {
+            steps {
+                sh '''
+                    set -eu
+                    B="$CI_ROOT/usr/lib/bromure-ac/bin"
+                    for t in node npm python3 curl git; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+                    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' || { echo "node 20+ needed"; exit 1; }
+                    [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "/dev/kvm isn't read-write for $(id -un) (the kvm group)"; exit 1; }
+                    # The sandboxes passt and virtiofsd make (user namespaces):
+                    # what the AppArmor profile in the header allows.
+                    d=$(mktemp -d)
+                    trap 'rm -rf "$d"' EXIT
+                    timeout 3 "$B/virtiofsd" --shared-dir "$d" --socket-path "$d/vfs.sock" --sandbox namespace >"$d/vfs.log" 2>&1 || true
+                    [ -S "$d/vfs.sock" ] || { cat "$d/vfs.log"; echo "virtiofsd's sandbox didn't start: the AppArmor profile for $CI_ROOT (see the header)"; exit 1; }
+                    timeout 3 "$B/passt" -f -4 --map-host-loopback none --map-guest-addr none -t none -u none -s "$d/passt.sock" >"$d/passt.log" 2>&1 || true
+                    [ -S "$d/passt.sock" ] || { cat "$d/passt.log"; echo "passt didn't start: the AppArmor profile for $CI_ROOT (see the header)"; exit 1; }
+                    df -h "$WORKSPACE" | tail -1
+                    echo "preflight ok: $("$B/firecracker" --version | head -1), $("$B/passt" --version | head -1), $("$B/virtiofsd" --version | head -1)"
+                '''
+            }
+        }
+
+        stage('Install release-tool deps') {
+            steps {
+                // As Jenkinsfile.image: tools/spaces-put.mjs needs @aws-sdk.
+                sh '''
+                    set -eu
+                    (cd tools && if [ -f package-lock.json ]; then \
+                                    npx --yes @socketsecurity/cli npm ci --silent \
+                                        || { echo "npm ci failed (lock out of sync?) — falling back to npm install"; \
+                                             npx --yes @socketsecurity/cli npm install; }; \
+                                 else \
+                                    npx --yes @socketsecurity/cli npm install --silent; \
+                                 fi)
+                '''
+            }
+        }
+
+        stage('Build image + Verify + Publish') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',       variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET',    variable: 'DO_SPACES_SECRET'),
+                    // The catalog is signed with the Sparkle key; servers
+                    // verify it against the pinned public key.
+                    string(credentialsId: 'SPARKLE_PRIVATE_KEY', variable: 'SPARKLE_PRIVATE_KEY')
+                ]) {
+                    sh '''
+                        set -eu
+                        B="$CI_ROOT/usr/lib/bromure-ac/bin"
+                        # The .deb's own helpers (an older binary doesn't look beside itself).
+                        export BROMURE_FIRECRACKER="$B/firecracker" BROMURE_PASST="$B/passt" BROMURE_VIRTIOFSD="$B/virtiofsd"
+                        export BROMURE_AC_RESOURCES="$CI_ROOT/usr/lib/bromure-ac/resources"
+                        # Scratch beside the workspace, not /tmp (the disk is 24 GiB sparse).
+                        rm -rf image-ci/tmp image-ci/out
+                        mkdir -p image-ci/tmp
+                        export TMPDIR="$WORKSPACE/image-ci/tmp" XDG_CACHE_HOME="$WORKSPACE/image-ci/cache"
+                        export KEEP_PREVIOUS="${KEEP_PREVIOUS:-false}"
+                        push=--push
+                        [ "${DRY_RUN:-false}" = true ] && push=""
+                        ./scripts/publish-image-amd64.sh "$B/bromure-ac" --out image-ci/out $push
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'image-ci/out/img-catalog.json, image-ci/out/build-info.json', allowEmptyArchive: true
+        }
+        always {
+            sh 'rm -rf image-ci/tmp image-ci/out/base.img.gz'
+        }
+    }
+}
