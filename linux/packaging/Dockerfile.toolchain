@@ -18,7 +18,9 @@
 #       cross gcc with the target's glibc (libc6-dev-amd64-cross: its crt
 #       files and libc.a; --no-install-recommends leaves it out), and
 #       the target's libseccomp-dev and libcap-ng-dev packages (their
-#       static libraries), kept in /opt/target-debs with zlib's and brotli's.
+#       static libraries), kept in /opt/target-debs with zlib's and brotli's;
+#     - for libcurl (linux/curl): the target's OpenSSL, nghttp2 and zstd
+#       packages (headers and libraries), in /opt/target-debs too.
 #   TARGET_ARCH = the builder's arch: a native build, none of that.
 ARG SWIFT_IMAGE=swift:6.4-noble
 FROM ${SWIFT_IMAGE}
@@ -32,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 perl xz-utils zstd file binutils \
         dpkg-dev fakeroot build-essential pkg-config \
         zlib1g-dev libbrotli-dev libseccomp-dev libcap-ng-dev musl-tools \
+        libssl-dev libnghttp2-dev libzstd-dev \
         libsqlite3-dev rsync \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,7 +72,9 @@ RUN set -eux; \
     "$TARGET_ARCH-linux-musl-gcc" -static -O2 -o /tmp/t /tmp/t.c; file /tmp/t | grep -Eq 'statically linked|static-pie linked'; rm -f /tmp/t /tmp/t.c; \
     mkdir -p /opt/target-debs; cd /opt/target-debs; \
     apt-get download "zlib1g:$deb" "zlib1g-dev:$deb" "libbrotli1:$deb" "libbrotli-dev:$deb" \
-        "libseccomp-dev:$deb" "libcap-ng-dev:$deb"; \
+        "libseccomp-dev:$deb" "libcap-ng-dev:$deb" \
+        "libssl3t64:$deb" "libssl-dev:$deb" "libnghttp2-14:$deb" "libnghttp2-dev:$deb" \
+        "libzstd1:$deb" "libzstd-dev:$deb"; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

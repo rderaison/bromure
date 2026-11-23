@@ -98,6 +98,26 @@ step "Firecracker ($TARGET_ARCH)"
 BROMURE_FC_ARCH=$TARGET_ARCH BROMURE_FC_SRC=$WORK/firecracker-src "$ROOT/linux/firecracker/build.sh" "$L/bin"
 file "$L/bin/firecracker" | grep -Eq 'static(-pie)? linked|statically linked' || die "firecracker isn't static: $(file "$L/bin/firecracker")"
 
+# --- libcurl --------------------------------------------------------------------------
+# With WebSockets, beside the Swift runtime (libFoundationNetworking's RUNPATH
+# is $ORIGIN): Ubuntu 24.04's has none, and Foundation's WebSocket tasks (the
+# P2P device channel) are libcurl's (linux/curl/build.sh). Cross: the target's
+# -dev packages and their libraries, unpacked from /opt/target-debs.
+step "libcurl ($TARGET_ARCH)"
+CURL_ENV=(BROMURE_CURL_ARCH="$TARGET_ARCH")
+if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
+  root=$WORK/target-root
+  for p in zlib1g zlib1g-dev libbrotli1 libbrotli-dev libssl3t64 libssl-dev libnghttp2-14 libnghttp2-dev libzstd1 libzstd-dev; do
+    d=$(ls /opt/target-debs/${p}_*.deb 2>/dev/null | head -1)
+    [ -n "$d" ] || die "/opt/target-debs has no $p (rebuild Dockerfile.toolchain)"
+    dpkg-deb -x "$d" "$root"
+  done
+  CURL_ENV+=(BROMURE_CURL_SYSROOT="$root")
+fi
+env "${CURL_ENV[@]}" "$ROOT/linux/curl/build.sh" "$L/lib"
+readelf -h "$L/lib/libcurl.so.4" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo 'X86-64' || echo AArch64)" \
+  || die "libcurl isn't a $TARGET_ARCH library"
+
 # --- virtiofsd ------------------------------------------------------------------------
 # Pinned, not the system's: Ubuntu 24.04's (1.10) refuses the options the
 # daemon passes it (linux/virtiofsd/build.sh). Cross: the target's static
@@ -168,7 +188,7 @@ Maintainer: Bromure <support@bromure.io>
 Installed-Size: $SIZE
 Section: admin
 Priority: optional
-Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libcurl4t64 | libcurl4, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
+Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libssl3t64 | libssl3, libnghttp2-14, libzstd1, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
 Recommends: btrfs-progs, libpam0g, curl
 Suggests: libonnxruntime1.23
 Homepage: https://bromure.io
@@ -176,7 +196,7 @@ Description: Bromure Agentic Coding server (multi-user, Firecracker)
  Runs coding agents (Claude Code, Codex, Grok, Kimi, omp, Hermes) in
  disposable Firecracker microVMs, one daemon per user, driven from the
  Bromure apps over SSH. Includes the SSH gateway, the LAN address helper,
- Firecracker, virtiofsd, passt and the Swift runtime.
+ Firecracker, virtiofsd, passt, libcurl and the Swift runtime.
  .
  After installing: bromure-setup-environment (btrfs storage),
  bromure-image-install (the guest image), bromure-ac admin add <user>.
