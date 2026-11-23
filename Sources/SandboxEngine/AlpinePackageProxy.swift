@@ -1,5 +1,12 @@
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// HTTP-to-HTTPS reverse proxy for `dl-cdn.alpinelinux.org`. The guest
 /// makes plain HTTP requests to us; we re-emit them as HTTPS using
@@ -97,7 +104,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     public func start(guestGateway: String) throws {
         guard let gw = Self.ipv4(guestGateway) else { throw Error.gateway(guestGateway) }
         gateway = gw
-        // Globally ignore SIGPIPE. Our `Darwin.write` calls in
+        // Globally ignore SIGPIPE. Our `ProxySocket.write` calls in
         // splice / writeStatus / writeResponse hit a closed client
         // socket the moment a guest gives up mid-download (curl
         // returned 23, npm bailed, etc.). Default SIGPIPE disposition
@@ -106,26 +113,21 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         // belt-and-braces; this is the suspenders.
         signal(SIGPIPE, SIG_IGN)
 
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let fd = ProxySocket.tcp(AF_INET)
         guard fd >= 0 else { throw Error.socket(errno) }
 
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
                    &yes, socklen_t(MemoryLayout<Int32>.size))
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
-                   &yes, socklen_t(MemoryLayout<Int32>.size))
+        ProxySocket.noSigPipe(fd)
 
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
         // port = 0: let the kernel pick a free ephemeral port. Avoids
         // clashing with whatever else the user has running on 8080 etc.
-        addr.sin_port = 0
-        addr.sin_addr.s_addr = INADDR_ANY
+        var addr = ProxySocket.anyAddress(port: 0)
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                ProxySocket.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         if bindResult != 0 {
@@ -145,7 +147,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         let port = UInt16(bigEndian: actual.sin_port)
         self.port = port
 
-        if Darwin.listen(fd, 16) != 0 {
+        if ProxySocket.listen(fd, 16) != 0 {
             let e = errno
             close(fd)
             throw Error.listen(e)
@@ -164,6 +166,26 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         // The guest URL is the caller's (`guestBase(host:)`, the switch's
         // real gateway) — `url` above is only the NAT default.
         Self.log("listening on 0.0.0.0:\(port) for the guest subnet of \(guestGateway)")
+    }
+
+    /// Serve the guest without a listening socket: the host's own switch
+    /// hands over each guest connection to `guestGateway:port`
+    /// (`serveDiverted`), so nothing listens on the host's network. The
+    /// Linux server's bake (its switch is in-process, and a multi-user
+    /// server shouldn't open a port for it).
+    public func startDiverted(guestGateway: String, port: UInt16) throws {
+        guard let gw = Self.ipv4(guestGateway) else { throw Error.gateway(guestGateway) }
+        gateway = gw
+        signal(SIGPIPE, SIG_IGN)
+        self.port = port
+        mirrorURL = URL(string: "http://\(Self.guestReachableHost):\(port)")
+        Self.log("serving the guest subnet of \(guestGateway) on \(guestGateway):\(port) (diverted by the switch, no listener)")
+    }
+
+    /// A guest connection the switch diverted (`startDiverted`), from `peer`
+    /// (IPv4, host order): served as an accepted one is. Takes `fd`.
+    public func serveDiverted(_ fd: Int32, peer: UInt32) {
+        admit(fd, peer: peer)
     }
 
     /// Tear the listener down. Safe to call from any thread; the cancel
@@ -199,13 +221,18 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         var peer = sockaddr_in()
         var plen = socklen_t(MemoryLayout<sockaddr_in>.size)
         let cfd = withUnsafeMutablePointer(to: &peer) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(listenFD, $0, &plen) }
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ProxySocket.accept(listenFD, $0, &plen) }
         }
         guard cfd >= 0 else { return }
         let peerIP = peer.sin_family == sa_family_t(AF_INET) ? UInt32(bigEndian: peer.sin_addr.s_addr) : 0
+        admit(cfd, peer: peerIP)
+    }
+
+    /// A connection from `peerIP`: served if it's the guest's, else closed.
+    private func admit(_ cfd: Int32, peer peerIP: UInt32) {
         guard Self.admitsPeer(peerIP, gateway: gateway) else {
             Self.log("refused a connection from \(Self.ipString(peerIP)) (not the guest's subnet)")
-            Darwin.close(cfd)
+            ProxySocket.close(cfd)
             return
         }
         contactedLock.lock()
@@ -213,9 +240,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         contactedLock.unlock()
         // Per-socket SIGPIPE suppression — a closed-client write
         // returns EPIPE without signalling the process.
-        var yes: Int32 = 1
-        setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE,
-                   &yes, socklen_t(MemoryLayout<Int32>.size))
+        ProxySocket.noSigPipe(cfd)
         workQueue.async { [weak self] in self?.serve(cfd) }
     }
 
@@ -229,7 +254,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
 
         guard let req = readRequest(clientFD) else {
             writeStatus(clientFD, status: 400, reason: "Bad Request")
-            Darwin.close(clientFD)
+            ProxySocket.close(clientFD)
             return
         }
 
@@ -253,7 +278,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
             return
         }
 
-        defer { Darwin.close(clientFD) }
+        defer { ProxySocket.close(clientFD) }
 
         guard req.method == "GET" || req.method == "HEAD" else {
             writeStatus(clientFD, status: 405, reason: "Method Not Allowed")
@@ -330,19 +355,11 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         clientFD: Int32, request: URLRequest, isHead: Bool
     ) {
         let delegate = StreamingProxyDelegate(clientFD: clientFD, isHead: isHead)
-        // Per-request URLSession so the delegate's lifetime matches
-        // the task and we don't have to multiplex by task identifier.
-        // Costs ~one URLSession allocation per HTTP hop; cheap.
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 60
-        cfg.timeoutIntervalForResource = 600
-        cfg.httpMaximumConnectionsPerHost = 4
-        let sess = URLSession(configuration: cfg,
-                               delegate: delegate, delegateQueue: nil)
-        let task = sess.dataTask(with: request)
-        task.resume()
+        // The task runs under `delegate` (ProxySession: a session per
+        // request where that's safe, else one shared session).
+        let finish = ProxySession.start(request, delegate: delegate)
         _ = delegate.semaphore.wait(timeout: .now() + 600)
-        sess.finishTasksAndInvalidate()
+        finish()
 
         if delegate.completionError != nil && !delegate.headersSent {
             // Upstream errored before we wrote a response line —
@@ -367,7 +384,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         guard parts.count == 2,
               let port = UInt16(parts[1]) else {
             writeStatus(clientFD, status: 400, reason: "Bad CONNECT target")
-            Darwin.close(clientFD)
+            ProxySocket.close(clientFD)
             return
         }
         let host = parts[0]
@@ -378,14 +395,14 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         // moment). Once connected, write 200 to the client and start
         // the splice.
         workQueue.async { [weak self] in
-            guard let self else { Darwin.close(clientFD); return }
+            guard let self else { ProxySocket.close(clientFD); return }
             guard let upstreamFD = Self.openTCP(host: host, port: port) else {
                 self.writeStatus(clientFD, status: 502, reason: "Bad Gateway")
-                Darwin.close(clientFD)
+                ProxySocket.close(clientFD)
                 return
             }
             let okay = "HTTP/1.1 200 Connection established\r\n\r\n"
-            _ = okay.withCString { Darwin.write(clientFD, $0, strlen($0)) }
+            _ = okay.withCString { ProxySocket.write(clientFD, $0, strlen($0)) }
             Self.splice(clientFD, upstreamFD)
         }
     }
@@ -413,8 +430,8 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     private static func openTCP(host: String, port: UInt16) -> Int32? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        hints.ai_protocol = IPPROTO_TCP
+        hints.ai_socktype = ProxySocket.streamType
+        hints.ai_protocol = ProxySocket.tcpProtocol
         var res: UnsafeMutablePointer<addrinfo>?
         let rc = getaddrinfo(host, String(port), &hints, &res)
         guard rc == 0, let info = res else {
@@ -428,7 +445,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         /// in-flight attempt.
         func finish(_ winner: Int32, flags: Int32, losers: [Int32]) -> Int32 {
             _ = fcntl(winner, F_SETFL, flags)
-            losers.forEach { Darwin.close($0) }
+            losers.forEach { ProxySocket.close($0) }
             return winner
         }
 
@@ -441,21 +458,19 @@ public final class AlpinePackageProxy: @unchecked Sendable {
                             cur.pointee.ai_socktype,
                             cur.pointee.ai_protocol)
             guard fd >= 0 else { continue }
-            var yes: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
-                       &yes, socklen_t(MemoryLayout<Int32>.size))
+            ProxySocket.noSigPipe(fd)
             let flags = fcntl(fd, F_GETFL, 0)
             savedFlags[fd] = flags
             _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-            if Darwin.connect(fd, cur.pointee.ai_addr,
-                              cur.pointee.ai_addrlen) == 0 {
+            if ProxySocket.connect(fd, cur.pointee.ai_addr,
+                                   cur.pointee.ai_addrlen) == 0 {
                 // Immediate success (loopback / already-open path).
                 return finish(fd, flags: flags, losers: pending)
             }
             if errno == EINPROGRESS {
                 pending.append(fd)
             } else {
-                Darwin.close(fd)
+                ProxySocket.close(fd)
             }
         }
         guard !pending.isEmpty else {
@@ -468,7 +483,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
             var pfds = pending.map {
                 pollfd(fd: $0, events: Int16(POLLOUT), revents: 0)
             }
-            let pr = poll(&pfds, UInt32(pfds.count), 1000)
+            let pr = poll(&pfds, nfds_t(pfds.count), 1000)
             if pr < 0 {
                 if errno == EINTR { continue }
                 break
@@ -481,10 +496,10 @@ public final class AlpinePackageProxy: @unchecked Sendable {
                 if soErr == 0 && (p.revents & Int16(POLLOUT)) != 0 {
                     return finish(p.fd, flags: savedFlags[p.fd] ?? 0, losers: pending)
                 }
-                Darwin.close(p.fd)
+                ProxySocket.close(p.fd)
             }
         }
-        pending.forEach { Darwin.close($0) }
+        pending.forEach { ProxySocket.close($0) }
         log("could not connect to \(host):\(port) within \(Int(connectDeadline))s "
             + "(all \(savedFlags.count) resolved address(es) failed or timed out)")
         return nil
@@ -500,13 +515,13 @@ public final class AlpinePackageProxy: @unchecked Sendable {
             q.async {
                 var buf = [UInt8](repeating: 0, count: 65536)
                 while true {
-                    let n = Darwin.read(from, &buf, buf.count)
+                    let n = ProxySocket.read(from, &buf, buf.count)
                     if n <= 0 { break }
                     var off = 0
                     let ok = buf.withUnsafeBytes { raw -> Bool in
                         guard let base = raw.baseAddress else { return false }
                         while off < n {
-                            let w = Darwin.write(to, base + off, n - off)
+                            let w = ProxySocket.write(to, base + off, n - off)
                             if w <= 0 { return false }
                             off += w
                         }
@@ -514,15 +529,15 @@ public final class AlpinePackageProxy: @unchecked Sendable {
                     }
                     if !ok { break }
                 }
-                Darwin.shutdown(to, SHUT_WR)
+                ProxySocket.shutdownWrite(to)
                 group.leave()
             }
         }
         pump(from: a, to: b)
         pump(from: b, to: a)
         group.notify(queue: q) {
-            Darwin.close(a)
-            Darwin.close(b)
+            ProxySocket.close(a)
+            ProxySocket.close(b)
         }
     }
 
@@ -539,7 +554,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         var buf = Data()
         var tmp = [UInt8](repeating: 0, count: 4096)
         while buf.count < Self.maxHeaderSize {
-            let n = Darwin.read(fd, &tmp, tmp.count)
+            let n = ProxySocket.read(fd, &tmp, tmp.count)
             if n <= 0 { return nil }
             buf.append(tmp, count: n)
             if let term = buf.range(of: Data("\r\n\r\n".utf8))?.lowerBound {
@@ -575,7 +590,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         let s = "HTTP/1.1 \(status) \(reason)\r\n" +
                 "Content-Length: 0\r\n" +
                 "Connection: close\r\n\r\n"
-        _ = s.withCString { Darwin.write(fd, $0, strlen($0)) }
+        _ = s.withCString { ProxySocket.write(fd, $0, strlen($0)) }
     }
 
     /// Streaming response writer driven by URLSession's delegate
@@ -634,7 +649,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
             // the body length is whatever it reads until EOF, in
             // case we didn't set Content-Length.
             head += "Connection: close\r\n\r\n"
-            _ = head.withCString { Darwin.write(clientFD, $0, strlen($0)) }
+            _ = head.withCString { ProxySocket.write(clientFD, $0, strlen($0)) }
             headersSent = true
             // HEAD: status + headers out, no body — cancel the task.
             completionHandler(isHead ? .cancel : .allow)
@@ -651,7 +666,7 @@ public final class AlpinePackageProxy: @unchecked Sendable {
                 guard let base = raw.baseAddress else { return }
                 var off = 0
                 while off < data.count {
-                    let w = Darwin.write(clientFD, base + off, data.count - off)
+                    let w = ProxySocket.write(clientFD, base + off, data.count - off)
                     if w <= 0 { return }
                     off += w
                 }
@@ -685,7 +700,13 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         "\(a >> 24).\(a >> 16 & 0xFF).\(a >> 8 & 0xFF).\(a & 0xFF)"
     }
 
+    /// Where the proxy's lines go instead of stderr (nil: stderr). Set
+    /// before `start`: the Linux bake keeps them in a file beside its
+    /// console log, not in the installing terminal.
+    nonisolated(unsafe) public static var logSink: ((String) -> Void)?
+
     private static func log(_ msg: String) {
+        if let sink = logSink { sink("[ac-proxy] \(msg)"); return }
         FileHandle.standardError.write(Data("[ac-proxy] \(msg)\n".utf8))
     }
 
@@ -695,4 +716,159 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         case bind(Int32)
         case listen(Int32)
     }
+}
+
+/// Runs one proxied request under its own delegate.
+///
+/// macOS: a URLSession per request, so the delegate's lifetime matches the
+/// task and nothing is multiplexed by task identifier (costs ~one URLSession
+/// allocation per HTTP hop; cheap).
+///
+/// Linux: one session for every request, its callbacks routed to each
+/// task's delegate. swift-corelibs-foundation aborts the process when a
+/// session is freed while libcurl still watches one of its sockets
+/// ("_MultiHandle deallocated with non-zero retain count", see
+/// URLSessionRetirement), and retiring a session per request would keep
+/// hundreds alive per bake.
+enum ProxySession {
+    static func configuration(maxPerHost: Int) -> URLSessionConfiguration {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 600
+        cfg.httpMaximumConnectionsPerHost = maxPerHost
+        return cfg
+    }
+
+    #if canImport(Darwin)
+    /// Starts `request`; the returned closure ends it (after the delegate
+    /// signalled, or on the caller's timeout).
+    static func start(_ request: URLRequest,
+                      delegate: AlpinePackageProxy.StreamingProxyDelegate) -> () -> Void {
+        let sess = URLSession(configuration: configuration(maxPerHost: 4),
+                              delegate: delegate, delegateQueue: nil)
+        sess.dataTask(with: request).resume()
+        return { sess.finishTasksAndInvalidate() }
+    }
+    #else
+    // @port-skip linux-only: the Linux side of ProxySession (one session, its tasks routed)
+    static func start(_ request: URLRequest,
+                      delegate: AlpinePackageProxy.StreamingProxyDelegate) -> () -> Void {
+        let task = shared.dataTask(with: request)
+        router.add(task.taskIdentifier, delegate)
+        task.resume()
+        return {
+            // A task still going past the caller's timeout is cancelled:
+            // its client connection is about to close.
+            if task.state == .running || task.state == .suspended { task.cancel() }
+            router.remove(task.taskIdentifier)
+        }
+    }
+
+    /// Each task's delegate, by task identifier.
+    // @port-skip linux-only: the Linux side of ProxySession
+    final class Router: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private var delegates: [Int: AlpinePackageProxy.StreamingProxyDelegate] = [:]
+
+        // @port-skip linux-only: the Linux side of ProxySession
+        func add(_ id: Int, _ d: AlpinePackageProxy.StreamingProxyDelegate) { lock.withLock { delegates[id] = d } }
+        // @port-skip linux-only: the Linux side of ProxySession
+        func remove(_ id: Int) { lock.withLock { _ = delegates.removeValue(forKey: id) } }
+        // @port-skip linux-only: the Linux side of ProxySession
+        private func delegate(_ task: URLSessionTask) -> AlpinePackageProxy.StreamingProxyDelegate? {
+            lock.withLock { delegates[task.taskIdentifier] }
+        }
+
+        // @port-skip linux-only: the Linux side of ProxySession
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            guard let d = delegate(dataTask) else { completionHandler(.cancel); return }
+            d.urlSession(session, dataTask: dataTask, didReceive: response, completionHandler: completionHandler)
+        }
+
+        // @port-skip linux-only: the Linux side of ProxySession
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            delegate(dataTask)?.urlSession(session, dataTask: dataTask, didReceive: data)
+        }
+
+        // @port-skip linux-only: the Linux side of ProxySession
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Swift.Error?) {
+            delegate(task)?.urlSession(session, task: task, didCompleteWithError: error)
+        }
+    }
+
+    // @port-skip linux-only: the Linux side of ProxySession
+    static let router = Router()
+    // @port-skip linux-only: the Linux side of ProxySession (never freed: see above)
+    static let shared = URLSession(configuration: configuration(maxPerHost: 16).withoutCookies(),
+                                   delegate: router, delegateQueue: nil)
+    #endif
+}
+
+/// The socket calls the proxy makes, by platform: Darwin's on macOS,
+/// Glibc's on Linux (no SO_NOSIGPIPE or sin_len there; writes go through
+/// send(MSG_NOSIGNAL), so a guest gone mid-download can't SIGPIPE the host).
+enum ProxySocket {
+    #if canImport(Darwin)
+    static let streamType = SOCK_STREAM
+    static let tcpProtocol = IPPROTO_TCP
+    static func tcp(_ family: Int32) -> Int32 { Darwin.socket(family, SOCK_STREAM, 0) }
+    static func noSigPipe(_ fd: Int32) {
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+    }
+    static func anyAddress(port: UInt16) -> sockaddr_in {
+        var a = sockaddr_in()
+        a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        a.sin_family = sa_family_t(AF_INET)
+        a.sin_port = port.bigEndian
+        a.sin_addr.s_addr = INADDR_ANY
+        return a
+    }
+    static func bind(_ fd: Int32, _ a: UnsafePointer<sockaddr>, _ l: socklen_t) -> Int32 { Darwin.bind(fd, a, l) }
+    static func listen(_ fd: Int32, _ backlog: Int32) -> Int32 { Darwin.listen(fd, backlog) }
+    static func accept(_ fd: Int32, _ a: UnsafeMutablePointer<sockaddr>?, _ l: UnsafeMutablePointer<socklen_t>?) -> Int32 {
+        Darwin.accept(fd, a, l)
+    }
+    static func connect(_ fd: Int32, _ a: UnsafePointer<sockaddr>?, _ l: socklen_t) -> Int32 { Darwin.connect(fd, a, l) }
+    @discardableResult static func close(_ fd: Int32) -> Int32 { Darwin.close(fd) }
+    static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ n: Int) -> Int { Darwin.read(fd, buf, n) }
+    static func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ n: Int) -> Int { Darwin.write(fd, buf, n) }
+    static func shutdownWrite(_ fd: Int32) { _ = Darwin.shutdown(fd, SHUT_WR) }
+    #else
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static let streamType = Int32(SOCK_STREAM.rawValue)
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static let tcpProtocol = Int32(IPPROTO_TCP)
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func tcp(_ family: Int32) -> Int32 { Glibc.socket(family, Int32(SOCK_STREAM.rawValue), 0) }
+    // @port-skip linux-only: the Glibc side of ProxySocket (SIGPIPE is ignored process-wide, and writes use MSG_NOSIGNAL)
+    static func noSigPipe(_ fd: Int32) {}
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func anyAddress(port: UInt16) -> sockaddr_in {
+        var a = sockaddr_in()
+        a.sin_family = sa_family_t(AF_INET)
+        a.sin_port = port.bigEndian
+        a.sin_addr.s_addr = in_addr_t(0)
+        return a
+    }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func bind(_ fd: Int32, _ a: UnsafePointer<sockaddr>, _ l: socklen_t) -> Int32 { Glibc.bind(fd, a, l) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func listen(_ fd: Int32, _ backlog: Int32) -> Int32 { Glibc.listen(fd, backlog) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func accept(_ fd: Int32, _ a: UnsafeMutablePointer<sockaddr>?, _ l: UnsafeMutablePointer<socklen_t>?) -> Int32 {
+        Glibc.accept(fd, a, l)
+    }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func connect(_ fd: Int32, _ a: UnsafePointer<sockaddr>?, _ l: socklen_t) -> Int32 { Glibc.connect(fd, a, l) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    @discardableResult static func close(_ fd: Int32) -> Int32 { Glibc.close(fd) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ n: Int) -> Int { Glibc.read(fd, buf, n) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ n: Int) -> Int { Glibc.send(fd, buf, n, Int32(MSG_NOSIGNAL)) }
+    // @port-skip linux-only: the Glibc side of ProxySocket
+    static func shutdownWrite(_ fd: Int32) { _ = Glibc.shutdown(fd, Int32(SHUT_WR)) }
+    #endif
 }
