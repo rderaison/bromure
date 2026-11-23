@@ -273,6 +273,7 @@
     "Sources/AgentCoding/TerminalScreens.swift",
     "Sources/AgentCoding/TokenAgentChannel.swift",
     "Sources/AgentCoding/UtunPacket.swift",
+    "Sources/SandboxEngine/AlpinePackageProxy.swift",
     "Sources/SandboxEngine/CloudTraceUploader.swift",
     "Sources/SandboxEngine/DNSSnoop.swift",
     "Sources/SandboxEngine/EgressPolicy.swift",
@@ -1106,10 +1107,6 @@
     {
       "path": "Sources/AgentCoding/DelegationFallbacks.swift",
       "reason": "sidecar target: the agent-host delegation shim (not the server)"
-    },
-    {
-      "path": "Sources/SandboxEngine/AlpinePackageProxy.swift",
-      "reason": "image bake: the server bake uses signed plain-HTTP apk (setup.sh no-proxy path)"
     },
     {
       "id": "VMAttachWindow.run()",

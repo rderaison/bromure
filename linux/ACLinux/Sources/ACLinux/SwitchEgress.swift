@@ -57,6 +57,12 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     // @port VMNetSwitch.var egressSeenCount h=a474309d6731bac3 @49959cbb
     var egressSeenCount: Int { lock.withLock { egressSeen.count } }
     private var interception: Interception?
+    /// Services the host runs for its guests on the gateway's address (the
+    /// bake's package proxy), by TCP port: those flows go to the service's
+    /// interceptor, ahead of the firewall (the subnet is closed to anything
+    /// else on the gateway but DNS). macOS's guests reach a host listener
+    /// through vmnet; passt here would take the flow to the host's network.
+    private var gatewayServices: [UInt16: any VMNetTCPInterceptor] = [:]
     /// Ports the agent watchdog cut off (macOS: quarantinedPorts).
     private var quarantined: Set<MAC> = []
     /// Off-subnet bytes each session port has sent (macOS: egressByteCounts).
@@ -161,6 +167,13 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     // @port VMNetSwitch.setInterceptor(_: VMNetTCPInterceptor?, ports: Set<UInt16>) h=3118b73b19e18a1d @49959cbb
     func setInterception(_ i: Interception?) { lock.withLock { interception = i } }
 
+    /// Divert the guests' TCP to the gateway's `port` into `service` (nil:
+    /// stop).
+    // @port-skip linux-only: the Linux switch's gateway services
+    func setGatewayService(port: UInt16, _ service: (any VMNetTCPInterceptor)?) {
+        lock.withLock { gatewayServices[port] = service }
+    }
+
     /// The VM on `mac` was detached: its governance goes, and the interceptor
     /// drops its flows (macOS: detachPort's portEgressPolicy reset and
     /// interceptor.portClosed).
@@ -176,6 +189,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
             return interception
         }
         i?.interceptor.portClosed(portID: mac.portID)
+        for s in lock.withLock({ Array(gatewayServices.values) }) { s.portClosed(portID: mac.portID) }
     }
 
     // @port-skip linux-only: the Linux switch's egress firewall
@@ -203,9 +217,28 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         f.withUnsafeBytes { raw -> Action in
             guard let base = raw.baseAddress else { return .pass }
             if let early = precheck(raw, src) { return early }
+            if let service = gatewayService(raw) {
+                service.handleDivertedPacket(portID: src.portID, profileID: nil, ipPacket: Array(raw[14...]))
+                return .consumed
+            }
             // Read only (the shared helpers take macOS's frame pointer type).
             return decide(UnsafeMutablePointer(mutating: base.assumingMemoryBound(to: UInt8.self)), raw.count, src)
         }
+    }
+
+    /// The gateway service an IPv4 TCP frame (a readable one: precheck) is
+    /// addressed to, if any: the gateway's address, a service's port, not a
+    /// fragment.
+    // @port-skip linux-only: the Linux switch's gateway services
+    func gatewayService(_ b: UnsafeRawBufferPointer) -> (any VMNetTCPInterceptor)? {
+        let n = b.count
+        guard n >= 34, b[12] == 0x08, b[13] == 0x00, b[14 + 9] == 6 else { return nil }
+        let dst = UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33])
+        guard dst == gatewayIP, (UInt16(b[20]) << 8 | UInt16(b[21])) & 0x3FFF == 0 else { return nil }
+        let ihl = Int(b[14] & 0x0F) * 4
+        guard n >= 14 + ihl + 4 else { return nil }
+        let dport = UInt16(b[14 + ihl + 2]) << 8 | UInt16(b[14 + ihl + 3])
+        return lock.withLock { gatewayServices[dport] }
     }
 
     /// The Linux checks before the firewall's own (decide is macOS's, which

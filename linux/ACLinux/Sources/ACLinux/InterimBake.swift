@@ -39,8 +39,10 @@ public enum InterimBake {
         public var mtu = 1500
         /// setup.sh's DISPLAY_SCALE argument (kitty's font size). Headless: 1.
         public var displayScale = 1
-        /// apk's repository and the modloop: plain HTTP is fine, apk checks
-        /// signatures (and setup.sh treats this exact value as "no proxy").
+        /// apk's repository and the modloop when the package proxy is down:
+        /// plain HTTP is fine, apk checks signatures (and setup.sh treats
+        /// this exact value as "no proxy"). bake() puts the proxy's URL here
+        /// when it starts (macOS: runProvisioner's alpineRepoBase).
         public var alpineCDN = "http://dl-cdn.alpinelinux.org"
         /// Where the netboot tarball and its .sha256 come from, macOS's
         /// releasesBase: HTTPS, since a checksum fetched beside its file over
@@ -110,6 +112,8 @@ public enum InterimBake {
         public let kernelRelease: String
     }
 
+    /// The package proxy's port on the gateway (any: the switch diverts it).
+    static let proxyPort: UInt16 = 3128
     static let alpineVersion = "3.22"
     static let alpineRelease = "3.22.3"
     static let alpineArch = "x86_64"
@@ -181,6 +185,30 @@ public enum InterimBake {
         guard let runDirC = mkdtemp(&tmpl) else { throw MachineError.io("mkdtemp", errno) }
         let runDir = String(cString: runDirC)
         defer { try? fm.removeItem(atPath: runDir); try? fm.removeItem(atPath: work) }
+
+        // The package proxy (macOS: runProvisioner's AlpinePackageProxy):
+        // the guest's apk, modloop, debootstrap and apt fetches go to it on
+        // the gateway, and it fetches them over HTTPS from here. The switch
+        // hands it the guest's connections (no port opens on the server's
+        // network). If it can't start, the guest goes to the CDN directly,
+        // as on macOS. Its request log goes beside the console's.
+        let proxy = AlpinePackageProxy()
+        let proxyLog = ProxyLog(path: work + "/proxy.log")
+        // @port-skip linux-only: the Linux bake keeps the proxy's lines in a file
+        AlpinePackageProxy.logSink = { proxyLog.append($0) }
+        do {
+            try proxy.startDiverted(guestGateway: PasstUplink.Config().gateway, port: Self.proxyPort)
+            if let base = proxy.guestBase(host: PasstUplink.Config().gateway) { o.alpineCDN = base.absoluteString }
+        } catch {
+            progress("The package proxy didn't start (\(error)): the guest fetches directly")
+        }
+        defer {
+            proxy.stop()
+            AlpinePackageProxy.logSink = nil
+            proxyLog.close()
+            try? fm.removeItem(atPath: o.outputDir + "/proxy.log")
+            try? fm.copyItem(atPath: work + "/proxy.log", toPath: o.outputDir + "/proxy.log")
+        }
 
         // 1. Alpine netboot, cached.
         let kernel = o.cacheDir + "/alpine-vmlinuz-\(alpineArch)"
@@ -262,6 +290,14 @@ public enum InterimBake {
         let port: DgramPort, peer: Int32
         do { (port, peer) = try DgramPort.pair(name: "bake") } catch { sw.stop(); await passt.close(); throw error }
         sw.attach(port, mac: c.macAddress!)
+        if proxy.port != 0 {
+            let egress = sw.egress
+            let service = SwitchInterceptor(service: { fd, guest in proxy.serveDiverted(fd, peer: guest) },
+                                            guestMTU: o.mtu) { portID, ip in
+                egress.inject(MAC(raw: UInt64(truncatingIfNeeded: portID)), ip)
+            }
+            egress.setGatewayService(port: proxy.port, service)
+        }
         c.network = .datagram(peerFD: peer)
         defer { sw.detach(mac: c.macAddress!); port.close(); sw.stop() }
         // The serial console: Firecracker's stdin and stdout, as pipes.
@@ -416,7 +452,9 @@ public enum InterimBake {
                 progress("Your customize script runs after the recommended packages (log: \(log))")
             }
             postinstallStarts()
-            con.send("sh /tmp/setup/postinstall.sh")
+            // The repository base (the proxy) too, as macOS's runProvisioner
+            // passes it to postinstall.sh.
+            con.send("ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/postinstall.sh")
             // A customize script compiling a toolchain can take a while
             // (macOS: 90 minutes for the phase with one, else 20).
             let timeout = o.customizeScript == nil ? o.postinstallTimeout : max(o.postinstallTimeout, .seconds(90 * 60))
@@ -879,5 +917,29 @@ final class CustomizeLog: Sendable {
     // @port-skip linux-only: see CustomizeLog
     func close() {
         handle.withLockedValue { try? $0?.close(); $0 = nil }
+    }
+}
+
+/// The package proxy's log lines, appended to a file (the proxy calls in
+/// from its worker threads).
+// @port-skip linux-only: the Linux bake's proxy log (macOS's goes to stderr)
+final class ProxyLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handle: FileHandle?
+
+    // @port-skip linux-only: the Linux bake's proxy log
+    init(path: String) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+        handle = FileHandle(forWritingAtPath: path)
+    }
+
+    // @port-skip linux-only: the Linux bake's proxy log
+    func append(_ line: String) {
+        lock.withLock { handle?.write(Data((line + "\n").utf8)) }
+    }
+
+    // @port-skip linux-only: the Linux bake's proxy log
+    func close() {
+        lock.withLock { try? handle?.close(); handle = nil }
     }
 }

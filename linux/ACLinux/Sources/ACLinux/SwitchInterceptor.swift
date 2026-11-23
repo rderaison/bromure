@@ -16,7 +16,11 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         let key: UtunPacket.FlowKey
     }
 
-    private let proxy: MitmProxy
+    private let proxy: MitmProxy?
+    /// Instead of the MiTM: each new flow's application end, with the
+    /// guest's address (host order), goes here (a gateway service such as
+    /// the bake's package proxy). It owns and closes the fd.
+    private let service: (@Sendable (_ appFD: Int32, _ guestIP: UInt32) -> Void)?
     /// Hands a reply packet (IP header onward) to the VM on `portID`.
     private let inject: @Sendable (_ portID: Int, _ ipPacket: [UInt8]) -> Void
     /// Emitted-segment MSS: the guest NIC MTU − IP(20) − TCP(20).
@@ -54,6 +58,24 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
     // @port SwitchMitmForwarder.init(engine: MitmEngine, switch: VMNetSwitch, guestMTU: Int) h=ac67de5df85baa30 @da668bda
     init(proxy: MitmProxy, guestMTU: Int, inject: @escaping @Sendable (_ portID: Int, _ ipPacket: [UInt8]) -> Void) {
         self.proxy = proxy
+        self.service = nil
+        self.inject = inject
+        self.mss = max(536, guestMTU - 40)
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now() + 5, repeating: 5)
+        t.setEventHandler { [weak self] in self?.sweepHalfOpen() }
+        sweeper = t
+        t.resume()
+    }
+
+    /// Flows to a service the host runs for its guests at the gateway (the
+    /// bake's package proxy, AlpinePackageProxy.serveDiverted): each flow's
+    /// application end goes to `service` instead of the MiTM.
+    // @port-skip linux-only: the Linux switch's gateway services (macOS's guests reach a host listener through vmnet)
+    init(service: @escaping @Sendable (_ appFD: Int32, _ guestIP: UInt32) -> Void, guestMTU: Int,
+         inject: @escaping @Sendable (_ portID: Int, _ ipPacket: [UInt8]) -> Void) {
+        self.proxy = nil
+        self.service = service
         self.inject = inject
         self.mss = max(536, guestMTU - 40)
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
@@ -206,11 +228,15 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         // credentials): spliced raw instead, to the address the guest chose.
         if let test = handOffForTesting {
             test(endB)
-        } else if let pid = profileID {
+        } else if let service {
+            service(endB, seg.srcIP)
+        } else if let proxy, let pid = profileID {
             proxy.acceptTransparentFlow(appFD: endB, profileID: pid, destIP: destIP, destPort: destPort,
                                         srcPort: Int(seg.srcPort))
-        } else {
+        } else if let proxy {
             proxy.spliceRaw(appFD: endB, destIP: destIP, destPort: destPort)
+        } else {
+            _ = Glibc.close(endB)
         }
         flow.start()
     }
