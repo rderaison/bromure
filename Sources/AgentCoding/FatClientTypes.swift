@@ -52,14 +52,19 @@ enum FatClientLog {
 ///     --predicate 'subsystem == "io.bromure.fatclient"'
 /// (or the same predicate in Console.app). Emitted at `.notice` so it shows
 /// without a `--level` flag and is persisted to the log store.
-/// (Apple platforms; a no-op elsewhere.)
+/// (Apple platforms. On Linux, stderr, which the server's systemd units
+/// keep in the journal: `journalctl -u bromure-ac@<user>`. Not twice when
+/// BROMURE_FATCLIENT_LOG already sends it there.)
 private enum FatClientSystemLog {
     #if canImport(os)
     private static let logger = Logger(subsystem: "io.bromure.fatclient", category: "trace")
     static func notice(_ text: String) { logger.notice("\(text, privacy: .public)") }
     #else
-    // @port-skip linux-only: no unified logging off Apple platforms
-    static func notice(_ text: String) {}
+    // @port-skip linux-only: the journal (stderr) stands in for unified logging
+    static func notice(_ text: String) {
+        guard !FatClientLog.enabled else { return }
+        FileHandle.standardError.write(Data("[fatclient] \(text)\n".utf8))
+    }
     #endif
 }
 
