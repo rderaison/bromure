@@ -144,7 +144,7 @@ extension Daemon {
         do {
             let code = try EnrollmentCodes.create(lifetime: .seconds(minutes * 60))
             return ControlResponse(200, ["code": .string(code), "minutes": .number(Double(minutes)), "user": .string(NSUserName())])
-        } catch { return .error(500, "\(error)") }
+        } catch { return .error(500, readableError(error)) }
     }
 
     // MARK: the multi-user gateway's routes (it does auth and bytes; this
@@ -281,14 +281,14 @@ extension Daemon {
             guard s.passwordAuth || s.pubkeyAuth else { return .error(400, "Enable at least one of password / public-key auth.") }
             s.enabled = enabled
         }
-        do { try s.save(remoteSettingsPath) } catch { return .error(500, "\(error)") }
+        do { try s.save(remoteSettingsPath) } catch { return .error(500, readableError(error)) }
         LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
         let cfg = s.serverConfig, enabled = s.enabled
         do {
             try await MainActor.run {
                 if enabled { try RemoteAccessServer.shared.start(cfg) } else { RemoteAccessServer.shared.stop() }
             }
-        } catch { return .error(400, "\(error)") }
+        } catch { return .error(400, readableError(error)) }
         // The broker follows the front door (and a port change).
         await refreshP2PServing()
         return await remoteStatus()
@@ -305,7 +305,7 @@ extension Daemon {
                 return RemoteAccessServer.shared.listAuthorizedKeys().last?.fingerprint ?? "ok"
             }
             return ControlResponse(200, ["ok": true, "fingerprint": .string(fp)])
-        } catch { return .error(400, "\(error)") }
+        } catch { return .error(400, readableError(error)) }
     }
 
     /// `DELETE /remote/keys/{fingerprint|comment}`.
@@ -315,7 +315,7 @@ extension Daemon {
         do {
             try await MainActor.run { try RemoteAccessServer.shared.removeAuthorizedKey(selector) }
             return ControlResponse(200, ["ok": true])
-        } catch { return .error(400, "\(error)") }
+        } catch { return .error(400, readableError(error)) }
     }
 
     /// A fat client's `browser-mcp` channel for VM `vm` (its id, any case):

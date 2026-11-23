@@ -152,6 +152,32 @@ public struct DaemonConfig: Sendable {
     // @port-skip linux-only: Linux daemon configuration
     public var controlSocketPath: String { controlSocketOverride ?? runtimeDir + "/control.sock" }
 
+    /// Where a client (the CLI, `mcp`) finds this user's daemon:
+    /// BROMURE_AC_CONTROL_SOCKET; else a daemon of its own
+    /// (<runtime>/control.sock); else, on a multi-user server, the user's
+    /// socket unit (/run/bromure-ac/sock/<user>.sock: connecting starts the
+    /// daemon). A login shell there has no BROMURE_AC_CONTROL_SOCKET.
+    // @port-skip linux-only: Linux daemon layout
+    public var clientSocketPath: String {
+        Self.clientSocketPath(override: controlSocketOverride, own: runtimeDir + "/control.sock",
+                              multiUser: Self.multiUserSocketPath(), exists: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    // @port-skip linux-only: see clientSocketPath
+    static func clientSocketPath(override: String?, own: String, multiUser: String?, exists: (String) -> Bool) -> String {
+        if let override { return override }
+        if exists(own) { return own }
+        if let multiUser, exists(multiUser) { return multiUser }
+        return own
+    }
+
+    /// This user's socket on a multi-user server (whether or not it exists).
+    // @port-skip linux-only: Linux daemon layout
+    public static func multiUserSocketPath(uid: uid_t = getuid()) -> String? {
+        guard let pw = getpwuid(uid) else { return nil }
+        return MultiUserAdmin.socketDir + "/" + String(cString: pw.pointee.pw_name) + ".sock"
+    }
+
     /// Who may use the control socket: its owner, root, and the gateway.
     // @port-skip linux-only: control socket peer policy
     public var controlPeers: Set<uid_t> {
@@ -732,6 +758,7 @@ public actor Daemon {
         case ("POST", "/remote/code"): return remoteCode(req.body)
         case ("GET", "/remote/authorized-keys"): return await remoteAuthorizedKeys()
         case ("POST", "/remote/code/check"): return remoteCodeCheck(req.body)
+        case ("GET", "/image"): return imageInfo()
         case ("GET", "/account"): return await accountStatus()
         case ("POST", "/account/sign-in"): return await accountSignIn(req.body)
         case ("POST", "/account/sign-out"): return await accountSignOut()
@@ -1205,7 +1232,7 @@ public actor Daemon {
         } catch {
             CIDAllocator.shared.release(cid)
             try? registry.remove(id: id)
-            if let refusal = Self.launchRefusalResponse(error) { return refusal }
+            if let refusal = launchRefusal(error) { return refusal }
             return .error(500, "Failed to create VM: \(error)")
         }
     }
@@ -1603,10 +1630,10 @@ public actor Daemon {
                 var s = registry.find(rec.id) ?? rec
                 s.state = .suspended
                 try? registry.upsert(s)
-                if let refusal = Self.launchRefusalResponse(error) { return refusal }
+                if let refusal = launchRefusal(error) { return refusal }
                 return .error(500, "Resume failed (still suspended; resume again, or start it fresh with stop then start): \(error)")
             }
-            if let refusal = Self.launchRefusalResponse(error) { return refusal }
+            if let refusal = launchRefusal(error) { return refusal }
             return .error(500, "Start failed: \(error)")
         }
     }

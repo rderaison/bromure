@@ -24,7 +24,33 @@ struct BromureAC: AsyncParsableCommand {
         // Hidden verification hooks, before parsing (macOS's main too).
         if HiddenHooks.run(Array(CommandLine.arguments.dropFirst())) { return }
         CLICommandsEntry.workspacesGroup = Workspaces.self
-        await main(nil)
+        await dispatch(Array(CommandLine.arguments.dropFirst()))
+    }
+
+    /// AsyncParsableCommand.main, but a ValidationError a command throws
+    /// while it runs (the shared commands report a daemon's refusal that
+    /// way) is a failure, not a usage mistake: `Error: …` and exit 1, no
+    /// usage text. Parsing and validate() keep ArgumentParser's handling.
+    // @port-skip linux-only: CLI plumbing
+    static func dispatch(_ arguments: [String]) async {
+        var command: ParsableCommand
+        do {
+            command = try parseAsRoot(arguments)
+        } catch {
+            exit(withError: error)
+        }
+        do {
+            if var async = command as? AsyncParsableCommand {
+                try await async.run()
+            } else {
+                try command.run()
+            }
+        } catch let e as ValidationError {
+            FileHandle.standardError.write(Data("Error: \(e.message)\n".utf8))
+            Foundation.exit(1)
+        } catch {
+            exit(withError: error)
+        }
     }
 }
 
@@ -181,11 +207,29 @@ struct Mcp: ParsableCommand {
 
 // @port-skip linux-only: CLI plumbing
 func client() throws -> ControlClient {
-    let c = ControlClient(socketPath: DaemonConfig.fromEnvironment().controlSocketPath)
-    guard c.isAgentRunning() else {
-        throw ValidationError("No bromure-ac daemon running (start it: systemctl --user start bromure-ac, or bromure-ac daemon).")
+    let config = DaemonConfig.fromEnvironment()
+    let path = config.clientSocketPath
+    let c = ControlClient(socketPath: path)
+    if c.isAgentRunning() { return c }
+    // Why not, in the words of where it was looked for.
+    let user = getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) } ?? "\(getuid())"
+    if config.controlSocketOverride == nil, path != config.controlSocketPath {
+        throw CLIError("your daemon (bromure-ac@\(user)) didn't answer on \(path): `systemctl status bromure-ac@\(user)` shows why.")
     }
-    return c
+    if config.controlSocketOverride == nil, FileManager.default.fileExists(atPath: MultiUserAdmin.socketDir) {
+        throw CLIError("you aren't a Bromure user on this server (there's no \(DaemonConfig.multiUserSocketPath() ?? MultiUserAdmin.socketDir)): "
+            + "an administrator adds you with `sudo bromure-ac admin add --existing \(user)`.")
+    }
+    throw CLIError("no bromure-ac daemon running at \(path) (start it: systemctl --user start bromure-ac, or bromure-ac daemon).")
+}
+
+/// A command that couldn't do its work (not a usage mistake): printed as
+/// `Error: …`, exit 1, without the usage text a ValidationError brings.
+// @port-skip linux-only: CLI plumbing
+struct CLIError: Error, CustomStringConvertible {
+    let description: String
+    // @port-skip linux-only: CLI plumbing
+    init(_ message: String) { description = message }
 }
 
 // @port-skip linux-only: CLI plumbing
@@ -420,21 +464,35 @@ struct Image: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show information about the base image (version, size, path).")
         // @port Info.run() h=a184410d64f78a25 @d3ebbda2
         func run() async throws {
-            let dir = DaemonConfig.fromEnvironment().imageDir
-            let disk = dir + "/base.img"
-            var st = stat()
-            guard stat(disk, &st) == 0 else {
-                print("No base image yet. Install it with `bromure-ac image install`.")
+            func human(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+            // The daemon's image (a multi-user server's is shared, not in
+            // this shell's environment); with no daemon, this environment's.
+            var info: JSONValue
+            if let c = try? client(), let r = try? c.request("GET", "/image"), r.status == 200 {
+                info = r.json
+            } else {
+                let dir = DaemonConfig.fromEnvironment().imageDir
+                var st = stat()
+                info = .object(["dir": .string(dir), "present": .bool(stat(dir + "/base.img", &st) == 0)])
+                if info["present"] == .bool(true) {
+                    info = .object(["dir": .string(dir), "present": true, "path": .string(dir + "/base.img"),
+                                    "size": .number(Double(st.st_size)), "onDisk": .number(Double(st.st_blocks) * 512),
+                                    "version": (try? String(contentsOfFile: dir + "/base.version", encoding: .utf8))
+                                        .map { .string($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? .null])
+                }
+            }
+            guard info["present"] == .bool(true) else {
+                print(info["multiUser"] == .bool(true)
+                      ? "No base image yet. An administrator installs it with `sudo bromure-image-install`."
+                      : "No base image yet. Install it with `bromure-ac image install`.")
                 return
             }
-            let version = (try? String(contentsOfFile: dir + "/base.version", encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            func human(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+            func n(_ k: String) -> Int64 { if case .number(let v)? = info[k] { return Int64(v) }; return 0 }
             print("Base image")
-            print("  version:  \(version)")
-            print("  size:     \(human(Int64(st.st_size))) (virtual)")
-            print("  on disk:  \(human(Int64(st.st_blocks) * 512))")
-            print("  path:     \(disk)")
+            print("  version:  \(info["version"]?.stringValue ?? "unknown")")
+            print("  size:     \(human(n("size"))) (virtual)")
+            print("  on disk:  \(human(n("onDisk")))")
+            print("  path:     \(info["path"]?.stringValue ?? "?")")
         }
     }
 
@@ -584,7 +642,7 @@ struct Account: AsyncParsableCommand {
     // @port-skip linux-only: CLI plumbing
     static func show(_ j: JSONValue) {
         guard j["signedIn"] == .bool(true) else {
-            print("Not signed in. `bromure-ac account sign-in` with a code from bromure.io.")
+            print("Not signed in. Sign in with `bromure-ac account sign-in` and a code from \(AccountEnrollPage.url())")
             return
         }
         print("signed in: \(j["org"]?.stringValue ?? "bromure.io")   device: \(j["deviceId"]?.stringValue ?? "?")   api: \(j["apiBase"]?.stringValue ?? "?")")
@@ -605,19 +663,33 @@ struct Account: AsyncParsableCommand {
         func run() async throws {
             let r = try client().request("GET", "/account")
             try check(r, "status")
-            if json { print(r.json) } else { Account.show(r.json) }
+            if json { print(r.json.jsonText) } else { Account.show(r.json) }
         }
     }
 
     struct SignIn: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "sign-in",
-            abstract: "Sign this server in with the enrollment code bromure.io shows (a bromure://enroll link works too).",
-            discussion: "The code is read from the terminal without echo (or from stdin), so it stays out of your shell history.")
+            abstract: "Sign this server in to your bromure.io account with a one-time code.",
+            discussion: """
+                Get the code at https://bromure.io/app/enroll?capability=server&os=linux (sign in there, \
+                then Authorize & Show code); it works once, within 10 minutes. A bromure://enroll link works too. \
+                The code is read from the terminal without echo (or from stdin), so it stays out of your shell history.
+                """)
         // @port-skip linux-only: CLI
         func run() async throws {
             let tty = isatty(STDIN_FILENO) == 1
-            if tty { FileHandle.standardError.write(Data("Enrollment code from bromure.io: ".utf8)) }
+            if tty {
+                FileHandle.standardError.write(Data("""
+                    To sign this server in, open this page in a browser (on any machine) and sign in to bromure.io:
+
+                      \(AccountEnrollPage.url())
+
+                    Choose "Authorize & Show code", then paste the code here (it works once, within 10 minutes).
+
+                    Code: 
+                    """.utf8))
+            }
             guard let link = Account.readSecretLine(echo: !tty), !link.isEmpty else { throw ValidationError("No code given.") }
             if tty { FileHandle.standardError.write(Data("\n".utf8)) }
             let r = try client().request("POST", "/account/sign-in", body: ["link": .string(link)])
@@ -678,7 +750,7 @@ struct Cloud: AsyncParsableCommand {
         func run() async throws {
             let r = try client().request("GET", "/cloud")
             try check(r, "status")
-            if json { print(r.json); return }
+            if json { print(r.json.jsonText); return }
             if r.json["vault"]?.stringValue == "file-fallback" {
                 FileHandle.standardError.write(Data("note: secrets are in the vault's file fallback (its key sits beside them; no systemd-creds sealing)\n".utf8))
             }
@@ -768,7 +840,7 @@ struct Remote: AsyncParsableCommand {
         func run() async throws {
             let r = try client().request("GET", "/remote")
             try check(r, "status")
-            if json { print(r.json) } else { Remote.show(r.json) }
+            if json { print(r.json.jsonText) } else { Remote.show(r.json) }
         }
     }
 
@@ -819,18 +891,23 @@ struct Remote: AsyncParsableCommand {
 
     struct AddKey: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "add-key", abstract: "Authorize an OpenSSH public key.")
-        @Argument(help: "The public key line (ssh-ed25519 AAAA… comment).") var key: String
+        @Argument(help: "The public key line (ssh-ed25519 AAAA… comment), or a .pub file.") var key: String
         // @port-skip linux-only: CLI
         func run() async throws {
-            let r = try client().request("POST", "/remote/keys", body: ["key": .string(key)])
+            var line = key
+            if !key.hasPrefix("ssh-"), !key.hasPrefix("ecdsa-"), FileManager.default.fileExists(atPath: key) {
+                guard let text = try? String(contentsOfFile: key, encoding: .utf8) else { throw CLIError("can't read \(key)") }
+                line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let r = try client().request("POST", "/remote/keys", body: ["key": .string(line)])
             try check(r, "add-key")
             print("Authorized \(r.json["fingerprint"]?.stringValue ?? "key").")
         }
     }
 
     struct RmKey: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(commandName: "rm-key", abstract: "Revoke a key (by fingerprint or comment).")
-        @Argument(help: "SHA256:… fingerprint, or the key's comment.") var key: String
+        static let configuration = CommandConfiguration(commandName: "rm-key", abstract: "Revoke a key (by its number in `remote key ls`, or its fingerprint).")
+        @Argument(help: "Its number in `remote key ls`, or its SHA256:… fingerprint (or a part only it has).") var key: String
         // @port-skip linux-only: CLI
         func run() async throws {
             let r = try client().request("DELETE", "/remote/keys/\(ControlClient.encodeSegment(key))")

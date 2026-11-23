@@ -161,3 +161,26 @@ extension Daemon {
     /// The profile id of a row about the base image: none of a workspace's.
     static let imageRowProfileID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 }
+
+extension Daemon {
+    /// `GET /image`: the base image this daemon boots (its own config's,
+    /// not the CLI's environment: a multi-user server's is shared).
+    // @port-skip linux-only: Linux image layout (macOS's `info` reads the app's storage)
+    func imageInfo() -> ControlResponse {
+        let dir = config.imageDir
+        let disk = dir + "/base.img"
+        var o: [String: JSONValue] = ["dir": .string(dir), "multiUser": .bool(config.multiUser)]
+        var st = stat()
+        guard stat(disk, &st) == 0 else {
+            o["present"] = false
+            return ControlResponse(200, .object(o))
+        }
+        o["present"] = true
+        o["path"] = .string(disk)
+        o["size"] = .number(Double(st.st_size))
+        o["onDisk"] = .number(Double(st.st_blocks) * 512)
+        if let v = (try? String(contentsOfFile: dir + "/base.version", encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty { o["version"] = .string(v) }
+        return ControlResponse(200, .object(o))
+    }
+}

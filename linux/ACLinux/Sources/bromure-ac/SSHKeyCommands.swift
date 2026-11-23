@@ -39,7 +39,7 @@ struct SSHKey: AsyncParsableCommand {
         func run() async throws {
             let r = try client().request("GET", SSHKey.path(workspace))
             try check(r, "ssh-key ls")
-            if json { print(r.json) } else { SSHKey.show(r.json) }
+            if json { print(r.json.jsonText) } else { SSHKey.show(r.json) }
         }
     }
 

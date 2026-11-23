@@ -26,7 +26,14 @@ expect() {   # expect <label> <rc> <grep-regex> <cmd...>: exit status and output
   if [ "$rc" = "$want" ] && printf '%s' "$out" | grep -Eq "$re"; then ok "$label"
   else bad "$label: rc $rc (want $want): $(printf "%s" "$out" | tail -6)"; fi
 }
-expect "ls with no workspaces" 0 "No workspaces" workspaces ls
+# A command that fails while it runs: `Error: …`, exit 1, no usage text.
+expect_failure() {   # expect_failure <label> <grep-regex> <cmd...>
+  local label=$1 re=$2; shift 2
+  local out rc; out=$(run "$@" 2>&1); rc=$?
+  if [ "$rc" = 1 ] && printf '%s' "$out" | grep -Eq "$re" && ! printf '%s' "$out" | grep -q '^Usage:'; then ok "$label"
+  else bad "$label: rc $rc (want 1, no usage): $(printf "%s" "$out" | tail -6)"; fi
+}
+expect "ls (only the Default workspace)" 0 "Default workspace" workspaces ls
 expect "create" 0 "Created workspace cli-e2e" workspaces create --name cli-e2e --tool claude --auth token --color teal
 expect "ls lists it, off" 0 "cli-e2e +claude +token +off" workspaces ls
 expect "describe" 0 "cli-e2e" workspaces describe cli-e2e
@@ -41,9 +48,9 @@ if curl -s --max-time 5 --unix-socket "$XDG_RUNTIME_DIR/bromure-ac/control.sock"
   ok "edit in \$VISUAL saved"; else bad "edit: $out"; fi
 [ -z "$(ls -A "$XDG_RUNTIME_DIR/bromure-ac/editor" 2>/dev/null)" ] && ok "the edit's file is gone" || bad "edit file left behind"
 expect "ssh-keygen prints a public key" 0 "ssh-ed25519 " workspaces ssh-keygen cli-e2e
-expect "ports: not running" 64 "isn't running" workspaces ports cli-e2e
-expect "reboot: not running is an error" 64 "(not running|isn.t running|Couldn.t reboot)" workspaces reboot cli-e2e
-expect "fsck without a disk" 64 "No system disk image for .cli-e2e." workspaces fsck cli-e2e
+expect_failure "ports: not running" "isn't running" workspaces ports cli-e2e
+expect_failure "reboot: not running is an error" "(not running|isn.t running|Couldn.t reboot)" workspaces reboot cli-e2e
+expect_failure "fsck without a disk" "No system disk image for .cli-e2e." workspaces fsck cli-e2e
 expect "trace ls" 0 "^No trace records\\. \\(Tracing is per-workspace" trace ls
 expect "trace summary" 0 "^No trace records\\.$" trace summary
 ssh-keygen -q -t ed25519 -N '' -C cli-e2e-key -f "$W/key"
@@ -52,7 +59,9 @@ expect "remote key ls" 0 "^\\[1\\] SHA256:.* cli-e2e-key" remote key ls
 expect "remote status (macOS's lines)" 0 "Remote access: (ENABLED|disabled)" remote status
 expect "remote key rm 1" 0 "^Removed\\.$" remote key rm 1
 expect "rm --force" 0 "(Deleted|Removed) .*cli-e2e" workspaces rm cli-e2e --force
-expect "ls: gone" 0 "No workspaces" workspaces ls
+out=$(run workspaces ls 2>&1)
+if printf '%s' "$out" | grep -q 'Default workspace' && ! printf '%s' "$out" | grep -q 'cli-e2e'; then ok "ls: gone"; else bad "ls: gone: $out"; fi
+expect "usage mistakes still show usage" 64 "^Usage: bromure-ac account status" account status --bogus
 # A running VM's details: /profiles names it in uppercase, /vms in lowercase
 # (the Linux daemon's ids); `ls` and `describe` must still pair them.
 FAKE=$W/fake.sock

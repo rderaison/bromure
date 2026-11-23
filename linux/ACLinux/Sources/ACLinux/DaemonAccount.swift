@@ -222,3 +222,19 @@ extension Daemon {
         return await accountStatus()
     }
 }
+
+/// Where a person gets this server's enrollment code: bromure.io's page for
+/// a Linux machine (capability=server, os=linux). Signed in there, they
+/// authorize it and copy the one-time code (10 minutes, one use) into
+/// `account sign-in`. No `state`: the code is pasted, not handed back.
+// @port-skip linux-only: macOS opens /app/enroll in the browser and takes the bromure:// handoff
+public enum AccountEnrollPage {
+    // @port-skip linux-only: see AccountEnrollPage
+    public static func url(host: String = ProcessInfo.processInfo.hostName) -> String {
+        var c = URLComponents(string: "https://bromure.io/app/enroll")!
+        c.queryItems = [URLQueryItem(name: "capability", value: "server"), URLQueryItem(name: "os", value: "linux")]
+        let name = String(host.prefix(64))
+        if !name.isEmpty { c.queryItems?.append(URLQueryItem(name: "host", value: name)) }
+        return c.url?.absoluteString ?? "https://bromure.io/app/enroll?capability=server&os=linux"
+    }
+}

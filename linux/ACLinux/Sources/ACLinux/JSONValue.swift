@@ -122,3 +122,22 @@ extension JSONValue {
         }
     }
 }
+
+extension JSONValue {
+    /// The document as JSON text (pretty, keys sorted): what a CLI's --json prints.
+    // @port-skip linux-only: CLI JSON output
+    public var jsonText: String {
+        guard let data = try? JSONSerialization.data(withJSONObject: foundationObject,
+                                                     options: [.prettyPrinted, .sortedKeys, .fragmentsAllowed]),
+              let s = String(data: data, encoding: .utf8) else { return "null" }
+        return s
+    }
+}
+
+/// An error as a person reads it: a LocalizedError's description (the
+/// shared code's errors carry one), not the enum case `"\(error)"` gives.
+// @port-skip linux-only: daemon error plumbing
+public func readableError(_ error: Error) -> String {
+    if let l = error as? LocalizedError, let d = l.errorDescription { return d }
+    return "\(error)"
+}

@@ -278,6 +278,27 @@ extension Daemon {
         return SharedFolderHidden(folders: hidden.map(\.0), reason: first.1)
     }
 
+    /// launchRefusalResponse, and first: no base image at all (a start
+    /// otherwise fails on its first missing file, in Foundation's words).
+    // @port-skip linux-only: Linux image layout
+    func launchRefusal(_ error: Error) -> ControlResponse? {
+        if let r = Self.launchRefusalResponse(error) { return r }
+        guard Self.isFileMissing(error), !FileManager.default.fileExists(atPath: config.imageDir + "/base.img") else { return nil }
+        return .error(409, config.multiUser
+            ? "No base image on this server yet: an administrator installs it with `sudo bromure-image-install`."
+            : "No base image yet: install it with `bromure-ac image install`.")
+    }
+
+    /// A file that isn't there (Foundation's or the system's ENOENT).
+    // @port-skip linux-only: see launchRefusal
+    static func isFileMissing(_ error: Error) -> Bool {
+        if let c = error as? CocoaError, [.fileNoSuchFile, .fileReadNoSuchFile].contains(c.code) { return true }
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOENT) { return true }
+        if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError, u.domain == NSPOSIXErrorDomain, u.code == Int(ENOENT) { return true }
+        return false
+    }
+
     /// A launch refused for a reason the caller is told (409), not a bare
     /// "Start failed": a protection this server can't enforce, a folder it
     /// can't see.

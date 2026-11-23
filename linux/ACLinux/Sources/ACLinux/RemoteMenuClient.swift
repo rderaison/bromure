@@ -12,7 +12,7 @@ struct RemoteMenuClient {
 
     // @port-skip linux-only: the socket from this daemon's config
     init(socketPath: String? = nil) {
-        control = ControlClient(socketPath: socketPath ?? DaemonConfig.fromEnvironment().controlSocketPath)
+        control = ControlClient(socketPath: socketPath ?? DaemonConfig.fromEnvironment().clientSocketPath)
     }
 
     // @port ControlClient.request(_: String, _: String, body: [String:Any]?, recvTimeoutSeconds: Int, extraHeaders: [(String,String)]) h=31fec0f632bad9d4 @1b984d09

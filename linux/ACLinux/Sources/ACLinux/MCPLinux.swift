@@ -11,7 +11,7 @@ extension MCP {
     /// still works.
     // partial: this user's control socket (macOS: the app's localhost port)
     // @port MCP.static var defaultAPIURL h=27956c75f269c254 @86956704
-    static var defaultAPIURL: String { "unix:" + DaemonConfig.fromEnvironment().controlSocketPath }
+    static var defaultAPIURL: String { "unix:" + DaemonConfig.fromEnvironment().clientSocketPath }
 
     /// Nothing to stop: run() polls its flag on the main run loop.
     // partial: corelibs exposes no CFRunLoopStop (run() polls its flag)

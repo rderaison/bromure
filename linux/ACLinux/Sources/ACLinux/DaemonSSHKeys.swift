@@ -570,7 +570,7 @@ extension Daemon {
             do {
                 let keys = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value
                 return ControlResponse(200, ["keys": .array(keys.map { .object(["label": .string($0.label), "publicKey": .string($0.publicKeyText)]) })])
-            } catch { return .error(400, "\(error)") }
+            } catch { return .error(400, readableError(error)) }
         case ("POST", ""):
             let approve = body["requireApproval"] == .bool(true)
             if let socket = body["hostAgentSocket"]?.stringValue {
@@ -578,7 +578,7 @@ extension Daemon {
                 let want = body["publicKey"]?.stringValue.flatMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0) }
                 let found: [ImportedSSHKey]
                 do { found = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value } catch {
-                    return .error(400, "\(error)")
+                    return .error(400, readableError(error))
                 }
                 let have = Set(p.importedSSHKeys.compactMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
                 let picked = found.filter { k in

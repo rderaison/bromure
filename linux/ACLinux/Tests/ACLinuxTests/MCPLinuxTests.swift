@@ -19,7 +19,7 @@ struct MCPLinuxTests {
         #expect(rows.first?["profileName"] as? String == "w")
         let none = ACMCPServerImpl.rawHTTP(base: "unix:" + dir + "/nothing.sock", method: "GET", path: "/sessions", bodyData: nil)
         #expect((none["error"] as? String)?.contains("No bromure-ac daemon") == true)
-        #expect(MCP.defaultAPIURL.hasPrefix("unix:") && MCP.defaultAPIURL.hasSuffix("control.sock"))
+        #expect(MCP.defaultAPIURL == "unix:" + DaemonConfig.fromEnvironment().clientSocketPath)
     }
 
     @Test func profileSettingsAsMacOSs() {
