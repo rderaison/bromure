@@ -642,7 +642,7 @@ struct Account: AsyncParsableCommand {
     // @port-skip linux-only: CLI plumbing
     static func show(_ j: JSONValue) {
         guard j["signedIn"] == .bool(true) else {
-            print("Not signed in. Sign in with `bromure-ac account sign-in` and a code from \(AccountEnrollPage.url())")
+            print("Not signed in. Sign in with `bromure-ac account sign-in`.")
             return
         }
         print("signed in: \(j["org"]?.stringValue ?? "bromure.io")   device: \(j["deviceId"]?.stringValue ?? "?")   api: \(j["apiBase"]?.stringValue ?? "?")")
@@ -670,31 +670,84 @@ struct Account: AsyncParsableCommand {
     struct SignIn: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "sign-in",
-            abstract: "Sign this server in to your bromure.io account with a one-time code.",
+            abstract: "Sign this server in to your bromure.io account.",
             discussion: """
-                Get the code at https://bromure.io/app/enroll?capability=server&os=linux (sign in there, \
-                then Authorize & Show code); it works once, within 10 minutes. A bromure://enroll link works too. \
-                The code is read from the terminal without echo (or from stdin), so it stays out of your shell history.
+                On a terminal it shows a link: open it in any browser, signed in to bromure.io, and approve \
+                this server; the sign-in then finishes by itself. With --code (or a code on stdin) it takes a \
+                one-time code instead, from https://bromure.io/app/enroll?capability=server&os=linux \
+                (Authorize & Show code; it works once, within 10 minutes). A bromure://enroll link works too. \
+                A code is read without echo, so it stays out of your shell history.
                 """)
+        @Flag(help: "Paste a one-time code from bromure.io instead of approving a link.") var code = false
+        @Option(help: ArgumentHelp("The bromure.io API base.", visibility: .hidden)) var api = DeviceGrantClient.defaultAPIBase
+
         // @port-skip linux-only: CLI
         func run() async throws {
+            let c = try client()   // before anything is asked: a daemon to sign in
             let tty = isatty(STDIN_FILENO) == 1
+            var link: String?
+            if tty && !code {
+                link = try await approveByLink()
+            }
+            if link == nil { link = try Self.readCode(tty: tty) }
+            let r = try c.request("POST", "/account/sign-in", body: ["link": .string(link!)])
+            try check(r, "sign-in")
+            print("Signed in\(r.json["org"]?.stringValue.map { " to \($0)" } ?? ""). Your devices' keys sync now and every 3 minutes.")
+        }
+
+        /// The device grant: a link and a user code to approve on
+        /// bromure.io, polled until it hands over the enrollment code
+        /// (as a link the daemon redeems). nil when the service has no
+        /// device grants yet: the caller asks for a code.
+        // @port-skip linux-only: CLI
+        func approveByLink() async throws -> String? {
+            guard let grants = DeviceGrantClient(base: api) else { throw ValidationError("'\(api)' isn't an API base") }
+            let host = ProcessInfo.processInfo.hostName
+            let grant: DeviceGrant
+            do {
+                grant = try await grants.start(deviceName: host)
+            } catch DeviceGrantError.unavailable {
+                FileHandle.standardError.write(Data("(bromure.io can't approve a link yet: sign in with a code.)\n\n".utf8))
+                return nil
+            } catch let e as DeviceGrantError {
+                throw CLIError(e.description)
+            }
+            let minutes = max(1, grant.expiresIn / 60)
+            FileHandle.standardError.write(Data("""
+                To sign this server (\(host)) in, open this link in a browser on any machine, sign in to bromure.io, and approve it:
+
+                  \(grant.verificationURIComplete)
+
+                (Or go to \(grant.verificationURI) and enter the code \(grant.userCode).)
+
+                Waiting for approval (up to \(minutes) min; Ctrl-C to stop)…
+
+                """.utf8))
+            do {
+                let code = try await grants.waitForApproval(grant)
+                FileHandle.standardError.write(Data("Approved. Signing in…\n".utf8))
+                return grants.enrollLink(code: code)
+            } catch let e as DeviceGrantError {
+                throw CLIError(e.description)
+            }
+        }
+
+        /// A pasted code (or link), from the terminal without echo or from stdin.
+        // @port-skip linux-only: CLI
+        static func readCode(tty: Bool) throws -> String {
             if tty {
                 FileHandle.standardError.write(Data("""
-                    To sign this server in, open this page in a browser (on any machine) and sign in to bromure.io:
+                    Get a one-time code: open this page in a browser (on any machine), sign in to bromure.io, \
+                    and choose "Authorize & Show code":
 
                       \(AccountEnrollPage.url())
 
-                    Choose "Authorize & Show code", then paste the code here (it works once, within 10 minutes).
-
-                    Code: 
+                    Code (it works once, within 10 minutes): 
                     """.utf8))
             }
             guard let link = Account.readSecretLine(echo: !tty), !link.isEmpty else { throw ValidationError("No code given.") }
             if tty { FileHandle.standardError.write(Data("\n".utf8)) }
-            let r = try client().request("POST", "/account/sign-in", body: ["link": .string(link)])
-            try check(r, "sign-in")
-            print("Signed in\(r.json["org"]?.stringValue.map { " to \($0)" } ?? ""). Your devices' keys sync now and every 3 minutes.")
+            return link
         }
     }
 
