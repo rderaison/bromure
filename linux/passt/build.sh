@@ -17,6 +17,10 @@ set -euo pipefail
 
 TAG=2026_01_20.386b5f5
 COMMIT=386b5f5472b89769c025f5d5056348532a823b93
+# Our mirror first (upstream's own server answers 502 now and then), then
+# upstream. Either way the tag must be the pinned commit. When TAG moves,
+# push the new tag to the mirror: a mirror without it just falls through.
+MIRROR=https://github.com/rderaison/passt.git
 URL=https://passt.top/passt
 
 OUT=${1:-$HOME/.local/share/bromure-ac/bin}
@@ -30,21 +34,23 @@ die() { echo "build.sh: $*" >&2; exit 1; }
 command -v "$CC" >/dev/null || die "$CC not found"
 [ "$($CC -dumpmachine | cut -d- -f1)" = "$ARCH" ] || die "$CC builds for $($CC -dumpmachine), not $ARCH"
 
-# Upstream's git server fails now and then (an HTTP 502 in the middle of a
-# clone ended a package build): a few tries, further apart each time.
+# A few tries, further apart each time, each on the mirror then upstream.
 clone() {
-    local try
+    local try url
     for try in 1 2 3 4 5; do
-        git -c advice.detachedHead=false clone -q --branch "$TAG" --depth 1 "$URL" "$SRC" && return 0
+        for url in "$MIRROR" "$URL"; do
+            git -c advice.detachedHead=false clone -q --branch "$TAG" --depth 1 "$url" "$SRC" && return 0
+            echo "build.sh: cloning $url failed" >&2
+        done
         [ "$try" = 5 ] && return 1
-        echo "build.sh: cloning $URL failed (try $try of 5); again in $((try * 15)) s" >&2
+        echo "build.sh: no source yet (try $try of 5); again in $((try * 15)) s" >&2
         sleep $((try * 15))
     done
 }
 
 if [ ! -d "$SRC/.git" ]; then
     mkdir -p "$(dirname "$SRC")"
-    clone || die "couldn't clone $URL (5 tries)"
+    clone || die "couldn't clone $MIRROR or $URL (5 tries)"
 fi
 cd "$SRC"
 git fetch -q --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
