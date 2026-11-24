@@ -183,7 +183,7 @@ EOF
 # share (e.g. profile without a project folder) boot still completes.
 cat > /mnt/etc/fstab <<'EOF'
 LABEL=root     /               ext4     defaults,noatime  0  1
-LABEL=EFI      /boot/efi       vfat     umask=0077,nofail 0  2
+LABEL=EFI      /boot/efi       vfat     umask=0077,nofail,x-systemd.automount 0  2
 bromure-home   /home/ubuntu            virtiofs  nofail,defaults     0  0
 bromure-meta   /mnt/bromure-meta       virtiofs  nofail,ro,defaults  0  0
 bromure-outbox /mnt/bromure-outbox     virtiofs  nofail,defaults     0  0
@@ -820,12 +820,17 @@ EOB
 # byte-identical with bromure-agentd.py's _UNIT_CONTENT: the agent converges
 # an older unit to this exact text (the legacy .bash_profile bootstrap,
 # Profile.bashProfileContent, writes a unit that starts the agent directly,
-# for images that predate the launcher). DefaultDependencies=no: it starts as
-# soon as its share, the local file systems and /tmp's boot cleanup are
-# done, not behind basic.target and network.target (systemd-binfmt and
-# systemd-resolved, ~1 s); Conflicts/Before=shutdown.target keep it stopped
-# at shutdown. ConditionPathExists: a VM booted without the meta share
-# simply skips the unit.
+# for images that predate the launcher). It starts as soon as the meta share
+# is mounted (the mount unit below mounts it in the boot's first moments,
+# ahead of the fstab's ordering), at a raised priority, and waits itself for
+# the boot gate (bromure-boot-gate.service: local file systems mounted, /tmp
+# emptied) before doing anything. bromure-early.service does, as root and
+# meanwhile, what the boot needs root for (the NIC's MTU, the home disk's
+# mount in the plain case). These units and early-root.sh are byte-identical
+# with the agent's _GATE_UNIT_CONTENT, _META_MOUNT_UNIT_CONTENT,
+# _EARLY_UNIT_CONTENT and _EARLY_ROOT_CONTENT.
+# Conflicts/Before=shutdown.target keep it stopped at shutdown.
+# ConditionPathExists: a VM booted without the meta share simply skips it.
 # The launcher the unit starts: the agent from the meta share with its
 # bytecode cached on this disk (byte-identical with bromure-agentd.py's
 # _LAUNCHER_CONTENT, which the agent converges too), and the cache
@@ -869,11 +874,112 @@ del src, f
 exec(code, main.__dict__)
 EOP
 chmod 0644 /usr/local/lib/bromure/agentd-launch.py
+mkdir -p /etc/modules-load.d
+cat > /etc/modules-load.d/bromure.conf <<'EOL'
+# Managed by Bromure: the host channel (vsock) the guest agent connects through.
+vmw_vsock_virtio_transport
+EOL
+cat > /usr/local/lib/bromure/early-root.sh <<'EOE'
+#!/bin/sh
+# Managed by Bromure (bromure-agentd's _EARLY_ROOT_CONTENT, setup.sh): what a
+# boot needs root for, done once by systemd while the agent is still starting,
+# so the agent's own boot needs no sudo (each call ~20 ms this early).
+#   - the NIC's MTU, from the meta share (before the link comes up);
+#   - the home disk mounted, only in the plain case: ext4 mode, no virtiofs
+#     home attached, the disk labelled bromure-home, ext4, clean, its journal
+#     replayed. Anything else (blank, dirty, a migration) is the agent's,
+#     which formats, repairs and migrates as before.
+# What it found goes to /run/bromure-early-home for the agent.
+M=/mnt/bromure-meta
+NL='
+'
+mtu=1280
+if [ -r "$M/mtu" ] && read -r m < "$M/mtu"; then
+    case "$m" in ''|*[!0-9]*) ;; *) mtu=$m ;; esac
+fi
+for n in /sys/class/net/eth* /sys/class/net/en*; do
+    [ -e "$n/device" ] || continue
+    cur=; read -r cur < "$n/mtu" || true
+    [ "$cur" = "$mtu" ] || ip link set dev "${n##*/}" mtu "$mtu" || true
+    break
+done
+
+mode=; [ -r "$M/home.mode" ] && read -r mode < "$M/home.mode"
+[ "$mode" = ext4 ] || exit 0
+[ -d "$M/virtiofs-tags" ] && [ ! -e "$M/virtiofs-tags/bromure-home" ] || exit 0
+while read -r _ _ _ _ mp _; do
+    [ "$mp" = /home/ubuntu ] && exit 0
+done < /proc/self/mountinfo
+for b in /sys/block/*; do
+    d=${b##*/}
+    case "$d" in loop*|ram*|zram*|dm-*|sr*|nbd*|md*|fd*) continue ;; esac
+    part=; for p in "$b"/*/partition; do [ -e "$p" ] && part=1; done
+    [ -z "$part" ] || continue
+    info=$(blkid -p -o export "/dev/$d" 2>/dev/null) || continue
+    case "$NL$info$NL" in *"${NL}LABEL=bromure-home$NL"*) ;; *) continue ;; esac
+    case "$NL$info$NL" in *"${NL}TYPE=ext4$NL"*) ;; *) exit 0 ;; esac
+    fs=$(dumpe2fs -h "/dev/$d" 2>/dev/null | sed -n -e 's/^Filesystem state: */FS_STATE=/p' \
+        -e 's/^Filesystem features: */FS_FEATURES=/p' -e 's/^Block count: */FS_BLOCKS=/p' \
+        -e 's/^Block size: */FS_BLOCK_SIZE=/p')
+    case "$NL$fs$NL" in *"${NL}FS_STATE=clean$NL"*) ;; *) exit 0 ;; esac
+    case "$fs" in *needs_recovery*) exit 0 ;; esac
+    mount -o noatime "/dev/$d" /home/ubuntu || exit 0
+    sectors=0; read -r sectors < "$b/size" || true
+    {
+        echo "DEV=/dev/$d"
+        echo "$info"
+        echo "BLKID_RC=0"
+        echo "DEV_BYTES=$((sectors * 512))"
+        echo "$fs"
+    } > /run/bromure-early-home.tmp && mv -f /run/bromure-early-home.tmp /run/bromure-early-home
+    exit 0
+done
+exit 0
+EOE
+chmod 0755 /usr/local/lib/bromure/early-root.sh
+cat > /etc/systemd/system/bromure-early.service <<'EOY'
+[Unit]
+Description=Bromure early boot setup (NIC MTU, the home disk)
+DefaultDependencies=no
+After=mnt-bromure\x2dmeta.mount
+Before=bromure-boot-gate.service shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /usr/local/lib/bromure/early-root.sh
+EOY
+cat > /etc/systemd/system/bromure-boot-gate.service <<'EOG'
+[Unit]
+Description=Bromure boot gate (local file systems mounted, /tmp emptied)
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service bromure-early.service
+Conflicts=shutdown.target
+Before=shutdown.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/touch /run/bromure-boot-gate
+EOG
+cat > '/etc/systemd/system/mnt-bromure\x2dmeta.mount' <<'EOM'
+[Unit]
+Description=Bromure meta share (mounted early: the guest agent starts from it)
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+[Mount]
+What=bromure-meta
+Where=/mnt/bromure-meta
+Type=virtiofs
+Options=ro
+EOM
 cat > /etc/systemd/system/bromure-agentd.service <<'EOU'
 [Unit]
 Description=Bromure guest agent daemon
 DefaultDependencies=no
-After=mnt-bromure\x2dmeta.mount local-fs.target systemd-tmpfiles-setup.service systemd-journald.socket
+Wants=bromure-boot-gate.service bromure-early.service
+After=mnt-bromure\x2dmeta.mount systemd-journald.socket
 Conflicts=shutdown.target
 Before=shutdown.target
 StartLimitIntervalSec=0
@@ -881,6 +987,8 @@ ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
+Nice=-15
+Environment=BROMURE_AGENTD_EARLY=1
 ExecStart=/usr/bin/python3 -s /usr/local/lib/bromure/agentd-launch.py
 Restart=always
 RestartSec=1
@@ -890,6 +998,19 @@ TimeoutStopSec=5
 WantedBy=multi-user.target
 EOU
 systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
+
+# binfmt_misc mounted by sysinit.target, not on first access: crossed in the
+# middle of the boot, its automount held systemd-binfmt, networkd and
+# resolved for ~0.8 s about one boot in ten (bromure-agentd's
+# _BINFMT_MOUNT_WANT keeps older images in step).
+systemctl enable proc-sys-fs-binfmt_misc.mount >/dev/null 2>&1 || true
+
+# dockerd and containerd start when docker is first used (docker.socket),
+# not at every boot: a workspace that never runs a container doesn't pay
+# their memory and boot-time CPU. The agent starts dockerd after boot when a
+# container has a restart policy (task_docker_autostart).
+systemctl disable docker.service containerd.service >/dev/null 2>&1 || true
+systemctl enable docker.socket >/dev/null 2>&1 || true
 
 # System-wide xinitrc — startx falls back to this when ~/.xinitrc is
 # missing (which it always is here, since /home/ubuntu mounts empty from
