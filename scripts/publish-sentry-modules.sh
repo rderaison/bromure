@@ -9,6 +9,11 @@
 #   sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.ko.sig
 #       the module's own signature (Sparkle key, domain-separated statement)
 #
+# for arm64 (the out dir's manifest.json "arch"; what every shipped macOS
+# app reads). Another arch's modules (amd64: a Linux/KVM server's guests)
+# are a catalog of their own under sentry/<sourceHash>/<arch>/, the same
+# layout below it: kernel names are the same on both arches.
+#
 # Additive only: kernels already in the published catalog stay (a rebuilt
 # kernel gets a new sha-named object, never an overwrite), and nothing is ever
 # deleted — an app release in the field keeps finding every module its source
@@ -21,6 +26,8 @@
 # Env: DO_SPACES_KEY DO_SPACES_SECRET DO_SPACES_ENDPOINT DO_SPACES_REGION
 #      DO_SPACES_BUCKET DO_SPACES_PUBLIC_BASE SPARKLE_PRIVATE_KEY
 #      SENTRY_CATALOG_PUBLIC_KEY (default: the app's pinned SUPublicEDKey)
+#      SENTRY_EXPECT_ARCH (arm64|amd64) the arch the caller built: refuse an
+#      out dir whose manifest names another (Jenkinsfile.sentry sets it).
 #      DRY_RUN=1 builds + signs the catalog but uploads nothing.
 #      PRESIGNED=1 publishes the catalog.json + modules/*.ko.sig already in
 #      <out dir> (signed elsewhere by scripts/sign-sentry-modules.sh) after
@@ -43,16 +50,45 @@ LINK=$(find "$OUT" -type l -print -quit)
 json() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const v=process.argv[2].split(".").reduce((o,k)=>o?.[k],j);process.stdout.write(Array.isArray(v)?v.join(" "):String(v??""))' "$1" "$2"; }
 
 HASH=$(json "$OUT/manifest.json" sourceHash)
+ARCH=$(json "$OUT/manifest.json" arch)
+ARCH="${ARCH:-arm64}"
+case "$ARCH" in
+    arm64) PREFIX="sentry/$HASH/" ;;
+    amd64) PREFIX="sentry/$HASH/$ARCH/" ;;
+    *) echo "ERROR: unsupported arch '$ARCH' in $OUT/manifest.json"; exit 1 ;;
+esac
+# The manifest comes from the build container (amd64's from another agent), so
+# it doesn't get to pick the tree on its own: a missing or wrong "arch" would
+# sign its modules into another arch's catalog, and arm64's is the one every
+# Mac reads. The caller says which arch it built (SENTRY_EXPECT_ARCH; the
+# pipeline always does), and every module about to be signed must be an ELF
+# object for that arch.
+if [ -n "${SENTRY_EXPECT_ARCH:-}" ] && [ "$ARCH" != "$SENTRY_EXPECT_ARCH" ]; then
+    echo "ERROR: $OUT/manifest.json says arch '$ARCH'; this step publishes $SENTRY_EXPECT_ARCH"; exit 1
+fi
+node -e '
+const fs = require("fs");
+const want = { arm64: 183, amd64: 62 }[process.argv[1]];   // EM_AARCH64, EM_X86_64
+let bad = 0;
+for (const f of process.argv.slice(2)) {
+  const b = fs.readFileSync(f);
+  // \x7fELF, ELFCLASS64, little-endian, ET_REL (a .ko), e_machine
+  const ok = b.length >= 64 && b.readUInt32BE(0) === 0x7f454c46 && b[4] === 2 && b[5] === 1
+          && b.readUInt16LE(16) === 1 && b.readUInt16LE(18) === want;
+  if (!ok) { console.error(`ERROR: ${f} is not a 64-bit ${process.argv[1]} kernel module (ELF e_machine ${b.length >= 20 ? b.readUInt16LE(18) : "?"})`); bad = 1; }
+}
+process.exit(bad);' "$ARCH" $(find "$OUT/modules" -maxdepth 1 -type f -name '*.ko' 2>/dev/null)
 BUILT=$(json "$OUT/manifest.json" built)
 FAILED=$(json "$OUT/manifest.json" failed)
-echo "source $HASH — built: ${BUILT:-none}; failed: ${FAILED:-none}"
+echo "source $HASH ($ARCH) — built: ${BUILT:-none}; failed: ${FAILED:-none}"
 
 if [ -z "$BUILT" ]; then
     # Nothing new — unless the published catalog lost its module signatures
     # (a bucket write can strip them without breaking the catalog signature,
     # and apps then refuse the catalog): re-sign and republish it.
     if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --verify "$OUT/previous-catalog.json" \
-            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" >/dev/null 2>&1; then
+            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" \
+            --arch "$ARCH" >/dev/null 2>&1; then
         echo "nothing new built, but the published catalog doesn't verify: republishing it."
     else
         echo "nothing new to publish."
@@ -71,11 +107,11 @@ PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
 if enabled "$PRESIGNED"; then
     node tools/make-sentry-catalog.mjs --verify "$CATALOG" --source-hash "$HASH" --modules "$OUT/modules" \
-        --public-key "$SENTRY_CATALOG_PUBLIC_KEY"
+        --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --arch "$ARCH"
 else
     SIGN=()
     enabled "$DRY_RUN" && [ -z "${SPARKLE_PRIVATE_KEY:-}" ] && SIGN=(--allow-unsigned)
-    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
+    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" --arch "$ARCH" \
         ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$CATALOG" ${SIGN[@]+"${SIGN[@]}"}
 fi
 
@@ -97,11 +133,11 @@ for k in $BUILT; do
 done
 
 if enabled "$DRY_RUN"; then
-    echo "DRY_RUN: would upload the catalog → sentry/$HASH/catalog.json"
+    echo "DRY_RUN: would upload the catalog → ${PREFIX}catalog.json"
     cat "$CATALOG"
     exit 0
 fi
-put "$CATALOG" "sentry/$HASH/catalog.json" application/json "public, max-age=60, must-revalidate"
+put "$CATALOG" "${PREFIX}catalog.json" application/json "public, max-age=60, must-revalidate"
 
 # --- Smoke test: origin, then the CDN clients actually use -----------------
 SIGNED_AT=$(json "$CATALOG" signature.signedAt)
@@ -109,12 +145,12 @@ signed_at_of() { curl -fsSL -H 'Cache-Control: no-cache' "$1" 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).signature.signedAt)}catch{}})' || true; }
 
 ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
-[ "$(signed_at_of "$ORIGIN_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] \
+[ "$(signed_at_of "$ORIGIN_BASE/${PREFIX}catalog.json")" = "$SIGNED_AT" ] \
     || { echo "ERROR: origin doesn't serve the new catalog"; exit 1; }
 
 OK=""
 for i in $(seq 1 40); do   # × 15 s = 10 min (60 s TTL at the edge)
-    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
+    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/${PREFIX}catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
     echo "  CDN not propagated yet, attempt $i/40 — retrying in 15s…"
     sleep 15
 done

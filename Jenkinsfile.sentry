@@ -15,11 +15,16 @@
 // and for the source of the last RELEASES release tags, so shipped app
 // versions keep getting modules for new kernels too.
 //
-// Everything runs in containers on kube-builder-a (arm64 Docker-in-Docker, so
-// no bind mounts: inputs go in via `docker build`, results out via `docker cp`).
+// Modules are built for both guest arches: arm64 (the Mac's guests) under
+// sentry/<hash>/, amd64 (Linux/KVM hosts' guests) under sentry/<hash>/amd64/.
+//
+// Everything runs in containers, each arch natively: arm64 on kube-builder-a
+// (Docker-in-Docker, so no bind mounts: inputs go in via `docker build`,
+// results out via `docker cp`), amd64 on linux-kvm-amd64 (same way; its
+// inputs and outputs travel by stash). Publishing is on kube-builder-a.
 //   1. Build container (scripts/openshell-guest/sentry/Dockerfile, ubuntu:24.04)
-//      per source: fetch that source's published catalog, build every missing
-//      kernel with build.sh --verify (two builds must be byte-identical).
+//      per source and arch: fetch that source's published catalog, build every
+//      missing kernel with build.sh --verify (two builds must be byte-identical).
 //   2. Publish container (node): sign the merged catalog with the Sparkle key,
 //      upload modules then catalog, smoke-test from the CDN.
 // Publishing is additive; nothing is ever deleted.
@@ -54,6 +59,11 @@ pipeline {
             description: 'Space-separated kernels to rebuild even if published, e.g. 6.8.0-142-generic.')
         string(name: 'KERNEL_PATTERN', defaultValue: '^linux-headers-6\\.8\\.0-[0-9]+-generic$',
             description: 'ERE over linux-headers package names to build for.')
+        // Built on the x86_64 agent (linux-kvm-amd64). The amd64 catalog is a
+        // catalog of its own, sentry/<hash>/amd64/catalog.json, whose module
+        // statements name the arch (see the Build modules and Publish stages).
+        booleanParam(name: 'BUILD_AMD64', defaultValue: true,
+            description: 'Also build and publish amd64 modules (Linux/KVM hosts), to sentry/<hash>/amd64/.')
     }
 
     environment {
@@ -143,30 +153,97 @@ pipeline {
                     done
                     cat sentry-ci/sources
                 '''
+                // The amd64 build runs on another agent: it takes the same contexts.
+                stash name: 'sentry-ctx', includes: 'sentry-ci/sources, sentry-ci/ctx-*/**'
             }
         }
 
         stage('Build modules') {
-            steps {
-                sh '''
-                    set -eu
-                    export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
-                    while read -r label epoch hash; do
-                        echo "=== building for source $label ($hash) ==="
-                        docker rm -f "sentry-$label" 2>/dev/null || true
-                        docker build --pull --platform linux/arm64 -q \
-                            -t "bromure-sentry-builder:$label" "sentry-ci/ctx-$label"
-                        # A failed kernel is recorded in manifest.json, not fatal;
-                        # only an infrastructure failure stops the run.
-                        docker run --platform linux/arm64 --name "sentry-$label" \
-                            -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
-                            -e MAX_BUILDS="${MAX_BUILDS:-12}" -e FORCE_KERNELS="${FORCE_KERNELS:-}" \
-                            -e KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\\.8\\.0-[0-9]+-generic$}" \
-                            "bromure-sentry-builder:$label"
-                        docker cp "sentry-$label:/out" "sentry-ci/out-$label"
-                        docker rm "sentry-$label"
-                    done < sentry-ci/sources
-                '''
+            parallel {
+                stage('arm64') {
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                            while read -r label epoch hash; do
+                                echo "=== building for source $label ($hash) ==="
+                                docker rm -f "sentry-$label" 2>/dev/null || true
+                                docker build --pull --platform linux/arm64 -q \
+                                    -t "bromure-sentry-builder:$label" "sentry-ci/ctx-$label"
+                                # A failed kernel is recorded in manifest.json, not fatal;
+                                # only an infrastructure failure stops the run.
+                                docker run --platform linux/arm64 --name "sentry-$label" \
+                                    -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
+                                    -e MAX_BUILDS="${MAX_BUILDS:-12}" -e FORCE_KERNELS="${FORCE_KERNELS:-}" \
+                                    -e KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\\.8\\.0-[0-9]+-generic$}" \
+                                    "bromure-sentry-builder:$label"
+                                docker cp "sentry-$label:/out" "sentry-ci/out-$label"
+                                docker rm "sentry-$label"
+                            done < sentry-ci/sources
+                        '''
+                    }
+                }
+                // amd64 (the Linux/KVM host's guests), natively on the x86_64
+                // agent: same source, same Dockerfile and ci-build.sh, which
+                // reads the arch from dpkg, looks up sentry/<hash>/amd64/
+                // catalog.json and records "arch": "amd64" in its manifest. Its
+                // out dirs come back by stash into sentry-ci/amd64/, OUT of
+                // sentry-ci/out-* (the arm64 tree the Publish gate reads): kernel
+                // names are the same on both arches (6.8.0-NNN-generic), so amd64
+                // modules are a catalog of their own.
+                //
+                // Not a stage-level agent: that agent also runs the amd64 image
+                // job (hours), and a stage that times out waiting for it would
+                // fail the run and skip the arm64 publish. Here a busy, offline
+                // or failing amd64 side only marks the run UNSTABLE.
+                stage('amd64') {
+                    when { expression { params.BUILD_AMD64 != false } }
+                    steps {
+                        script {
+                            catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                timeout(time: 150, unit: 'MINUTES') {
+                                    node('linux-kvm-amd64') {
+                                        try {
+                                            sh 'rm -rf sentry-ci'
+                                            unstash 'sentry-ctx'
+                                            sh '''
+                                                set -eu
+                                                [ "$(uname -m)" = x86_64 ] || { echo "amd64 modules build natively: an x86_64 agent, not $(uname -m)"; exit 1; }
+                                                mkdir -p sentry-ci/amd64
+                                                while read -r label epoch hash; do
+                                                    # A release from before the module knew x86_64
+                                                    # stops at its #error for every kernel, each run.
+                                                    if ! grep -q 'defined(CONFIG_X86_64)' "sentry-ci/ctx-$label/bromure_sentry.c"; then
+                                                        echo "=== source $label ($hash) is arm64-only: no amd64 build ==="
+                                                        continue
+                                                    fi
+                                                    echo "=== building amd64 for source $label ($hash) ==="
+                                                    docker rm -f "sentry-amd64-$label" 2>/dev/null || true
+                                                    docker build --pull --platform linux/amd64 -q \
+                                                        -t "bromure-sentry-builder:amd64-$label" "sentry-ci/ctx-$label"
+                                                    docker run --platform linux/amd64 --name "sentry-amd64-$label" \
+                                                        -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
+                                                        -e MAX_BUILDS="${MAX_BUILDS:-12}" -e FORCE_KERNELS="${FORCE_KERNELS:-}" \
+                                                        -e KERNEL_PATTERN="${KERNEL_PATTERN:-^linux-headers-6\\.8\\.0-[0-9]+-generic$}" \
+                                                        "bromure-sentry-builder:amd64-$label"
+                                                    docker cp "sentry-amd64-$label:/out" "sentry-ci/amd64/out-$label"
+                                                    docker rm "sentry-amd64-$label"
+                                                done < sentry-ci/sources
+                                            '''
+                                            stash name: 'sentry-amd64-out', includes: 'sentry-ci/amd64/**', allowEmpty: true
+                                        } finally {
+                                            sh '''
+                                                for c in $(docker ps -aq --filter name=sentry-amd64-); do docker rm -f "$c"; done 2>/dev/null || true
+                                                docker image ls -q 'bromure-sentry-builder' | xargs -r docker rmi -f 2>/dev/null || true
+                                                rm -rf sentry-ci
+                                            '''
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -229,10 +306,54 @@ EOF
                             docker run --rm \
                                 -e DO_SPACES_KEY -e DO_SPACES_SECRET -e SPARKLE_PRIVATE_KEY \
                                 -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET \
-                                -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="${DRY_RUN:-false}" \
+                                -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="${DRY_RUN:-false}" -e SENTRY_EXPECT_ARCH=arm64 \
                                 bromure-sentry-publisher ./scripts/publish-sentry-modules.sh "out-$label"
                         done < sentry-ci/sources
                     '''
+                    // amd64 (BUILD_AMD64): its own catalog, sentry/<hash>/amd64/,
+                    // each out dir's manifest naming the arch for the publish
+                    // script (which skips an out dir with nothing new whose
+                    // published catalog still verifies). A step of its own, after
+                    // the arm64 one: that step's gate ends it early on a day
+                    // arm64 has nothing new.
+                    script {
+                        if (params.BUILD_AMD64 != false) {
+                            // Absent when the amd64 build didn't run or failed
+                            // (the run is UNSTABLE already): nothing to publish.
+                            def got = true
+                            try { unstash 'sentry-amd64-out' } catch (e) { got = false; echo "No amd64 outputs: ${e.message}" }
+                            if (got) {
+                                sh '''
+                                    set -eu
+                                    export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                                    ls -d sentry-ci/amd64/out-* >/dev/null 2>&1 || { echo "No amd64 outputs."; exit 0; }
+                                    rm -rf sentry-ci/pub-amd64
+                                    mkdir -p sentry-ci/pub-amd64/tools sentry-ci/pub-amd64/scripts sentry-ci/pub-amd64/amd64
+                                    cp tools/package.json tools/package-lock.json tools/spaces-put.mjs \
+                                       tools/make-sentry-catalog.mjs sentry-ci/pub-amd64/tools/
+                                    cp scripts/publish-sentry-modules.sh sentry-ci/pub-amd64/scripts/
+                                    cp -R sentry-ci/amd64/out-* sentry-ci/pub-amd64/amd64/
+                                    # The arm64 step's publisher Dockerfile, when it got that far;
+                                    # else the same one, written here.
+                                    printf '%s\n' \
+                                        'FROM node:22-bookworm-slim' \
+                                        'RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*' \
+                                        'WORKDIR /work' \
+                                        'COPY tools/package.json tools/package-lock.json tools/' \
+                                        'RUN cd tools && (npx --yes @socketsecurity/cli npm ci --silent || npx --yes @socketsecurity/cli npm install --silent)' \
+                                        'COPY . .' > sentry-ci/pub-amd64/Dockerfile
+                                    docker build -q -t bromure-sentry-publisher-amd64 sentry-ci/pub-amd64
+                                    for out in sentry-ci/amd64/out-*; do
+                                        docker run --rm \
+                                            -e DO_SPACES_KEY -e DO_SPACES_SECRET -e SPARKLE_PRIVATE_KEY \
+                                            -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET \
+                                            -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="${DRY_RUN:-false}" -e SENTRY_EXPECT_ARCH=amd64 \
+                                            bromure-sentry-publisher-amd64 ./scripts/publish-sentry-modules.sh "amd64/$(basename "$out")"
+                                    done
+                                '''
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -243,7 +364,7 @@ EOF
                     // Kernels that failed to build don't stop the publish of the
                     // rest, but they mark the run UNSTABLE so someone looks.
                     def failed = sh(returnStdout: true, script: '''
-                        cat sentry-ci/out-*/manifest.json 2>/dev/null \
+                        cat sentry-ci/out-*/manifest.json sentry-ci/amd64/out-*/manifest.json 2>/dev/null \
                           | grep -o '"failed": \\[[^]]*\\]' | grep -v '\\[\\]' || true
                     ''').trim()
                     if (failed) {
@@ -251,7 +372,7 @@ EOF
                         currentBuild.result = 'UNSTABLE'
                     }
                 }
-                archiveArtifacts artifacts: 'sentry-ci/out-*/manifest.json, sentry-ci/out-*/catalog.json, sentry-ci/out-*/modules/*.txt',
+                archiveArtifacts artifacts: 'sentry-ci/out-*/manifest.json, sentry-ci/out-*/catalog.json, sentry-ci/out-*/modules/*.txt, sentry-ci/amd64/out-*/manifest.json, sentry-ci/amd64/out-*/catalog.json, sentry-ci/amd64/out-*/modules/*.txt',
                                  allowEmptyArchive: true
             }
         }

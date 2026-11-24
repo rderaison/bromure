@@ -2,8 +2,9 @@
 # Build the shipped sentry module for one kernel, reproducibly.
 #
 # Run this at Bromure release time, inside a guest VM of the image being
-# released (or any Ubuntu arm64 box with that kernel's headers installed). The
-# output goes straight into the meta share layout:
+# released (or any Ubuntu box of the image's arch, arm64 or amd64, with that
+# kernel's headers installed). The output goes straight into the meta share
+# layout:
 #
 #     sentry-dist/bromure_sentry-<kernel-release>.ko
 #
@@ -50,10 +51,14 @@ if [ ! -d "$KDIR" ]; then
     exit 1
 fi
 
-# Ubuntu builds its arm64 kernels with aarch64-linux-gnu-gcc-13. Using a
-# different compiler still produces a loadable module (the vermagic check does
-# not cover it) but changes the bytes, so pin it when it is there.
-CC_CANDIDATE=$(sed -n 's/^.*aarch64-linux-gnu-gcc-\([0-9]*\).*$/aarch64-linux-gnu-gcc-\1/p' \
+# Ubuntu builds its kernels with <triplet>-gcc-13: aarch64-linux-gnu-gcc-13 on
+# arm64, x86_64-linux-gnu-gcc-13 on amd64. Using a different compiler still
+# produces a loadable module (the vermagic check does not cover it) but changes
+# the bytes, so pin it when it is there. The kernel records it in
+# CONFIG_CC_VERSION_TEXT; arm64's compile.h names it too (the original source).
+CC_CANDIDATE=$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\([A-Za-z0-9_]*-linux-gnu-gcc-[0-9]*\) .*$/\1/p' \
+    "/lib/modules/$KVER/build/.config" 2>/dev/null | head -1)
+[ -n "$CC_CANDIDATE" ] || CC_CANDIDATE=$(sed -n 's/^.*aarch64-linux-gnu-gcc-\([0-9]*\).*$/aarch64-linux-gnu-gcc-\1/p' \
     "/lib/modules/$KVER/build/include/generated/compile.h" 2>/dev/null | head -1)
 if [ -n "${CC_CANDIDATE:-}" ] && command -v "$CC_CANDIDATE" > /dev/null 2>&1; then
     CC="$CC_CANDIDATE"
