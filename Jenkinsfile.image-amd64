@@ -20,7 +20,9 @@
 //   - x86_64 Ubuntu 24.04 or newer; /dev/kvm read-write for the Jenkins user
 //     (the kvm group); git, python3, curl, dpkg-deb, node 20+ (npm), pigz
 //     optional; ~40 GB free in the workspace.
-//   - The Copy Artifact plugin, allowed to copy from the package job.
+//   - The Copy Artifact plugin. The package job allows the copy itself
+//     (copyArtifactPermission in Jenkinsfile.linux, once it has run with
+//     it); PACKAGE_JOB must be that job's full name (folder/name in a folder).
 //   - /opt/bromure-image-ci owned by the Jenkins user (the .deb is unpacked
 //     there: a fixed path, for the AppArmor profile below).
 //   - The package's AppArmor profile for that path (Ubuntu lets only
@@ -54,7 +56,7 @@ pipeline {
         booleanParam(name: 'KEEP_PREVIOUS', defaultValue: false,
             description: 'Publish the new image but keep the previous images/<major>/amd64/<uuid>/ objects.')
         string(name: 'PACKAGE_JOB', defaultValue: 'bromure-linux',
-            description: 'The Jenkins job that runs Jenkinsfile.linux (its archived amd64 .deb is the bromure-ac that bakes).')
+            description: 'The Jenkins job that runs Jenkinsfile.linux (its archived amd64 .deb is the bromure-ac that bakes). Its full name: folder/name when it is in a folder.')
         string(name: 'PACKAGE_BUILD', defaultValue: '',
             description: 'That job\'s build number to take the .deb from. Empty: its last successful build.')
     }
