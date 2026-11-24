@@ -188,7 +188,7 @@ Maintainer: Bromure <support@bromure.io>
 Installed-Size: $SIZE
 Section: admin
 Priority: optional
-Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libssl3t64 | libssl3, libnghttp2-14, libzstd1, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
+Depends: libc6 (>= 2.39), libstdc++6, libgcc-s1, zlib1g, libbrotli1, libssl3t64 | libssl3, libnghttp2-14, libzstd1, zstd, iproute2, e2fsprogs, openssh-client, python3, systemd, passwd, procps
 Recommends: btrfs-progs, libpam0g, curl
 Suggests: libonnxruntime1.23
 Homepage: https://bromure.io

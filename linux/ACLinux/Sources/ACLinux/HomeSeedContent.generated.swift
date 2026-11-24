@@ -1765,7 +1765,10 @@ enum HomeSeedContent {
             sudo -n tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
-    After=mnt-bromure\x2dmeta.mount network.target
+    DefaultDependencies=no
+    After=mnt-bromure\x2dmeta.mount local-fs.target systemd-tmpfiles-setup.service systemd-journald.socket
+    Conflicts=shutdown.target
+    Before=shutdown.target
     StartLimitIntervalSec=0
     ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
     [Service]

@@ -139,7 +139,9 @@ public actor FirecrackerMachine {
                 try await GuestDisk.setMachineID(image: tmp, id: GuestDisk.newMachineID())
                 guard rename(tmp, config.overlay) == 0 else { throw MachineError.io("rename \(tmp)", errno) }
             }
+            BootTrace.mark(config.name, "system disk ready")
             try await startDaemons()
+            BootTrace.mark(config.name, "virtiofsd up (\(config.shares.count))")
             for p in [config.firecrackerAPISocketPath, config.firecrackerVsockPath] { try? fm.removeItem(atPath: p) }
             let log = (config.runDirectory as NSString).appendingPathComponent("firecracker.log")
             try? fm.removeItem(atPath: log)
@@ -159,6 +161,7 @@ public actor FirecrackerMachine {
                                      logPath: config.serialLog, standardInput: pipes?.input,
                                      standardOutput: pipes?.output, inheritedFDs: peerFD >= 0 ? [peerFD] : [])
             try p.start()
+            BootTrace.mark(config.name, "firecracker spawned")
             process = p
             Task { [weak self] in
                 let status = await p.waitForExit()
@@ -166,6 +169,7 @@ public actor FirecrackerMachine {
             }
             if let dir = config.restoreFrom { try await loadSnapshot(dir, p, log: log) }
             try await waitRunning(p, log: log)
+            BootTrace.mark(config.name, "firecracker running (guest kernel starting)")
             state = .running
         } catch {
             if let p = process, p.isRunning { p.signal(SIGKILL); _ = await p.waitForExit() }

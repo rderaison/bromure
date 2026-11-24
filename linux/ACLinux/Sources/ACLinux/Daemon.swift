@@ -1873,6 +1873,7 @@ public actor Daemon {
     // @port UbuntuSandboxVM.prepare() h=f5dccff3dc476eeb @132bb730
     // @port UbuntuSandboxVM.prepare() / case .nat: h=4196bb9ffb041bd1 @132bb730
     private func launchVM(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
+        BootTrace.begin("bromure-" + rec.shortId)
         if let hook = Self.launchHookForTesting.withLockedValue({ $0 }) { try await hook(rec.id) }
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
@@ -1886,6 +1887,7 @@ public actor Daemon {
         // A cold boot: a snapshot left behind (a suspend cut short) is spent.
         if restoreFrom == nil { try? fm.removeItem(atPath: snapshotDir(rec.id)) }
         try Self.stageAgentd(config.agentdPath, into: dir + "/meta")
+        BootTrace.mark("bromure-" + rec.shortId, "agentd staged")
         try Self.writeTerminalGraphicsMarker(in: dir + "/meta", allowed: Self.terminalGraphicsAllowed())
         try Self.writeVirtiofsTagMarkers(["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }),
                                          in: dir + "/meta", fresh: restoreFrom == nil)
@@ -1906,6 +1908,7 @@ public actor Daemon {
                                                defaultGB: Self.resolvedHomeImageGB(override: config.homeImageOverrideGB,
                                                                                    freeBytes: Self.freeBytes(near: dir)))
         try Self.ensureHomeImage(atPath: home, bytes: target)
+        BootTrace.mark("bromure-" + rec.shortId, "home image")
         // A size change lands at a cold boot (agentd's resize2fs grows the
         // mounted ext4); a restore keeps the size the state was saved with.
         let homeNote = try Self.homeImageNoteForLaunch(atPath: home, target: target, setting: rec.homeGB,
@@ -1932,6 +1935,7 @@ public actor Daemon {
         // later edit changed (macOS: the session's captured profile).
         let raw = rec.managed ? nil : existingProfile(for: rec)
         let staged = await launchProfile(for: rec, mcpTokens: true)
+        BootTrace.mark("bromure-" + rec.shortId, "profile staged")
         var launchPlan: SessionTokenPlan?
         if let profile = staged {
             let store = profileStore
@@ -1975,6 +1979,7 @@ public actor Daemon {
         let extraNoProxy = staged == nil || rec.registration == true ? [] : await kubeNoProxy(for: UUID(uuidString: rec.id) ?? UUID())
         let registries = staged == nil || rec.registration == true ? [] : await kubeRegistries(for: UUID(uuidString: rec.id) ?? UUID())
         try writeProxyMeta(meta, profile: staged, tokenPlan: launchPlan, extraNoProxy: extraNoProxy, registries: registries)
+        BootTrace.mark("bromure-" + rec.shortId, "credentials + proxy meta")
         // The agents' MCP shims (board, automations, delegation, …) and the
         // built-in browser and display servers, as macOS stages them.
         try SessionDisk.writeGuestMCPShims(into: meta)
@@ -1982,6 +1987,7 @@ public actor Daemon {
         if profile(for: rec) == nil { try SessionDisk.writeBuiltInMCPServers(into: meta) }
 
         var qc = try machineConfig(rec)
+        BootTrace.mark("bromure-" + rec.shortId, "machine config")
         qc.restoreFrom = restoreFrom
         // The VM's end goes to Firecracker; ours waits in the fd store, so a
         // restarted daemon takes the same link back.
@@ -2016,6 +2022,7 @@ public actor Daemon {
             FDStore.remove("vsock-" + rec.shortId)
             throw error
         }
+        BootTrace.mark("bromure-" + rec.shortId, "vsock + bridges")
         let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
         var l = Live(machine: FirecrackerMachine(config: qc), port: port, shell: shell, config: qc,
                      vsock: vsock, browser: browser, storedNet: storeName)
@@ -2084,7 +2091,9 @@ public actor Daemon {
             }
         }
         do {
+            BootTrace.mark("bromure-" + rec.shortId, "services up; starting the machine")
             try await machine.start()
+            BootTrace.mark("bromure-" + rec.shortId, "machine running")
         } catch {
             stampClone()
             live[id] = nil
@@ -2165,7 +2174,10 @@ public actor Daemon {
                            baseImage: config.imageDir + "/base.img", cmdline: config.imageDir + "/cmdline",
                            kernelRelease: config.imageDir + "/kernel-release")
         let cmdline = try String(contentsOfFile: image.cmdline, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        var qc = MachineConfig(name: "bromure-\(rec.shortId)", kernel: image.kernel, initrd: image.initrd, cmdline: cmdline,
+        // The kernel uncompressed once it's extracted (KernelCache): ~70 ms
+        // of each boot otherwise spent decompressing the bzImage.
+        let kernel = checked ? KernelCache.shared.bootKernel(for: image.kernel, cacheDir: config.stateDir + "/kernels") : image.kernel
+        var qc = MachineConfig(name: "bromure-\(rec.shortId)", kernel: kernel, initrd: image.initrd, cmdline: cmdline,
                                baseImage: image.baseImage, overlay: dir + "/disk.raw", vsockCID: rec.cid, runDirectory: run)
         qc.cpus = rec.cpus
         qc.memoryMiB = rec.memoryMiB
