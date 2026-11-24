@@ -1439,10 +1439,37 @@ def _view_attach_command(view, window, size_passive=False):
     # failing is the correct outcome.
     if openshell_requested():
         return tm + " has-session -t bromure 2>/dev/null || exit 1; " + tmux
+    # -c HOME, as create_session does: this runs from agentd, whose working
+    # directory is /, and without it the session's first shell opened there.
     return (
         tm + " has-session -t bromure 2>/dev/null"
-        " || " + tm + " new-session -d -s bromure; " + tmux
+        " || " + tm + " new-session -d -s bromure -c " + shlex.quote(HOME) + "; " + tmux
     )
+
+
+# Set once the boot's session step (create_session) has run, whatever came
+# of it.
+_SESSION_STEP_DONE = threading.Event()
+
+
+def _wait_session_step(timeout=15.0):
+    """A host view attached before the boot created the session: wait for
+    that step rather than create the session here. The shell answers before
+    the session exists (seconds before, on a first boot: the Claude Code
+    nudge sweep runs in between), and a session made by the attach's
+    fallback started its first shell ahead of that sweep. Bounded: if the
+    step never ends, the attach's fallback still gives the view a session.
+    Not under a sandbox, where the attach creates nothing."""
+    if openshell_requested() or _SESSION_STEP_DONE.is_set():
+        return
+    t0 = time.monotonic()
+    done = _SESSION_STEP_DONE.wait(timeout)
+    ms = (time.monotonic() - t0) * 1000
+    if done:
+        log("shell", "a view attached before the session existed; waited %.0f ms" % ms)
+    else:
+        log("shell", "a view attached before the session existed, and the boot "
+                     "hasn't made it after %.0f ms; going on" % ms)
 
 
 def _run_interactive(vsock_sock, req):
@@ -1452,6 +1479,7 @@ def _run_interactive(vsock_sock, req):
         # A host attach is a legitimate reason to need a server. Ask the
         # supervisor for one before building a command that assumes it exists.
         ensure_sandbox_server("host attach")
+        _wait_session_step()
         cmd = _view_attach_command(req["view"], req.get("window"),
                                    bool(req.get("sizePassive")))
     cols = int(req.get("cols", 80) or 80)
@@ -10229,6 +10257,7 @@ def main():
     # no sudo once the supervisor exists.
     _run_once("sandbox", task_openshell_sandbox)
     _run_once("session", create_session)
+    _SESSION_STEP_DONE.set()
 
     # One-shot background jobs (fire-and-forget, not supervised).
     def _after_shell():
