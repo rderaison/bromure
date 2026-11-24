@@ -130,6 +130,12 @@ public enum InterimBake {
         // with customize false).
         var o = o
         if o.amend { o.customizeScript = nil }
+        // The package proxy holds two sockets per guest connection, and the
+        // catalog's npm installs open hundreds at once: over a shell's 1024
+        // open files (the daemon has raised its own already). Out of
+        // descriptors, libdispatch's worker monitor can't open /proc and
+        // kills the process with an illegal instruction.
+        Daemon.raiseFDLimit()
         let fm = FileManager.default
         let t0 = ContinuousClock.now
         try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
