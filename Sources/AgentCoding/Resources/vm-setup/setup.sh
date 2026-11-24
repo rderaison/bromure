@@ -817,11 +817,35 @@ cat > /usr/local/lib/bromure/agentd-launch.py <<'EOP'
 # is ~50 ms of every boot. Keyed by the source's sha256 and this Python
 # (the host restages the file each launch, so not by mtime); on any trouble
 # the source is simply compiled, as running it directly would.
+#
+# The unit starts this in the boot's first moments, at a raised priority, for
+# an agent that knows it (it names BROMURE_AGENTD_EARLY). An agent that
+# doesn't (an older host staged it) gets here what its own unit gave it: the
+# default priority, and a start after basic.target and network.target.
 import hashlib, marshal, os, sys
 P = "/mnt/bromure-meta/bromure-agentd.py"
 CACHE = "/var/cache/bromure-agentd/agentd.bin"
+GATE = "/run/bromure-boot-gate"
+SYSTEMCTL = "/usr/bin/systemctl"
 with open(P, "rb") as f:
     src = f.read()
+if b"BROMURE_AGENTD_EARLY" not in src:
+    import subprocess, time
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, 0)
+    except OSError:
+        pass
+    os.environ.pop("BROMURE_AGENTD_EARLY", None)
+    for _ in range(600):
+        try:
+            if os.path.exists(GATE) and subprocess.run(
+                    [SYSTEMCTL, "is-active", "basic.target", "network.target"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    timeout=10).stdout.split() == [b"active", b"active"]:
+                break
+        except Exception:
+            pass
+        time.sleep(0.1)
 key = (hashlib.sha256(src).hexdigest() + " " + sys.version).encode()
 code = None
 try:
@@ -861,7 +885,8 @@ cat > /usr/local/lib/bromure/early-root.sh <<'EOE'
 #   - the home disk mounted, only in the plain case: ext4 mode, no virtiofs
 #     home attached, the disk labelled bromure-home, ext4, clean, its journal
 #     replayed. Anything else (blank, dirty, a migration) is the agent's,
-#     which formats, repairs and migrates as before.
+#     which formats, repairs and migrates as before. So is the home when
+#     the staged agent is one from before this script.
 # What it found goes to /run/bromure-early-home for the agent.
 M=/mnt/bromure-meta
 NL='
@@ -880,6 +905,9 @@ done
 mode=; [ -r "$M/home.mode" ] && read -r mode < "$M/home.mode"
 [ "$mode" = ext4 ] || exit 0
 [ -d "$M/virtiofs-tags" ] && [ ! -e "$M/virtiofs-tags/bromure-home" ] || exit 0
+# An agent from before the early start (an older host staged it) expects to
+# find the disk unmounted: it checks, mounts and grows it itself.
+grep -q -m1 -F BROMURE_AGENTD_EARLY "$M/bromure-agentd.py" 2>/dev/null || exit 0
 while read -r _ _ _ _ mp _; do
     [ "$mp" = /home/ubuntu ] && exit 0
 done < /proc/self/mountinfo
