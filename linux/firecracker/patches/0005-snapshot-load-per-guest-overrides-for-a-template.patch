@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Renaud Deraison <rderaison@gmail.com>
+Date: Mon, 23 Nov 2026 22:32:09 -0500
+Subject: [PATCH] snapshot load: per-guest overrides for a template (fs
+ backends, the vsock CID)
+
+A snapshot taken right after the guest kernel booted can start many
+guests, each with its own backends. Two things a load could not yet
+re-point:
+
+- fs_overrides: [{fs_id, socket}] connects a vhost-user-fs device to
+  another backend socket than the one the snapshot was taken with (as
+  network_overrides and vsock_override do for theirs).
+- vsock_override.guest_cid gives the guest another context identifier
+  than the snapshot's. The driver reads it from the device's config space
+  when it loads, so this is for snapshots taken before that.
+---
+ .../src/api_server/request/snapshot.rs        |  6 ++++
+ src/firecracker/swagger/firecracker.yaml      | 29 +++++++++++++++++++
+ src/vmm/src/persist.rs                        | 20 +++++++++++++
+ src/vmm/src/rpc_interface.rs                  |  1 +
+ src/vmm/src/vmm_config/snapshot.rs            | 21 ++++++++++++++
+ src/vmm/tests/integration_tests.rs            |  3 ++
+ 6 files changed, 80 insertions(+)
+
+diff --git a/src/firecracker/src/api_server/request/snapshot.rs b/src/firecracker/src/api_server/request/snapshot.rs
+index ae99b53..b558a04 100644
+--- a/src/firecracker/src/api_server/request/snapshot.rs
++++ b/src/firecracker/src/api_server/request/snapshot.rs
+@@ -111,6 +111,7 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
+         resume_vm: snapshot_config.resume_vm,
+         network_overrides: snapshot_config.network_overrides,
+         vsock_override: snapshot_config.vsock_override,
++        fs_overrides: snapshot_config.fs_overrides,
+         clock_realtime: snapshot_config.clock_realtime,
+         huge_pages: snapshot_config.huge_pages,
+     };
+@@ -213,6 +214,7 @@ mod tests {
+             resume_vm: false,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
+         };
+@@ -246,6 +248,7 @@ mod tests {
+             resume_vm: false,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+         };
+@@ -280,6 +283,7 @@ mod tests {
+             resume_vm: true,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+         };
+@@ -322,6 +326,7 @@ mod tests {
+                 host_dev_name: String::from("vmtap2"),
+             }],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+         };
+@@ -352,6 +357,7 @@ mod tests {
+             resume_vm: true,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+         };
+diff --git a/src/firecracker/swagger/firecracker.yaml b/src/firecracker/swagger/firecracker.yaml
+index 7dfcd1f..c79844f 100644
+--- a/src/firecracker/swagger/firecracker.yaml
++++ b/src/firecracker/swagger/firecracker.yaml
+@@ -1723,6 +1723,30 @@ definitions:
+         type: string
+         description:
+           The new path for the backing Unix Domain Socket.
++      guest_cid:
++        type: integer
++        minimum: 3
++        description:
++          The guest's context identifier, when it is to differ from the
++          snapshot's (the driver reads it from the device when it loads).
++
++  FsOverride:
++    type: object
++    description:
++      Points a vhost-user-fs device at another backend socket during
++      snapshot restore.
++    required:
++      - fs_id
++      - socket
++    properties:
++      fs_id:
++        type: string
++        description:
++          The fs device to modify
++      socket:
++        type: string
++        description:
++          The new path of the backend's vhost-user socket.
+ 
+   SnapshotLoadParams:
+     type: object
+@@ -1771,6 +1795,11 @@ definitions:
+           for restoring a snapshot with a different socket path than the one used
+           when the snapshot was created. For example, when the original socket path
+           is no longer available or when deploying to a different environment.
++      fs_overrides:
++        type: array
++        description: vhost-user-fs backend sockets to override
++        items:
++          $ref: "#/definitions/FsOverride"
+       clock_realtime:
+         type: boolean
+         description:
+diff --git a/src/vmm/src/persist.rs b/src/vmm/src/persist.rs
+index 41d50b1..afa6399 100644
+--- a/src/vmm/src/persist.rs
++++ b/src/vmm/src/persist.rs
+@@ -440,6 +440,24 @@ pub fn restore_from_snapshot(
+             .backend
+             .uds_path
+             .clone_from(&vsock_override.uds_path);
++        if let Some(cid) = vsock_override.guest_cid {
++            device_state.frontend.cid = u64::from(cid);
++        }
++    }
++
++    for entry in &params.fs_overrides {
++        // vhost-user-fs devices only exist on the MMIO transport.
++        let device_state = match &mut microvm_state.device_states.virtio_state {
++            VirtioDevicesState::Mmio(mmio_state) => mmio_state
++                .fs_devices
++                .iter_mut()
++                .map(|device| &mut device.device_state)
++                .find(|x| x.id == entry.fs_id),
++            VirtioDevicesState::Pci(_) => None,
++        };
++        device_state
++            .map(|device_state| device_state.socket_path.clone_from(&entry.socket))
++            .ok_or(SnapshotStateFromFileError::UnknownFsDevice)?;
+     }
+ 
+     let track_dirty_pages = params.track_dirty_pages;
+@@ -530,6 +548,8 @@ pub enum SnapshotStateFromFileError {
+     UnknownNetworkDevice,
+     /// Unknown Vsock Device.
+     UnknownVsockDevice,
++    /// Unknown Fs Device.
++    UnknownFsDevice,
+ }
+ 
+ fn snapshot_state_from_file(
+diff --git a/src/vmm/src/rpc_interface.rs b/src/vmm/src/rpc_interface.rs
+index ca743fa..5f93d92 100644
+--- a/src/vmm/src/rpc_interface.rs
++++ b/src/vmm/src/rpc_interface.rs
+@@ -1335,6 +1335,7 @@ mod tests {
+                 resume_vm: false,
+                 network_overrides: vec![],
+                 vsock_override: None,
++                fs_overrides: Vec::new(),
+                 clock_realtime: false,
+                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+             },
+diff --git a/src/vmm/src/vmm_config/snapshot.rs b/src/vmm/src/vmm_config/snapshot.rs
+index 8e0d028..df337b4 100644
+--- a/src/vmm/src/vmm_config/snapshot.rs
++++ b/src/vmm/src/vmm_config/snapshot.rs
+@@ -73,6 +73,22 @@ pub struct NetworkOverride {
+ pub struct VsockOverride {
+     /// The path to the UDS that will be used for the vsock interface
+     pub uds_path: String,
++    /// The guest's context identifier, when it is to differ from the
++    /// snapshot's (a snapshot restored as several guests: the driver reads
++    /// it from the device when it loads).
++    #[serde(default)]
++    pub guest_cid: Option<u32>,
++}
++
++/// Points a vhost-user-fs device at another backend socket during snapshot
++/// restore (a snapshot restored as several guests, each with its own
++/// backends).
++#[derive(Debug, PartialEq, Eq, Deserialize)]
++pub struct FsOverride {
++    /// The fs device's id (`fs_id`).
++    pub fs_id: String,
++    /// The backend's vhost-user socket.
++    pub socket: String,
+ }
+ 
+ /// Selects the huge-page configuration to use when loading a snapshot.
+@@ -119,6 +135,8 @@ pub struct LoadSnapshotParams {
+     pub network_overrides: Vec<NetworkOverride>,
+     /// When set, the vsock backend UDS path will be overridden
+     pub vsock_override: Option<VsockOverride>,
++    /// The vhost-user-fs backends to override on load.
++    pub fs_overrides: Vec<FsOverride>,
+     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore,
+     /// advancing kvmclock by the wall-clock time elapsed since the snapshot was taken. When false
+     /// (default), kvmclock resumes from where it was at snapshot time.
+@@ -157,6 +175,9 @@ pub struct LoadSnapshotConfig {
+     /// Whether or not to override the vsock backend UDS path.
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub vsock_override: Option<VsockOverride>,
++    /// The vhost-user-fs backends to override on load.
++    #[serde(default)]
++    pub fs_overrides: Vec<FsOverride>,
+     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore.
+     #[serde(default)]
+     pub clock_realtime: bool,
+diff --git a/src/vmm/tests/integration_tests.rs b/src/vmm/tests/integration_tests.rs
+index 6bd6ddf..c0b3b12 100644
+--- a/src/vmm/tests/integration_tests.rs
++++ b/src/vmm/tests/integration_tests.rs
+@@ -317,6 +317,7 @@ fn verify_load_snapshot(
+             resume_vm: true,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages,
+         }))
+@@ -389,6 +390,7 @@ fn test_load_snapshot_rejects_hugetlbfs_with_file_backend() {
+             resume_vm: false,
+             network_overrides: vec![],
+             vsock_override: None,
++            fs_overrides: Vec::new(),
+             clock_realtime: false,
+             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
+         }))
+@@ -462,6 +464,7 @@ fn verify_load_snap_disallowed_after_boot_resources(res: VmmAction, res_name: &s
+         resume_vm: false,
+         network_overrides: vec![],
+         vsock_override: None,
++        fs_overrides: Vec::new(),
+         clock_realtime: false,
+         huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+     });
+-- 
+2.53.0
+
