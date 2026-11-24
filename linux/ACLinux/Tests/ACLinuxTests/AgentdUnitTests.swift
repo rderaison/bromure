@@ -402,4 +402,40 @@ struct AgentdUnitTests {
             print("ok")
             """) == "ok\n")
     }
+
+    /// A view the host attaches before the boot has made the session (the
+    /// shell answers first; on a first boot the nudge sweep runs in between)
+    /// waits for the boot's session step, and the attach's own fallback
+    /// opens the session in the home: the first shell was in / otherwise.
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func aViewAttachedEarlyGetsTheBootsSessionAtHome() throws {
+        #expect(try Self.agentd("""
+            import threading, time
+            m.openshell_requested = lambda: False
+            m._tmux_argv = lambda: ["tmux"]
+            m.HOME = "/home/o k"
+            cmd = m._view_attach_command("v1", 0)
+            assert cmd.startswith("tmux has-session -t bromure 2>/dev/null || tmux new-session -d -s bromure -c '/home/o k'; exec tmux "), cmd
+            m.openshell_requested = lambda: True
+            assert "new-session -d" not in m._view_attach_command("v1", 0)
+            # Under a sandbox the attach creates nothing: no wait either.
+            t0 = time.monotonic(); m._wait_session_step(5.0)
+            assert time.monotonic() - t0 < 1.0
+            m.openshell_requested = lambda: False
+            # Bounded when the step never ends.
+            t0 = time.monotonic(); m._wait_session_step(0.3)
+            assert 0.25 <= time.monotonic() - t0 < 3.0
+            # Until the step ends.
+            threading.Timer(0.4, m._SESSION_STEP_DONE.set).start()
+            t0 = time.monotonic(); m._wait_session_step(10.0)
+            assert 0.3 <= time.monotonic() - t0 < 5.0, time.monotonic() - t0
+            # And not at all afterwards (a view attached later in the session).
+            t0 = time.monotonic(); m._wait_session_step(10.0)
+            assert time.monotonic() - t0 < 0.2
+            print("ok")
+            """) == "ok\n")
+        let src = try String(contentsOfFile: Self.vmSetup + "/bromure-agentd.py", encoding: .utf8)
+        #expect(src.contains("    _run_once(\"session\", create_session)\n    _SESSION_STEP_DONE.set()\n"))
+        #expect(src.contains("        ensure_sandbox_server(\"host attach\")\n        _wait_session_step()\n        cmd = _view_attach_command("))
+    }
 }
