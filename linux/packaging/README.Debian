@@ -9,8 +9,16 @@ After installing the package:
    reflinks. Moving existing data needs the server stopped; it says how.
 2. Guest image: `sudo bromure-image-install` (downloads the prebuilt image,
    or bakes it here; needs /dev/kvm).
-3. Users: `sudo bromure-ac admin add <name>`, then connect from the Bromure
-   app to this server's port 2222 (/var/lib/bromure-gw/gateway.json).
+3. Users: `sudo bromure-ac admin add --existing <login>` for someone with
+   a login here (`admin add <name>` makes a system account instead).
+4. Each user signs the server in to their bromure.io account:
+   `bromure-ac account sign-in` (for a system account,
+   `sudo -u <name> bromure-ac account sign-in`). It prints a link to approve
+   in a browser. The Bromure app on a Mac, iPhone or iPad, signed in to the
+   same account, then lists this server: no address or port to type.
+   On the same network the app can also add the server by address, port
+   2222 (/var/lib/bromure-gw/gateway.json), with a one-time code from
+   `sudo bromure-ac admin code <name>`.
 
 Files: /usr/lib/bromure-ac (binary, Swift runtime, Firecracker, PII model,
 resources), units in /usr/lib/systemd/system, state in /var/lib/bromure-ac.
