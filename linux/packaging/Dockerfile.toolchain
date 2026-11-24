@@ -1,6 +1,6 @@
 # The Debian package's build environment (Jenkinsfile.linux): Swift, Rust
 # and, when the target architecture isn't the builder's, the cross pieces.
-# Built for the BUILDER's platform (kube-builder-a: arm64); nothing runs
+# Built for the BUILDER's platform (kube-builder-b: arm64); nothing runs
 # under emulation.
 #
 #   TARGET_ARCH=x86_64 on an arm64 builder (the default case):

@@ -2,7 +2,7 @@
 // Firecracker) as Debian packages: bromure-ac-<version>_amd64.deb and
 // bromure-ac-<version>_arm64.deb, each archived with its SHA-256.
 //
-// The builder is kube-builder-a (arm64 Docker-in-Docker, no bind mounts:
+// The builder is kube-builder-b (arm64 Docker-in-Docker, no bind mounts:
 // inputs go in with `docker build`, results come out with `docker cp`):
 // arm64 is a native build, amd64 a cross build. Nothing runs under
 // emulation. For each architecture, one after the other:
@@ -24,7 +24,7 @@
 // The guest image isn't built here (it is baked for the server's KVM, or
 // downloaded: `bromure-image-install` after the install).
 pipeline {
-    agent { label 'kube-builder-a' }
+    agent { label 'kube-builder-b' }
 
     options {
         // A cold toolchain image (SDK generation, Rust toolchain) plus a
@@ -96,7 +96,7 @@ pipeline {
                 // The package is versioned LinuxAppVersion.short; `git describe`
                 // and the commit go in its build info, and the source goes in
                 // without .git: the tags first (the SCM
-                // credential is only bound during Checkout SCM; kube-builder-a
+                // credential is only bound during Checkout SCM; kube-builder-b
                 // is an ephemeral pod with no known_hosts, hence accept-new).
                 withCredentials([sshUserPrivateKey(
                     credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
