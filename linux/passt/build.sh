@@ -30,9 +30,21 @@ die() { echo "build.sh: $*" >&2; exit 1; }
 command -v "$CC" >/dev/null || die "$CC not found"
 [ "$($CC -dumpmachine | cut -d- -f1)" = "$ARCH" ] || die "$CC builds for $($CC -dumpmachine), not $ARCH"
 
+# Upstream's git server fails now and then (an HTTP 502 in the middle of a
+# clone ended a package build): a few tries, further apart each time.
+clone() {
+    local try
+    for try in 1 2 3 4 5; do
+        git -c advice.detachedHead=false clone -q --branch "$TAG" --depth 1 "$URL" "$SRC" && return 0
+        [ "$try" = 5 ] && return 1
+        echo "build.sh: cloning $URL failed (try $try of 5); again in $((try * 15)) s" >&2
+        sleep $((try * 15))
+    done
+}
+
 if [ ! -d "$SRC/.git" ]; then
     mkdir -p "$(dirname "$SRC")"
-    git -c advice.detachedHead=false clone -q --branch "$TAG" --depth 1 "$URL" "$SRC"
+    clone || die "couldn't clone $URL (5 tries)"
 fi
 cd "$SRC"
 git fetch -q --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
