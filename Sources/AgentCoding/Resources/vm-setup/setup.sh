@@ -183,7 +183,7 @@ EOF
 # share (e.g. profile without a project folder) boot still completes.
 cat > /mnt/etc/fstab <<'EOF'
 LABEL=root     /               ext4     defaults,noatime  0  1
-LABEL=EFI      /boot/efi       vfat     umask=0077        0  2
+LABEL=EFI      /boot/efi       vfat     umask=0077,nofail 0  2
 bromure-home   /home/ubuntu            virtiofs  nofail,defaults     0  0
 bromure-meta   /mnt/bromure-meta       virtiofs  nofail,ro,defaults  0  0
 bromure-outbox /mnt/bromure-outbox     virtiofs  nofail,defaults     0  0
@@ -817,20 +817,71 @@ EOB
 # no host-written .bash_profile — and no virtiofs mount at /home/ubuntu —
 # to bootstrap it; the agent then mounts the ext4 home image itself and
 # applies the workspace hostname from the meta share. Keep the text
-# byte-identical with bromure-agentd.py's _UNIT_CONTENT and the legacy
-# .bash_profile bootstrap (Profile.bashProfileContent): the agent converges
-# an older unit by the KillMode=process marker only. ConditionPathExists:
-# a VM booted without the meta share simply skips the unit.
+# byte-identical with bromure-agentd.py's _UNIT_CONTENT: the agent converges
+# an older unit to this exact text (the legacy .bash_profile bootstrap,
+# Profile.bashProfileContent, writes a unit that starts the agent directly,
+# for images that predate the launcher). DefaultDependencies=no: it starts as
+# soon as its share, the local file systems and /tmp's boot cleanup are
+# done, not behind basic.target and network.target (systemd-binfmt and
+# systemd-resolved, ~1 s); Conflicts/Before=shutdown.target keep it stopped
+# at shutdown. ConditionPathExists: a VM booted without the meta share
+# simply skips the unit.
+# The launcher the unit starts: the agent from the meta share with its
+# bytecode cached on this disk (byte-identical with bromure-agentd.py's
+# _LAUNCHER_CONTENT, which the agent converges too), and the cache
+# directory, the agent's to write.
+install -d -m 0755 /usr/local/lib/bromure
+install -d -m 0755 -o ubuntu -g ubuntu /var/cache/bromure-agentd
+cat > /usr/local/lib/bromure/agentd-launch.py <<'EOP'
+# Managed by Bromure (bromure-agentd's _LAUNCHER_CONTENT, setup.sh): starts
+# the guest agent from the meta share with its bytecode cached on this disk.
+# Python never caches the script it is started with, and compiling the agent
+# is ~50 ms of every boot. Keyed by the source's sha256 and this Python
+# (the host restages the file each launch, so not by mtime); on any trouble
+# the source is simply compiled, as running it directly would.
+import hashlib, marshal, os, sys
+P = "/mnt/bromure-meta/bromure-agentd.py"
+CACHE = "/var/cache/bromure-agentd/agentd.bin"
+with open(P, "rb") as f:
+    src = f.read()
+key = (hashlib.sha256(src).hexdigest() + " " + sys.version).encode()
+code = None
+try:
+    with open(CACHE, "rb") as f:
+        if f.readline().rstrip(b"\n") == key:
+            code = marshal.load(f)
+except Exception:
+    code = None
+if code is None:
+    code = compile(src, P, "exec")
+    try:
+        tmp = CACHE + ".%d" % os.getpid()
+        with open(tmp, "wb") as f:
+            f.write(key + b"\n")
+            marshal.dump(code, f)
+        os.replace(tmp, CACHE)
+    except Exception:
+        pass
+main = sys.modules["__main__"]
+main.__file__ = P
+sys.argv[0] = P
+del src, f
+exec(code, main.__dict__)
+EOP
+chmod 0644 /usr/local/lib/bromure/agentd-launch.py
 cat > /etc/systemd/system/bromure-agentd.service <<'EOU'
 [Unit]
 Description=Bromure guest agent daemon
-After=mnt-bromure\x2dmeta.mount network.target
+DefaultDependencies=no
+After=mnt-bromure\x2dmeta.mount local-fs.target systemd-tmpfiles-setup.service systemd-journald.socket
+Conflicts=shutdown.target
+Before=shutdown.target
 StartLimitIntervalSec=0
 ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
-ExecStart=/usr/bin/python3 -s /mnt/bromure-meta/bromure-agentd.py
+ExecStart=/usr/bin/python3 -s /usr/local/lib/bromure/agentd-launch.py
 Restart=always
 RestartSec=1
 KillMode=process
