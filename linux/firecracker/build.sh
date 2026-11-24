@@ -4,7 +4,7 @@
 # builds the static musl binary with upstream's seccomp filter into OUT_DIR
 # (default ~/.local/share/bromure-ac/bin).
 #
-# Needs: git, rustup (the toolchain pinned by upstream is fetched on demand),
+# Needs: git, rustup (the toolchain pinned by upstream is installed here),
 # musl-gcc (musl-tools, or a musl built into ~/.local/musl), libseccomp.so.2
 # (the build script links it to compile the filter), kernel UAPI headers.
 # Sources go to $BROMURE_FC_SRC (default ~/.cache/bromure-ac/firecracker-src).
@@ -58,7 +58,13 @@ fi
 cd "$SRC"
 git fetch -q --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
 [ "$(git rev-parse "$TAG^{commit}")" = "$COMMIT" ] || die "$TAG is not $COMMIT upstream any more"
-# The target, for the toolchain upstream pins (rust-toolchain.toml).
+# The toolchain upstream pins (rust-toolchain.toml), installed explicitly, then
+# the target for it. `target add` used to install a missing pinned toolchain
+# as a side effect: rustup 1.29.3 warns that it will stop, and 1.30 doesn't
+# (rust-lang/rustup#4836). A rustup before 1.28 has no bare `toolchain
+# install`; there the next line still installs it.
+out=$(rustup toolchain install --no-self-update 2>&1) \
+    || echo "build.sh: rustup toolchain install: ${out##*$'\n'}" >&2
 rustup target add "$TARGET" >/dev/null
 git am --abort >/dev/null 2>&1 || true
 git checkout -q --detach "$COMMIT"
