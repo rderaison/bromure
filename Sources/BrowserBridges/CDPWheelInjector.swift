@@ -44,6 +44,9 @@ public final class CDPWheelInjector {
     private var starting = false
     private var stopped = false
     private var restartAttempts = 0
+    /// A `start()` is already queued (waiting for the guest pool, or a
+    /// restart backoff), so ``ensureRunning()`` must not queue another.
+    private var startScheduled = false
 
     // io-queue state: touched only on `io`, which serialises it — hence
     // nonisolated(unsafe) rather than the class's main-actor isolation.
@@ -54,6 +57,16 @@ public final class CDPWheelInjector {
     nonisolated(unsafe) private var attachInFlight: [Int: String] = [:]     // command id → targetId
     nonisolated(unsafe) private var queued: [String: [Wheel]] = [:]         // target awaiting attach → events
     nonisolated(unsafe) private var readerGeneration = 0
+    /// Commands sent on this socket that Chromium hasn't answered yet, and
+    /// when it last made progress on them (uptime ns). DevTools answers
+    /// every command, so a socket that keeps taking writes without
+    /// answering is dead (a VM suspend/resume can leave the vsock half
+    /// open: writes succeed, nothing arrives).
+    nonisolated(unsafe) private var unanswered = 0
+    nonisolated(unsafe) private var unansweredSince: UInt64 = 0
+    /// How long Chromium may leave commands unanswered before the socket
+    /// is declared dead and the caller falls back to another transport.
+    nonisolated private static let stallTimeoutNanos: UInt64 = 3_000_000_000
 
     private struct Wheel {
         var x: Double, y: Double, dx: Double, dy: Double, modifiers: Int
@@ -70,7 +83,7 @@ public final class CDPWheelInjector {
         guard let bridge, bridge.poolSize >= 2,
               let probe = bridge.dequeueConnection(),
               let ws = bridge.dequeueConnection() else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.start() }
+            scheduleStart(after: 0.5)
             return
         }
         starting = true
@@ -88,6 +101,24 @@ public final class CDPWheelInjector {
                     self.scheduleRestart()
                 }
             }
+        }
+    }
+
+    /// Bring the socket back if it is down and nothing is already bringing
+    /// it back — e.g. after the restart budget ran out while the guest was
+    /// suspended. Cheap; called on every scroll that can't go direct.
+    public func ensureRunning() {
+        guard !stopped, !isReady, !starting, !startScheduled else { return }
+        start()
+    }
+
+    private func scheduleStart(after delay: TimeInterval) {
+        guard !startScheduled else { return }
+        startScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.startScheduled = false
+            self.start()
         }
     }
 
@@ -146,6 +177,13 @@ public final class CDPWheelInjector {
     nonisolated(unsafe) private var lastSendNanos: [String: UInt64] = [:]
 
     nonisolated private func dispatch(_ ev: Wheel, targetId: String) {
+        guard wsFD >= 0 else { return }
+        if unanswered > 0,
+           DispatchTime.now().uptimeNanoseconds &- unansweredSince > Self.stallTimeoutNanos {
+            wLog("[CDPWheel] \(unanswered) command(s) unanswered; socket presumed dead")
+            socketLost()
+            return
+        }
         if let sessionId = sessions[targetId] {
             send(ev, sessionId: sessionId)
         } else {
@@ -179,6 +217,8 @@ public final class CDPWheelInjector {
         var msg: [String: Any] = ["id": id, "method": method, "params": params]
         if let sessionId { msg["sessionId"] = sessionId }
         guard wsFD >= 0, let data = try? JSONSerialization.data(withJSONObject: msg) else { return id }
+        if unanswered == 0 { unansweredSince = DispatchTime.now().uptimeNanoseconds }
+        unanswered += 1
         if !Self.writeAll(fd: wsFD, Self.frame(text: data)) {
             wLog("[CDPWheel] write failed")
             socketLost()
@@ -187,6 +227,10 @@ public final class CDPWheelInjector {
     }
 
     nonisolated private func handleMessage(_ json: [String: Any]) {
+        if json["id"] != nil, unanswered > 0 {
+            unanswered -= 1
+            unansweredSince = DispatchTime.now().uptimeNanoseconds
+        }
         if let id = json["id"] as? Int, let targetId = attachInFlight.removeValue(forKey: id) {
             if let result = json["result"] as? [String: Any],
                let sessionId = result["sessionId"] as? String {
@@ -232,12 +276,17 @@ public final class CDPWheelInjector {
         sessions.removeAll()
         attachInFlight.removeAll()
         queued.removeAll()
+        unanswered = 0
     }
 
+    /// Retry every 2 s at first, then every 10 s for as long as the session
+    /// lives. Never give up: in a shared-window session this socket is the
+    /// window's scroll path, and a guest that was unreachable for a while
+    /// (suspended VM, Chromium restarting) comes back.
     private func scheduleRestart() {
-        guard !stopped, restartAttempts < 20 else { return }
+        guard !stopped else { return }
         restartAttempts += 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in self?.start() }
+        scheduleStart(after: restartAttempts <= 20 ? 2.0 : 10.0)
     }
 
     // MARK: - Handshake (io queue)
