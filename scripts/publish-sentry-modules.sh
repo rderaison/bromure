@@ -26,6 +26,8 @@
 # Env: DO_SPACES_KEY DO_SPACES_SECRET DO_SPACES_ENDPOINT DO_SPACES_REGION
 #      DO_SPACES_BUCKET DO_SPACES_PUBLIC_BASE SPARKLE_PRIVATE_KEY
 #      SENTRY_CATALOG_PUBLIC_KEY (default: the app's pinned SUPublicEDKey)
+#      SENTRY_EXPECT_ARCH (arm64|amd64) the arch the caller built: refuse an
+#      out dir whose manifest names another (Jenkinsfile.sentry sets it).
 #      DRY_RUN=1 builds + signs the catalog but uploads nothing.
 #      PRESIGNED=1 publishes the catalog.json + modules/*.ko.sig already in
 #      <out dir> (signed elsewhere by scripts/sign-sentry-modules.sh) after
@@ -55,6 +57,27 @@ case "$ARCH" in
     amd64) PREFIX="sentry/$HASH/$ARCH/" ;;
     *) echo "ERROR: unsupported arch '$ARCH' in $OUT/manifest.json"; exit 1 ;;
 esac
+# The manifest comes from the build container (amd64's from another agent), so
+# it doesn't get to pick the tree on its own: a missing or wrong "arch" would
+# sign its modules into another arch's catalog, and arm64's is the one every
+# Mac reads. The caller says which arch it built (SENTRY_EXPECT_ARCH; the
+# pipeline always does), and every module about to be signed must be an ELF
+# object for that arch.
+if [ -n "${SENTRY_EXPECT_ARCH:-}" ] && [ "$ARCH" != "$SENTRY_EXPECT_ARCH" ]; then
+    echo "ERROR: $OUT/manifest.json says arch '$ARCH'; this step publishes $SENTRY_EXPECT_ARCH"; exit 1
+fi
+node -e '
+const fs = require("fs");
+const want = { arm64: 183, amd64: 62 }[process.argv[1]];   // EM_AARCH64, EM_X86_64
+let bad = 0;
+for (const f of process.argv.slice(2)) {
+  const b = fs.readFileSync(f);
+  // \x7fELF, ELFCLASS64, little-endian, ET_REL (a .ko), e_machine
+  const ok = b.length >= 64 && b.readUInt32BE(0) === 0x7f454c46 && b[4] === 2 && b[5] === 1
+          && b.readUInt16LE(16) === 1 && b.readUInt16LE(18) === want;
+  if (!ok) { console.error(`ERROR: ${f} is not a 64-bit ${process.argv[1]} kernel module (ELF e_machine ${b.length >= 20 ? b.readUInt16LE(18) : "?"})`); bad = 1; }
+}
+process.exit(bad);' "$ARCH" $(find "$OUT/modules" -maxdepth 1 -type f -name '*.ko' 2>/dev/null)
 BUILT=$(json "$OUT/manifest.json" built)
 FAILED=$(json "$OUT/manifest.json" failed)
 echo "source $HASH ($ARCH) — built: ${BUILT:-none}; failed: ${FAILED:-none}"
