@@ -68,7 +68,8 @@ struct AgentdUnitTests {
         try FileManager.default.createDirectory(atPath: dir + "/cache", withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let script = dir + "/agent.py"
-        try "import sys\nprint(__name__, __file__ == sys.argv[0], __file__.endswith('agent.py'))\n"
+        // (An agent that names the early start: the launcher runs it at once.)
+        try "# BROMURE_AGENTD_EARLY\nimport sys\nprint(__name__, __file__ == sys.argv[0], __file__.endswith('agent.py'))\n"
             .write(toFile: script, atomically: true, encoding: .utf8)
         let launcher = try Self.agentdConstant("_LAUNCHER_CONTENT")
             .replacingOccurrences(of: "/mnt/bromure-meta/bromure-agentd.py", with: script)
@@ -87,8 +88,70 @@ struct AgentdUnitTests {
         #expect(try run() == "__main__ True True\n", "compiled")
         #expect(FileManager.default.fileExists(atPath: dir + "/cache/agentd.bin"), "and cached")
         #expect(try run() == "__main__ True True\n", "from the cache")
-        try "print('changed')\n".write(toFile: script, atomically: true, encoding: .utf8)
+        try "# BROMURE_AGENTD_EARLY\nprint('changed')\n".write(toFile: script, atomically: true, encoding: .utf8)
         #expect(try run() == "changed\n", "a new source is compiled, not the cached one run")
+    }
+
+    /// An agent from before the early start (an older host staged it on a
+    /// newer image) gets what its own unit gave it: the launcher holds it
+    /// until the boot gate, basic.target and network.target, and takes the
+    /// early-start mark out of its environment. The early root script
+    /// leaves such an agent its home disk.
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func anOlderAgentGetsTheOldOrdering() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("launch-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: dir + "/cache", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let script = dir + "/agent.py"
+        // (The name is spelled in two halves: the launcher looks for it in the source.)
+        try "import os\nprint(os.environ.get('BROMURE_AGENTD_' + 'EARLY'), os.path.exists('\(dir)/gate'), len(open('\(dir)/calls').read().split()))\n"
+            .write(toFile: script, atomically: true, encoding: .utf8)
+        // systemctl: network.target inactive for its first two answers.
+        try """
+            #!/bin/sh
+            echo x >> '\(dir)/calls'
+            echo active
+            if [ "$(wc -l < '\(dir)/calls')" -ge 3 ]; then echo active; else echo inactive; fi
+
+            """.write(toFile: dir + "/systemctl", atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/systemctl")
+        let launcher = try Self.agentdConstant("_LAUNCHER_CONTENT")
+        for constant in ["GATE = \"/run/bromure-boot-gate\"\n", "SYSTEMCTL = \"/usr/bin/systemctl\"\n",
+                         "if b\"BROMURE_AGENTD_EARLY\" not in src:\n", "os.setpriority(os.PRIO_PROCESS, 0, 0)\n",
+                         "[SYSTEMCTL, \"is-active\", \"basic.target\", \"network.target\"]"] {
+            #expect(launcher.contains(constant), "\(constant)")
+        }
+        try launcher
+            .replacingOccurrences(of: "/mnt/bromure-meta/bromure-agentd.py", with: script)
+            .replacingOccurrences(of: "/var/cache/bromure-agentd/agentd.bin", with: dir + "/cache/agentd.bin")
+            .replacingOccurrences(of: "/run/bromure-boot-gate", with: dir + "/gate")
+            .replacingOccurrences(of: "/usr/bin/systemctl", with: dir + "/systemctl")
+            .write(toFile: dir + "/launch.py", atomically: true, encoding: .utf8)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.arguments = ["-s", dir + "/launch.py"]
+        p.environment = ["BROMURE_AGENTD_EARLY": "1", "PATH": "/usr/bin:/bin"]
+        let out = Pipe()
+        p.standardOutput = out
+        let started = Date()
+        try p.run()
+        Thread.sleep(forTimeInterval: 0.4)   // the gate isn't there yet: nothing asked, nothing run
+        #expect(!FileManager.default.fileExists(atPath: dir + "/calls"))
+        #expect(FileManager.default.createFile(atPath: dir + "/gate", contents: nil))
+        p.waitUntilExit()
+        #expect(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self) == "None True 3\n")
+        #expect(Date().timeIntervalSince(started) >= 0.4)
+
+        // The agent names the early start in its first lines, where the
+        // early root script's search stops; the script leaves the home to
+        // an agent that doesn't.
+        let src = try String(contentsOfFile: Self.vmSetup + "/bromure-agentd.py", encoding: .utf8)
+        let first = try #require(src.range(of: "BROMURE_AGENTD_EARLY")).lowerBound
+        #expect(src.distance(from: src.startIndex, to: first) < 4000)
+        let early = try Self.agentdConstant("_EARLY_ROOT_CONTENT")
+        let guardLine = "grep -q -m1 -F BROMURE_AGENTD_EARLY \"$M/bromure-agentd.py\" 2>/dev/null || exit 0\n"
+        let at = try #require(early.range(of: guardLine)).lowerBound
+        #expect(at < (try #require(early.range(of: "mount -o noatime")).lowerBound))
     }
 
     // MARK: the early start (boot gate, early root setup, meta mount)
