@@ -193,6 +193,81 @@ os.rmdir("/tmp/bromure-mount-probe")
 PY
 echo "  ok   drove unshare, setns, mount and ptrace"
 
+say "the 32-bit syscall entry is watched too (x86_64)"
+# A 64-bit process executing `int 0x80` (or any 32-bit binary) enters through
+# `__ia32_sys_*` / `__ia32_compat_sys_*`, never the `__x64_sys_*` wrappers, and
+# puts its arguments in bx, cx, dx, si, di. The first amd64 port probed only the
+# 64-bit wrappers, so all four of these went unseen while the probes reported
+# healthy. Driven from a process named `sentry-ia32`, so the assertions below can
+# tell these events from the 64-bit ones above; the mount target and the ptrace
+# pid also prove the ARGUMENTS were read from the 32-bit registers.
+IA32_MOUNT=/tmp/bromure-ia32-mount-probe
+IA32_RESULT=$(python3 - "$IA32_MOUNT" <<'PY'
+import ctypes, os, signal, sys, time
+if os.uname().machine != "x86_64":
+    print("skip"); sys.exit(0)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                      ctypes.c_int, ctypes.c_int, ctypes.c_long)
+# MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT: `int 0x80` passes 32-bit pointers, so
+# the strings must live below 4 GiB; RWX for the stub beside them.
+page = libc.mmap(None, 4096, 7, 0x02 | 0x20 | 0x40, -1, 0)
+if page in (None, ctypes.c_void_p(-1).value):
+    print("FAIL no MAP_32BIT page"); sys.exit(0)
+# int int80(nr, a, b, c, d):
+#   push rbx; mov eax,edi; mov ebx,esi; mov r10d,edx; mov edx,ecx;
+#   mov ecx,r10d; mov esi,r8d; xor edi,edi; int 0x80; pop rbx; ret
+stub = bytes.fromhex("53" "89f8" "89f3" "4189d2" "89ca" "4489d1" "4489c6"
+                     "31ff" "cd80" "5b" "c3")
+ctypes.memmove(page, stub, len(stub))
+int80 = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_uint32,
+                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32)(page)
+def put(off, s):
+    ctypes.memmove(page + off, s, len(s)); return page + off
+src = put(256, b"none\0")
+target = put(512, sys.argv[1].encode() + b"\0")
+fstype = put(1024, b"tmpfs\0")
+# i386 syscall numbers.
+NR_getpid, NR_mount, NR_ptrace, NR_unshare, NR_setns = 20, 21, 26, 310, 346
+CLONE_NEWUSER, PTRACE_ATTACH, PTRACE_DETACH = 0x10000000, 16, 17
+# The entry itself must work, or nothing below proves anything.
+if int80(NR_getpid, 0, 0, 0, 0) != os.getpid():
+    print("FAIL int 0x80 getpid did not return our pid (ia32 emulation off?)")
+    sys.exit(0)
+libc.prctl(15, b"sentry-ia32", 0, 0, 0)          # PR_SET_NAME
+os.makedirs(sys.argv[1], exist_ok=True)
+child = os.fork()
+if child == 0:
+    time.sleep(3); os._exit(0)
+time.sleep(0.2)
+int80(NR_ptrace, PTRACE_ATTACH, child, 0, 0)
+try:
+    os.waitpid(child, 0); int80(NR_ptrace, PTRACE_DETACH, child, 0, 0)
+except OSError:
+    pass
+try:
+    os.kill(child, signal.SIGKILL); os.waitpid(child, 0)
+except OSError:
+    pass
+int80(NR_mount, src, target, fstype, 0)            # EPERM; the entry fires
+fd = os.open("/proc/self/ns/user", os.O_RDONLY)
+int80(NR_setns, fd, CLONE_NEWUSER, 0, 0)          # EINVAL; the entry fires
+os.close(fd)
+os.rmdir(sys.argv[1])
+# Last: the result does not matter (unprivileged user namespaces may be
+# restricted), only that the entry was reached.
+int80(NR_unshare, CLONE_NEWUSER, 0, 0, 0)
+print("child=%d" % child)
+PY
+)
+case "$IA32_RESULT" in
+    skip)    echo "  info not x86_64: no ia32 entry to drive (arm64's AArch32 compat"
+             echo "       entry needs AArch32-capable hardware; Apple silicon has none)" ;;
+    child=*) echo "  ok   drove ptrace, mount, setns and unshare through int 0x80" ;;
+    *)       echo "  FAIL could not drive int 0x80: $IA32_RESULT"; fails=$((fails + 1)) ;;
+esac
+
 say "sandbox denials: drive them"
 # The user's question is "is the agent trying to get out of its permissions?".
 # Until round 19 the only answer was a denied open -- and that probe had never
@@ -709,11 +784,40 @@ say "every alarm-class probe FIRES, not merely registers"
 # kinds it does NOT trigger are named too -- an honest gap beats an implied
 # guarantee.
 if [ -s "$FRAMES" ]; then
-    python3 - "$FRAMES" <<'PY'
+    python3 - "$FRAMES" "$IA32_RESULT" "$IA32_MOUNT" <<'PY'
 import json, sys, collections
 frames = json.load(open(sys.argv[1]))
 seen = collections.Counter(f.get("kind") for f in frames if f.get("type") == "event")
 fails = 0
+
+# The 32-bit entry: every kind driven through `int 0x80` must arrive from the
+# `sentry-ia32` process, with its arguments decoded from the ia32 registers.
+ia32_result, ia32_mount = sys.argv[2], sys.argv[3]
+if ia32_result.startswith("child="):
+    ia32_child = int(ia32_result.split("=", 1)[1])
+    ia32 = [f for f in frames if f.get("type") == "event"
+            and f.get("comm") == "sentry-ia32"]
+    by_kind = collections.defaultdict(list)
+    for f in ia32:
+        by_kind[f.get("kind")].append(f)
+    for kind in ("unshare", "setns", "mount", "ptrace"):
+        if by_kind[kind]:
+            print("  ok   %-16s fires through int 0x80 (%d)" % (kind, len(by_kind[kind])))
+        else:
+            print("  FAIL %-16s through int 0x80 NEVER FIRED: the 32-bit entry "
+                  "bypasses the sentry" % kind); fails += 1
+    if any(f.get("path") == ia32_mount and f.get("arg") == "tmpfs"
+           for f in by_kind["mount"]):
+        print("  ok   the int 0x80 mount names its target and fstype (ia32 registers)")
+    elif by_kind["mount"]:
+        print("  FAIL the int 0x80 mount's arguments were misread: %s"
+              % json.dumps(by_kind["mount"][0])); fails += 1
+    if any(f.get("request") == 16 and f.get("target_pid") == ia32_child
+           for f in by_kind["ptrace"]):
+        print("  ok   the int 0x80 ptrace names PTRACE_ATTACH and pid %d" % ia32_child)
+    elif by_kind["ptrace"]:
+        print("  FAIL the int 0x80 ptrace's arguments were misread: %s"
+              % json.dumps(by_kind["ptrace"][0])); fails += 1
 
 # Driven by this test, and therefore required to appear.
 DRIVEN = {
