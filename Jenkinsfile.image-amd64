@@ -16,7 +16,7 @@
 // the commit that .deb was built from, so setup.sh and the catalog's steps
 // match the binary.
 //
-// The agent (label knode-builder-b), set up once:
+// The agent (label kube-builder-b), set up once:
 //   - x86_64 Ubuntu 24.04 or newer; /dev/kvm read-write for the Jenkins user
 //     (the kvm group); git, python3, curl, dpkg-deb, node 20+ (npm), pigz
 //     optional; ~40 GB free in the workspace.
@@ -33,7 +33,7 @@
 //       sudo apparmor_parser -r -T -W /etc/apparmor.d/bromure-image-ci
 //     The Preflight stage checks both sandboxes start, and says so if not.
 pipeline {
-    agent { label 'knode-builder-b' }
+    agent { label 'kube-builder-b' }
 
     triggers {
         // Weekly, as the arm64 image (Monday early morning, hash-spread).
