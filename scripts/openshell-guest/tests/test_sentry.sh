@@ -231,10 +231,18 @@ fstype = put(1024, b"tmpfs\0")
 # i386 syscall numbers.
 NR_getpid, NR_mount, NR_ptrace, NR_unshare, NR_setns = 20, 21, 26, 310, 346
 CLONE_NEWUSER, PTRACE_ATTACH, PTRACE_DETACH = 0x10000000, 16, 17
-# The entry itself must work, or nothing below proves anything.
-if int80(NR_getpid, 0, 0, 0, 0) != os.getpid():
-    print("FAIL int 0x80 getpid did not return our pid (ia32 emulation off?)")
-    sys.exit(0)
+# The entry itself must work, or nothing below proves anything. Tried in a
+# child first: with ia32 emulation off (`ia32_emulation=0`) there is no int 0x80
+# gate and the instruction kills the process -- which is the door CLOSED, the
+# safe outcome, not a failure.
+probe = os.fork()
+if probe == 0:
+    os._exit(0 if int80(NR_getpid, 0, 0, 0, 0) == os.getpid() else 2)
+_, status = os.waitpid(probe, 0)
+if os.WIFSIGNALED(status):
+    print("closed"); sys.exit(0)
+if os.WEXITSTATUS(status) != 0:
+    print("FAIL int 0x80 getpid did not return the caller's pid"); sys.exit(0)
 libc.prctl(15, b"sentry-ia32", 0, 0, 0)          # PR_SET_NAME
 os.makedirs(sys.argv[1], exist_ok=True)
 child = os.fork()
@@ -264,6 +272,8 @@ PY
 case "$IA32_RESULT" in
     skip)    echo "  info not x86_64: no ia32 entry to drive (arm64's AArch32 compat"
              echo "       entry needs AArch32-capable hardware; Apple silicon has none)" ;;
+    closed)  echo "  info int 0x80 is closed on this kernel (ia32 emulation off):"
+             echo "       nothing to watch, and nothing gets past" ;;
     child=*) echo "  ok   drove ptrace, mount, setns and unshare through int 0x80" ;;
     *)       echo "  FAIL could not drive int 0x80: $IA32_RESULT"; fails=$((fails + 1)) ;;
 esac
