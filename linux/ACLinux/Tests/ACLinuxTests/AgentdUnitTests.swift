@@ -281,6 +281,29 @@ struct AgentdUnitTests {
         #expect(setup.contains("\nsystemctl enable proc-sys-fs-binfmt_misc.mount >/dev/null 2>&1 || true\n"))
     }
 
+    /// An image baked before setup.sh wrote the share slots' mount
+    /// conditions (a catalog download) gets them when it is installed, in
+    /// the text setup.sh and the running agent write: its first boot logs
+    /// no failed mount for the slots the host didn't attach.
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func theImagePreparationInstallsTheMountConditions() throws {
+        let setup = try String(contentsOfFile: Self.vmSetup + "/setup.sh", encoding: .utf8)
+        let start = try #require(setup.range(of: "bromure-attached.conf\" <<DROPIN\n")).upperBound
+        let end = try #require(setup.range(of: "\nDROPIN\n", range: start..<setup.endIndex)).lowerBound
+        let image = String(setup[start..<end]) + "\n"
+        #expect(try Self.agentd("sys.stdout.write(m._mount_condition_dropin('share-3'))")
+            == image.replacingOccurrences(of: "${tag}", with: "share-3"))
+        #expect(try Self.agentd("print(len(m._MOUNT_SLOTS), m._MOUNT_SLOTS[0][1], m._MOUNT_SLOTS[8][1])")
+            == "9 home-ubuntu.mount mnt-bromure\\x2dshare\\x2d8.mount\n")
+        let src = try String(contentsOfFile: Self.vmSetup + "/bromure-agentd.py", encoding: .utf8)
+        let prepare = String(src[try #require(src.range(of: "def prepare_image():")).lowerBound...])
+        #expect(prepare.contains("""
+                    for tag, unit in _MOUNT_SLOTS:
+                        put("/etc/systemd/system/%s.d/%s" % (unit, _MOUNT_DROPIN_NAME), _mount_condition_dropin(tag))
+            """))
+        #expect(prepare.contains("step(\"virtiofs mount conditions\", mount_conditions)"))
+    }
+
     /// dockerd starts on first use (its socket) or, after the shell, when a
     /// container has a restart policy: not at every boot.
     @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: python)))
