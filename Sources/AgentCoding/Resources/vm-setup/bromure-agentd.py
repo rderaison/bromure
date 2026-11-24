@@ -4246,6 +4246,7 @@ def _settle_claude_tui():
 _NUDGE_KEY_RE = re.compile(rb"(?<![A-Za-z0-9_$])(hasSeen[A-Z][A-Za-z0-9]{2,60}|[a-z][A-Za-z0-9]{2,60}SeenCount)(?![A-Za-z0-9_$])")
 _NUDGE_COUNT = 99
 _NUDGE_CACHE = os.path.join(HOME, ".bromure", "claude-nudge-keys.json")
+_NUDGE_IMAGE_CACHE = "/var/cache/bromure-agentd/claude-nudge-keys.json"
 
 
 def _claude_bundle():
@@ -4370,13 +4371,16 @@ def _claude_nudge_keys_sweep():
     except OSError:
         return {}
     stamp = {"path": bundle, "size": st.st_size, "mtime": int(st.st_mtime)}
-    try:
-        with open(_NUDGE_CACHE) as f:
-            cached = json.load(f)
-        if all(cached.get(k) == v for k, v in stamp.items()) and isinstance(cached.get("keys"), dict):
-            return cached["keys"]
-    except (OSError, ValueError):
-        pass
+    # This home's cache, then the image's (prepare_image swept the bundle the
+    # image was installed with): the same bundle, same keys.
+    for cache_path in (_NUDGE_CACHE, _NUDGE_IMAGE_CACHE):
+        try:
+            with open(cache_path) as f:
+                cached = json.load(f)
+            if all(cached.get(k) == v for k, v in stamp.items()) and isinstance(cached.get("keys"), dict):
+                return cached["keys"]
+        except (OSError, ValueError):
+            pass
     import time
     t0 = time.time()
     names = _nudge_names_grep(bundle)
@@ -9719,6 +9723,96 @@ def main():
 
     log("agentd", "shutting down")
 
+
+def prepare_image():
+    """The first boot's image-wide work, done once when the image is
+    installed: postinstall.sh runs this as root in the image's chroot, after
+    the catalog steps. A new workspace then boots with the agent's current
+    unit, its launcher (with this agent's bytecode already cached, under the
+    key the launcher computes: the host stages this very file) and /boot/efi
+    nofail, and finds Claude Code's nudge keys swept. Each part on its own;
+    a failure is logged and skipped: the agent does it all at boot anyway."""
+    import pwd
+
+    def put(path, text, mode=0o644):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".bromure-new"
+        with open(tmp, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+
+    def step(name, fn):
+        try:
+            fn()
+            print("[prepare-image] %s" % name, flush=True)
+        except Exception as e:
+            print("[prepare-image] %s skipped: %s" % (name, e), flush=True)
+
+    try:
+        user = pwd.getpwnam("ubuntu")
+    except KeyError:
+        user = None
+
+    def cache_dir():
+        os.makedirs(_AGENTD_CACHE_DIR, exist_ok=True)
+        os.chmod(_AGENTD_CACHE_DIR, 0o755)
+        if user:
+            os.chown(_AGENTD_CACHE_DIR, user.pw_uid, user.pw_gid)
+
+    def launcher():
+        put(_LAUNCHER_PATH, _LAUNCHER_CONTENT)
+
+    def unit():
+        put(_UNIT_PATH, _UNIT_CONTENT)
+
+    def fstab():
+        with open("/etc/fstab") as f:
+            want = _fstab_efi_nofail(f.read())
+        if want is not None:
+            put("/etc/fstab", want)
+
+    def bytecode():
+        import marshal
+        with open(os.path.abspath(__file__), "rb") as f:
+            src = f.read()
+        # Exactly the launcher's key and compile: same source, this Python.
+        key = (hashlib.sha256(src).hexdigest() + " " + sys.version).encode()
+        code = compile(src, "/mnt/bromure-meta/bromure-agentd.py", "exec")
+        path = os.path.join(_AGENTD_CACHE_DIR, "agentd.bin")
+        tmp = path + ".bromure-new"
+        with open(tmp, "wb") as f:
+            f.write(key + b"\n")
+            marshal.dump(code, f)
+        if user:
+            os.chown(tmp, user.pw_uid, user.pw_gid)
+        os.replace(tmp, path)
+
+    def nudges():
+        bundle = _claude_bundle()
+        if not bundle:
+            return
+        st = os.stat(bundle)
+        names = _nudge_names_grep(bundle)
+        if names is None:
+            names = _nudge_names_re(bundle) or set()
+        keys = {n: (True if n.startswith("hasSeen") else _NUDGE_COUNT) for n in names if not n.endswith("Terms")}
+        put(_NUDGE_IMAGE_CACHE, json.dumps({"path": bundle, "size": st.st_size, "mtime": int(st.st_mtime),
+                                            "keys": keys}, indent=2, sort_keys=True))
+
+    step("agent cache directory", cache_dir)
+    step("agent launcher", launcher)
+    step("agent unit", unit)
+    step("/boot/efi nofail", fstab)
+    step("agent bytecode cached", bytecode)
+    step("Claude Code nudge keys swept", nudges)
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--prepare-image"]:
+    prepare_image()
+    sys.exit(0)
 
 if __name__ == "__main__":
     try:
