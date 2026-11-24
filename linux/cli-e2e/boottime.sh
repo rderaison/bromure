@@ -38,7 +38,7 @@ trap cleanup EXIT
 export HOME=$W/home XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state XDG_CONFIG_HOME=$W/config XDG_CACHE_HOME=$W/cache
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
-export BROMURE_AC_IMAGE=$IMAGE BROMURE_MODELS_FETCH=0
+export BROMURE_AC_IMAGE=$IMAGE BROMURE_MODELS_FETCH=0 BROMURE_BOOT_TRACE=1
 export BROMURE_AGENTD=$REPO/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py BROMURE_AC_RESOURCES=$REPO/Sources/AgentCoding/Resources
 export BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/
 unset BROMURE_AC_API_KEY BROMURE_AC_CONTROL_SOCKET
@@ -70,8 +70,15 @@ stop
 worst=0; all=""
 for i in $(seq 1 "$BOOTS"); do
     sleep 1
+    before=$(wc -l < "$W/daemon.log")
     ms=$(boot)
     all="$all $ms"
+    if [ "$ms" -ge "$TARGET" ]; then
+        # Where a slow one went: the host's phases, the guest's own times.
+        echo "slow boot $i ($ms ms):"
+        tail -n +$((before + 1)) "$W/daemon.log" | grep '\[boot\]' | sed 's/^.*\[boot\] [^ ]* /  host /'
+        ac vm exec boot -- sh -c 'echo "  guest agent unit $(systemctl show bromure-agentd -p ExecMainStartTimestampMonotonic --value) us, local-fs $(systemctl show local-fs.target -p ActiveEnterTimestampMonotonic --value) us"; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -E "agentd\] starting|shell\] pool ready|fsck|recovering" | head -5 | sed "s/^/  guest /"' 2>/dev/null || true
+    fi
     [ "$ms" -gt "$worst" ] && worst=$ms
     stop
 done

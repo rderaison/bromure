@@ -42,6 +42,24 @@ struct AgentdUnitTests {
         #expect(try Self.heredoc(after: "cat > /usr/local/lib/bromure/agentd-launch.py", tag: "EOP") == launcher)
     }
 
+    /// The image's prepared cache (prepare_image, at install) is the
+    /// launcher's: the same key and the same compile, or every new
+    /// workspace's first boot would miss it.
+    @Test func thePreparedBytecodeUsesTheLaunchersKey() throws {
+        let launcher = try Self.agentdConstant("_LAUNCHER_CONTENT")
+        let src = try String(contentsOfFile: Self.vmSetup + "/bromure-agentd.py", encoding: .utf8)
+        let start = try #require(src.range(of: "def prepare_image():")).lowerBound
+        let prepare = String(src[start...].prefix(6000))
+        let key = "key = (hashlib.sha256(src).hexdigest() + \" \" + sys.version).encode()"
+        #expect(launcher.contains(key) && prepare.contains(key))
+        #expect(launcher.contains("P = \"/mnt/bromure-meta/bromure-agentd.py\"") && launcher.contains("compile(src, P, \"exec\")"))
+        #expect(prepare.contains("compile(src, \"/mnt/bromure-meta/bromure-agentd.py\", \"exec\")"))
+        #expect(launcher.contains("CACHE = \"/var/cache/bromure-agentd/agentd.bin\"") && prepare.contains("\"agentd.bin\""))
+        // postinstall.sh runs it after the catalog steps.
+        let post = try String(contentsOfFile: Self.vmSetup + "/postinstall.sh", encoding: .utf8)
+        #expect(post.contains("bromure-agentd.py --prepare-image"))
+    }
+
     /// The launcher runs a script as `python3 script` would: as __main__,
     /// with its own __file__; from the cache the second time.
     @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
