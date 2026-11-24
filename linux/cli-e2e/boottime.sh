@@ -7,14 +7,19 @@
 #
 # The first boot is a new workspace's (its system disk is made, the home
 # formatted, the agent's unit and the CA installed): reported, not judged.
-# Then `boots` cold boots of that workspace, each after a full stop. PASS
-# when every one of them is under BOOT_TARGET_MS (default 1000).
+# Then `boots` cold boots of that workspace, each stopped the moment its
+# command ran (the hardest moment for a stop: the guest is still starting
+# services) and booted again after the stop. PASS when every boot is under
+# BOOT_TARGET_MS (default 1000) and every stop under STOP_TARGET_MS (default
+# 5000: a stop the guest ignored waits out its 20 s grace and is killed,
+# and the boot after it replays the journal).
 #
 # Needs /dev/kvm, Firecracker, the image. Times are monotonic
 # (/proc/uptime): the wall clock can step mid-run.
 set -euo pipefail
 BOOTS=${1:-8}
 TARGET=${BOOT_TARGET_MS:-1000}
+STOP_TARGET=${STOP_TARGET_MS:-5000}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 BIN=${BIN:-$HERE/../ACLinux/.build/release/bromure-ac}
@@ -57,9 +62,15 @@ boot() {
     t1=$(mono)
     echo $((t1 - t0))
 }
+STOP_MS=0
 stop() {
+    local t0
+    t0=$(mono)
     ac vm kill boot >/dev/null 2>&1 || true
-    for _ in $(seq 1 300); do ac vm ls 2>/dev/null | grep -E '\bboot\b' | grep -q stopped && return; sleep 0.1; done
+    for _ in $(seq 1 600); do
+        if ac vm ls 2>/dev/null | grep -E '\bboot\b' | grep -q stopped; then STOP_MS=$(( $(mono) - t0 )); return; fi
+        sleep 0.05
+    done
     echo "FAIL the workspace didn't stop"; exit 1
 }
 
@@ -67,7 +78,7 @@ echo sk-test-not-real | ac workspaces create --name boot --tool claude --auth to
 first=$(boot)
 echo "first boot (new workspace): $first ms"
 stop
-worst=0; all=""
+worst=0; all=""; worst_stop=0; stops=""
 for i in $(seq 1 "$BOOTS"); do
     sleep 1
     before=$(wc -l < "$W/daemon.log")
@@ -81,7 +92,10 @@ for i in $(seq 1 "$BOOTS"); do
     fi
     [ "$ms" -gt "$worst" ] && worst=$ms
     stop
+    stops="$stops $STOP_MS"
+    [ "$STOP_MS" -gt "$worst_stop" ] && worst_stop=$STOP_MS
 done
 echo "cold boots (ms):$all"
-echo "worst: $worst ms (target < $TARGET ms)"
-[ "$worst" -lt "$TARGET" ] && echo PASS || { echo FAIL; exit 1; }
+echo "stops (ms):$stops"
+echo "worst boot: $worst ms (target < $TARGET ms); worst stop: $worst_stop ms (target < $STOP_TARGET ms)"
+[ "$worst" -lt "$TARGET" ] && [ "$worst_stop" -lt "$STOP_TARGET" ] && echo PASS || { echo FAIL; exit 1; }

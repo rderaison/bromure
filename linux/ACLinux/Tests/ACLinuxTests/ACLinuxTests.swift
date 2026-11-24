@@ -1224,7 +1224,7 @@ struct FirecrackerBackendTests {
         c.network = .datagram(peerFD: 9)
         try c.validate()
         let j = c.firecrackerConfig(netFD: 3)
-        #expect(j["boot-source"]?["boot_args"]?.stringValue == "console=ttyS0 reboot=k panic=1")
+        #expect(j["boot-source"]?["boot_args"]?.stringValue == "console=ttyS0 reboot=k panic=1 i8042.noaux i8042.dumbkbd")
         #expect(j["boot-source"]?["initrd_path"]?.stringValue == "/i")
         #expect(j["drives"] == [["drive_id": "root", "path_on_host": "/vm/disk.raw", "is_root_device": false, "is_read_only": false,
                                  "cache_type": "Writeback"],

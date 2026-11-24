@@ -378,16 +378,28 @@ extension MachineConfig {
     // @port-skip linux-only: Firecracker backend
     public var firecrackerVsockPath: String { (runDirectory as NSString).appendingPathComponent("v.sock") }
 
+    /// What every boot adds to the image's kernel command line.
+    /// - `reboot=k`: a guest reboot (Ctrl-Alt-Del) ends Firecracker.
+    /// - `i8042.dumbkbd i8042.noaux`: Firecracker's keyboard is there to
+    ///   deliver that Ctrl-Alt-Del and answers none of the driver's probing
+    ///   commands. Probed, it took the guest ~0.5 s of timeouts to register
+    ///   (in the background, past the moment a command can run), and a stop
+    ///   sent meanwhile was read as the answer to a probe: no keyboard for
+    ///   the rest of that boot, the stop ignored until its 20 s grace ended
+    ///   in a SIGKILL, and the next boot replaying the journal and checking
+    ///   the disk. Unprobed, it is registered ~0.1 s into the kernel's boot.
+    // @port-skip linux-only: Firecracker backend
+    public static let kernelArguments = "reboot=k panic=1 i8042.noaux i8042.dumbkbd"
+
     /// Firecracker's `--config-file` JSON. `netFD`: the descriptor number
     /// the network socket has in the firecracker process.
     // @port-skip linux-only: Firecracker backend
     public func firecrackerConfig(netFD: Int32?) -> JSONValue {
-        // reboot=k: a guest reboot (Ctrl-Alt-Del) ends Firecracker. Firecracker
-        // adds pci=off and the virtio-mmio devices itself.
+        // Firecracker adds pci=off and the virtio-mmio devices itself.
         var o: [String: JSONValue] = [
             "boot-source": .object([
                 "kernel_image_path": .string(kernel),
-                "boot_args": .string(cmdline + " reboot=k panic=1"),
+                "boot_args": .string(cmdline + " " + Self.kernelArguments),
             ].merging(initrd.map { ["initrd_path": .string($0)] } ?? [:]) { a, _ in a }),
             "machine-config": ["vcpu_count": .number(Double(cpus)), "mem_size_mib": .number(Double(memoryMiB))],
         ]
