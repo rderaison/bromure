@@ -21,7 +21,11 @@
  * Usage:
  *   node tools/make-sentry-catalog.mjs --source-hash <hex> --modules <dir> \
  *        [--previous <catalog.json>] [--public-key <b64>] --out <catalog.json> \
- *        [--allow-unsigned]
+ *        [--arch arm64|amd64] [--allow-unsigned]
+ *
+ *   --arch (default arm64): arm64's catalog and modules are under
+ *   sentry/<hash>/, another arch's under sentry/<hash>/<arch>/ (kernel names
+ *   are the same on both), and an amd64 module's signed statement names it.
  *
  *   <dir> holds bromure_sentry-<kernel>.ko (+ .txt) as build.sh writes them.
  *   --previous merges an already published catalog (its entries are kept unless
@@ -41,8 +45,23 @@ export const MAGIC = "bromure-sentry-modules-v1";
 export const MODULE_MAGIC = "bromure-sentry-module-v1";
 
 export function moduleSigningPayload(sourceHash, m) {
-  return Buffer.from([MODULE_MAGIC, `sourceHash=${sourceHash}`, `kernel=${m.kernel}`,
-                      `sha256=${m.sha256.toLowerCase()}`, `bytes=${m.bytes}`].join("\n"), "utf8");
+  const lines = [MODULE_MAGIC, `sourceHash=${sourceHash}`, `kernel=${m.kernel}`,
+                 `sha256=${m.sha256.toLowerCase()}`, `bytes=${m.bytes}`];
+  // An amd64 module (its own tree, sentry/<hash>/amd64/) binds its arch too:
+  // kernel names are the same on both arches. arm64 statements are unchanged.
+  if (archOfPath(sourceHash, m.path) === "amd64") lines.push("arch=amd64");
+  return Buffer.from(lines.join("\n"), "utf8");
+}
+
+// Where an arch's catalog and modules live: arm64's is sentry/<hash>/ (what
+// every shipped app reads), another arch's sentry/<hash>/<arch>/.
+// SentryModuleArch.prefix in SentryModuleStore.swift builds the same.
+export const ARCHES = ["arm64", "amd64"];
+export function archPrefix(sourceHash, arch) {
+  return arch === "arm64" ? `sentry/${sourceHash}/` : `sentry/${sourceHash}/${arch}/`;
+}
+export function archOfPath(sourceHash, path) {
+  return typeof path === "string" && path.startsWith(archPrefix(sourceHash, "amd64")) ? "amd64" : "arm64";
 }
 const KERNEL_RE = /^[0-9][0-9A-Za-z.+~-]*$/;
 
@@ -120,6 +139,13 @@ function headersOf(txtPath) {
   return line ? line.slice("headers:".length).trim() : undefined;
 }
 
+// --arch: which guests the modules are for (default arm64), and so where they
+// live (archPrefix). A catalog only names modules under its own arch's tree.
+const arch = opt("arch") ?? "arm64";
+if (!ARCHES.includes(arch)) { console.error(`make-sentry-catalog: bad --arch ${arch}`); process.exit(2); }
+const inOwnTree = (hash, m) => typeof m.path === "string" && m.path.startsWith(archPrefix(hash, arch))
+  && archOfPath(hash, m.path) === arch;
+
 // --verify <catalog.json>: check an already signed catalog instead of building
 // one — its signature, every module's own signature, and each module file in
 // --modules against the sha256/size the catalog vouches for. Lets the catalog
@@ -142,6 +168,7 @@ if (verifyPath) {
   if (!verify(null, signingPayload(cat, cat.signature.signedAt), pub, Buffer.from(cat.signature.edSignature, "base64")))
     fail("catalog signature does NOT verify against the pinned key", WRONG_KEY);
   for (const m of cat.modules) {
+    if (!inOwnTree(cat.sourceHash, m)) fail(`module ${m.kernel}: ${m.path} isn't under the ${arch} tree`);
     if (!m.signature || !verify(null, moduleSigningPayload(cat.sourceHash, m), pub, Buffer.from(m.signature, "base64")))
       fail(`module ${m.kernel}: signature does NOT verify against the pinned key`, WRONG_KEY);
     const file = join(dir, `bromure_sentry-${m.kernel}.ko`);
@@ -161,7 +188,7 @@ if (!/^[0-9a-f]{64}$/.test(sourceHash)) { console.error("make-sentry-catalog: ba
 const modulesDir = req("modules");
 requireRealDir(modulesDir);
 const out = req("out");
-const prefix = `sentry/${sourceHash}/`;
+const prefix = archPrefix(sourceHash, arch);
 
 const byKernel = new Map();
 
@@ -183,7 +210,13 @@ if (previousPath && lexists(previousPath)) {
     if (!ok) { console.error("make-sentry-catalog: the published catalog's signature does NOT verify — refusing to merge"); process.exit(1); }
     previousVerified = true;
   }
-  for (const m of prev.modules ?? []) byKernel.set(m.kernel, m);
+  for (const m of prev.modules ?? []) {
+    if (!inOwnTree(sourceHash, m)) {
+      console.error(`make-sentry-catalog: previous catalog's ${m.kernel} (${m.path}) isn't under the ${arch} tree — refusing to merge`);
+      process.exit(1);
+    }
+    byKernel.set(m.kernel, m);
+  }
   console.log(`make-sentry-catalog: kept ${byKernel.size} published module(s)`);
 }
 
@@ -257,7 +290,8 @@ for (const name of readdirSync(modulesDir).sort()) {
     // Detached copy, published beside the module (<path>.sig), so a module
     // can be checked on its own.
     writeNoFollow(`${file}.sig`, JSON.stringify({
-      format: MODULE_MAGIC, sourceHash, kernel, sha256, bytes, edSignature: entry.signature,
+      format: MODULE_MAGIC, sourceHash, kernel, sha256, bytes,
+      ...(arch === "arm64" ? {} : { arch }), edSignature: entry.signature,
     }, null, 2) + "\n");
   }
   byKernel.set(kernel, entry);
