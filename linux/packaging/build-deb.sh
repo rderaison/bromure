@@ -143,6 +143,19 @@ step "passt ($TARGET_ARCH)"
 BROMURE_PASST_ARCH="$TARGET_ARCH" BROMURE_PASST_SRC="$WORK/passt-src" "$ROOT/linux/passt/build.sh" "$L/bin"
 file "$L/bin/passt" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )" \
   || die "passt isn't a $TARGET_ARCH binary: $(file "$L/bin/passt")"
+
+# --- bromure-preinit ------------------------------------------------------------------
+# The /init of a boot template's initramfs (linux/preinit): a static binary
+# for the guest, which runs on this same architecture.
+step "bromure-preinit ($TARGET_ARCH)"
+PREINIT_CC=cc
+[ "$TARGET_ARCH" = "$HOST_ARCH" ] || PREINIT_CC=$TARGET_ARCH-linux-gnu-gcc
+BROMURE_PREINIT_CC=$PREINIT_CC "$ROOT/linux/preinit/build.sh" "$L/bin"
+file "$L/bin/bromure-preinit" | grep -q "$( [ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || echo aarch64 )" \
+  || die "bromure-preinit isn't a $TARGET_ARCH binary: $(file "$L/bin/bromure-preinit")"
+file "$L/bin/bromure-preinit" | grep -Eq 'static(-pie)? linked|statically linked' \
+  || die "bromure-preinit isn't static: $(file "$L/bin/bromure-preinit")"
+
 # Their user namespaces: allowed by an AppArmor profile (Ubuntu restricts
 # them for programs without one).
 install -d -m 755 "$PKG/etc/apparmor.d"

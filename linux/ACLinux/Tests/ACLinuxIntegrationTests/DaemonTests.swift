@@ -219,7 +219,8 @@ struct DaemonTests {
         // re-adopt it: it ends that Firecracker (still ours: start time and
         // --id) and records the VM stopped. Under systemd it is re-adopted
         // (systemd/test-unit-kvm.sh, test-crash-upload.sh).
-        #expect(try w.cli("vm", "run", "--name", "dm2").0 == 0)
+        let (rc3, _, err3) = try w.cli("vm", "run", "--name", "dm2")
+        #expect(rc3 == 0, "run dm2: \(err3)")
         #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
         let kids = Self.children(of: daemon.processIdentifier)
         let names = Set(kids.map { $0.1 })

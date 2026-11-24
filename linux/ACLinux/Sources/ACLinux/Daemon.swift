@@ -233,6 +233,9 @@ public actor Daemon {
         }
     }
     private let passt: PasstUplink
+    /// Boot templates (BootTemplate): nil when off (BROMURE_BOOT_TEMPLATE=0,
+    /// no bromure-preinit).
+    lazy var bootTemplates: BootTemplateStore? = BootTemplateStore.make(stateDir: config.stateDir, runtimeDir: config.runtimeDir)
     let sw: InterimSwitch
     /// The workspaces' intercepting proxy (its CA in `<state>/mitm`); nil
     /// when it couldn't start, and the guests then go out directly.
@@ -1993,6 +1996,9 @@ public actor Daemon {
         // restarted daemon takes the same link back.
         let (port, peer) = try DgramPort.pair(name: "vm-" + rec.shortId)
         qc.network = .datagram(peerFD: peer)
+        // From a boot template of its shape, when there is one (a rescue
+        // boots the plain way: it is there to look at what went wrong).
+        if restoreFrom == nil, rec.rescueFor == nil { qc.bootTemplate = bootTemplates?.ready(for: qc) }
         let storeName = "net-" + rec.shortId
         FDStore.store(storeName, [port.fd])
         let vsock: HybridVsockListener
@@ -2094,6 +2100,7 @@ public actor Daemon {
             BootTrace.mark("bromure-" + rec.shortId, "services up; starting the machine")
             try await machine.start()
             BootTrace.mark("bromure-" + rec.shortId, "machine running")
+            noteBootTemplate(machine, rec, rescue: rec.rescueFor != nil || restoreFrom != nil)
         } catch {
             stampClone()
             live[id] = nil
@@ -2157,6 +2164,28 @@ public actor Daemon {
     @MainActor
     static func automationWorktreeBranches(_ store: ScheduledAutomationStore?) -> [String] {
         store?.runs.compactMap { $0.branchSlug.map { "wt/" + $0 } } ?? []
+    }
+
+    /// After a start: a template that failed this boot goes (the boot went
+    /// on the ordinary way); a shape without one gets one made, once this
+    /// boot is out of the way (a template's own boot takes CPU).
+    // @port-skip linux-only: boot template
+    func noteBootTemplate(_ machine: FirecrackerMachine, _ rec: VMRecord, rescue: Bool) {
+        guard let store = bootTemplates, !rescue else { return }
+        let config = machine.config
+        Task(priority: .background) { [weak self] in
+            if let template = config.bootTemplate {
+                if let failure = await machine.templateFailure { store.discard(template, reason: failure) }
+                return
+            }
+            try? await Task.sleep(for: BootTemplateStore.buildDelay)
+            // For the kernel the next boot uses: this one may have booted the
+            // compressed image while its uncompressed copy was being made
+            // (KernelCache), and a template is for one kernel file.
+            var next = config
+            if let kernel = try? await self?.machineConfig(rec).kernel { next.kernel = kernel }
+            await store.build(for: next)
+        }
     }
 
     /// A VM's machine configuration (launch and re-adoption build the same one).

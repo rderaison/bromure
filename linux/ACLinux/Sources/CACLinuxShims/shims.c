@@ -370,3 +370,240 @@ int acl_has_access_acl(const char *path) {
     return 0;
 #endif
 }
+
+
+// --- boot templates ---------------------------------------------------------
+#ifdef __linux__
+#include <pthread.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
+#include "bromure_preinit_params.h"
+
+uint32_t acl_preinit_version(void) { return BROMURE_PREINIT_VERSION; }
+const char *acl_preinit_ready_line(void) { return BROMURE_PREINIT_READY_LINE; }
+
+#define ACL_COPY_CHUNK (1u << 20)
+
+struct acl_extent { uint64_t off, len; };
+struct acl_copy_job {
+    int src, dst;
+    const struct acl_extent *chunks;
+    size_t nchunks;
+    atomic_size_t next;
+    atomic_int error;
+};
+
+static void *acl_copy_worker(void *arg) {
+    struct acl_copy_job *job = arg;
+    uint8_t *buf = malloc(ACL_COPY_CHUNK);
+    if (!buf) { atomic_store(&job->error, ENOMEM); return NULL; }
+    for (;;) {
+        size_t i = atomic_fetch_add(&job->next, 1);
+        if (i >= job->nchunks || atomic_load(&job->error)) break;
+        uint64_t off = job->chunks[i].off, left = job->chunks[i].len;
+        while (left > 0) {
+            ssize_t n = pread(job->src, buf, left < ACL_COPY_CHUNK ? left : ACL_COPY_CHUNK, (off_t)off);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { atomic_store(&job->error, n < 0 ? errno : EIO); break; }
+            ssize_t done = 0;
+            while (done < n) {
+                ssize_t w = pwrite(job->dst, buf + done, (size_t)(n - done), (off_t)(off + (uint64_t)done));
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) { atomic_store(&job->error, w < 0 ? errno : EIO); break; }
+                done += w;
+            }
+            if (done < n) break;
+            off += (uint64_t)n;
+            left -= (uint64_t)n;
+        }
+    }
+    free(buf);
+    return NULL;
+}
+
+int acl_memfd_from_sparse(const char *path, int threads, uint64_t *size_out) {
+    int src = open(path, O_RDONLY | O_CLOEXEC);
+    if (src < 0) return -errno;
+    struct stat st;
+    if (fstat(src, &st) != 0) { int e = errno; close(src); return -e; }
+    uint64_t size = (uint64_t)st.st_size;
+    int fd = (int)syscall(SYS_memfd_create, "bromure-guest", 1u /* MFD_CLOEXEC */);
+    if (fd < 0) { int e = errno; close(src); return -e; }
+    int err = 0;
+    struct acl_extent *chunks = NULL;
+    size_t n = 0, cap = 0;
+    if (ftruncate(fd, (off_t)size) != 0) err = errno;
+    // The data extents, cut into chunks the workers take in turn.
+    off_t pos = 0;
+    while (!err && (uint64_t)pos < size) {
+        off_t data = lseek(src, pos, SEEK_DATA);
+        if (data < 0) { if (errno != ENXIO) err = errno; break; }
+        off_t hole = lseek(src, data, SEEK_HOLE);
+        if (hole < 0) { err = errno; break; }
+        for (uint64_t o = (uint64_t)data; o < (uint64_t)hole; o += 4 * ACL_COPY_CHUNK) {
+            if (n == cap) {
+                cap = cap ? cap * 2 : 256;
+                struct acl_extent *grown = realloc(chunks, cap * sizeof *chunks);
+                if (!grown) { err = ENOMEM; break; }
+                chunks = grown;
+            }
+            uint64_t len = (uint64_t)hole - o;
+            chunks[n].off = o;
+            chunks[n].len = len < 4 * ACL_COPY_CHUNK ? len : 4 * ACL_COPY_CHUNK;
+            n++;
+        }
+        pos = hole;
+    }
+    if (!err && n > 0) {
+        struct acl_copy_job job = { .src = src, .dst = fd, .chunks = chunks, .nchunks = n };
+        atomic_init(&job.next, 0);
+        atomic_init(&job.error, 0);
+        if (threads < 1) threads = 1;
+        if (threads > 16) threads = 16;
+        if ((size_t)threads > n) threads = (int)n;
+        pthread_t tids[16];
+        int started = 0;
+        for (int i = 1; i < threads; i++)
+            if (pthread_create(&tids[started], NULL, acl_copy_worker, &job) == 0) started++;
+        acl_copy_worker(&job);
+        for (int i = 0; i < started; i++) pthread_join(tids[i], NULL);
+        err = atomic_load(&job.error);
+    }
+    free(chunks);
+    close(src);
+    if (err) { close(fd); return -err; }
+    if (size_out) *size_out = size;
+    return fd;
+}
+
+static int acl_page_is_zero(const uint8_t *p) {
+    const uint64_t *w = (const uint64_t *)(const void *)p;
+    for (size_t i = 0; i < 4096 / sizeof *w; i++) if (w[i]) return 0;
+    return 1;
+}
+
+int acl_template_memory(const char *src_path, const char *dst_path, uint64_t *offset_out, uint32_t *version_out,
+                        uint64_t *data_bytes_out) {
+    static const uint8_t magic[16] = BROMURE_PREINIT_MAGIC;
+    int src = open(src_path, O_RDONLY | O_CLOEXEC);
+    if (src < 0) return -errno;
+    int dst = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (dst < 0) { int e = errno; close(src); return -e; }
+    uint8_t *buf = NULL;
+    if (posix_memalign((void **)&buf, 4096, ACL_COPY_CHUNK) != 0) { close(src); close(dst); return -ENOMEM; }
+    int err = 0, found = 0;
+    uint64_t pos = 0, best_off = 0, best_counter = 0, kept = 0;
+    uint32_t best_version = 0;
+    for (;;) {
+        ssize_t n = pread(src, buf, ACL_COPY_CHUNK, (off_t)pos);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { err = errno; break; }
+        if (n == 0) break;
+        size_t len = (size_t)n;
+        for (size_t k = 0; k < len;) {
+            size_t page = len - k < 4096 ? len - k : 4096;
+            if (page == 4096 && acl_page_is_zero(buf + k)) { k += 4096; continue; }
+            // A run of pages with data, written in one go.
+            size_t end = k;
+            while (end < len) {
+                size_t p = len - end < 4096 ? len - end : 4096;
+                if (p == 4096 && acl_page_is_zero(buf + end)) break;
+                if (p == 4096 && memcmp(buf + end, magic, sizeof magic) == 0) {
+                    const struct bromure_preinit_params *pp = (const void *)(buf + end);
+                    if (pp->state == BROMURE_PREINIT_READY && (!found || pp->counter > best_counter)) {
+                        found = 1;
+                        best_off = pos + end;
+                        best_counter = pp->counter;
+                        best_version = pp->version;
+                    }
+                }
+                end += p;
+            }
+            size_t done = k;
+            while (done < end) {
+                ssize_t w = pwrite(dst, buf + done, end - done, (off_t)(pos + done));
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) { err = w < 0 ? errno : EIO; break; }
+                done += (size_t)w;
+            }
+            if (err) break;
+            kept += end - k;
+            k = end;
+        }
+        if (err) break;
+        pos += len;
+    }
+    if (!err && ftruncate(dst, (off_t)pos) != 0) err = errno;
+    free(buf);
+    close(src);
+    if (close(dst) != 0 && !err) err = errno;
+    if (err) return -err;
+    if (!found) return -ENOENT;
+    if (offset_out) *offset_out = best_off;
+    if (version_out) *version_out = best_version;
+    if (data_bytes_out) *data_bytes_out = kept;
+    return 0;
+}
+
+static int acl_pwrite_all(int fd, const void *p, size_t len, uint64_t off) {
+    const uint8_t *b = p;
+    while (len > 0) {
+        ssize_t w = pwrite(fd, b, len, (off_t)off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return w < 0 ? -errno : -EIO;
+        b += w; len -= (size_t)w; off += (uint64_t)w;
+    }
+    return 0;
+}
+
+int acl_preinit_go(int memfd, uint64_t offset, uint32_t flags, uint64_t realtime_ns, const uint8_t *mac,
+                   const uint8_t *seed, uint32_t ndisks, const char *const *names, const uint64_t *sectors,
+                   const char *root) {
+    if (ndisks > BROMURE_PREINIT_MAX_DISKS) return -E2BIG;
+    struct bromure_preinit_params p;
+    memset(&p, 0, sizeof p);
+    p.flags = flags & ~BROMURE_PREINIT_HAS_MAC;
+    p.realtime_ns = realtime_ns;
+    if (mac) { memcpy(p.mac, mac, 6); p.flags |= BROMURE_PREINIT_HAS_MAC; }
+    if (seed) memcpy(p.seed, seed, sizeof p.seed);
+    p.ndisks = ndisks;
+    for (uint32_t i = 0; i < ndisks; i++) {
+        if (strlen(names[i]) >= sizeof p.disks[i].name) return -ENAMETOOLONG;
+        strcpy(p.disks[i].name, names[i]);
+        p.disks[i].sectors = sectors[i];
+    }
+    if (root) {
+        if (strlen(root) >= sizeof p.root) return -ENAMETOOLONG;
+        strcpy(p.root, root);
+    }
+    // Everything after `go`, then `go` itself: magic, version, state and
+    // counter stay preinit's.
+    size_t after = offsetof(struct bromure_preinit_params, flags);
+    int r = acl_pwrite_all(memfd, (const uint8_t *)&p + after, sizeof p - after, offset + after);
+    explicit_bzero(&p, sizeof p);
+    if (r != 0) return r;
+    uint32_t go = 1;
+    return acl_pwrite_all(memfd, &go, sizeof go, offset + offsetof(struct bromure_preinit_params, go));
+}
+
+int64_t acl_preinit_state(int memfd, uint64_t offset) {
+    uint32_t state = 0;
+    ssize_t n = pread(memfd, &state, sizeof state, (off_t)(offset + offsetof(struct bromure_preinit_params, state)));
+    if (n < 0) return -errno;
+    if (n != (ssize_t)sizeof state) return -EIO;
+    return (int64_t)state;
+}
+#else
+uint32_t acl_preinit_version(void) { return 0; }
+const char *acl_preinit_ready_line(void) { return ""; }
+int acl_memfd_from_sparse(const char *path, int threads, uint64_t *size_out) { (void)path; (void)threads; (void)size_out; return -ENOSYS; }
+int acl_template_memory(const char *src, const char *dst, uint64_t *offset_out, uint32_t *version_out, uint64_t *data_bytes_out) {
+    (void)src; (void)dst; (void)offset_out; (void)version_out; (void)data_bytes_out; return -ENOSYS;
+}
+int acl_preinit_go(int memfd, uint64_t offset, uint32_t flags, uint64_t realtime_ns, const uint8_t *mac, const uint8_t *seed,
+                   uint32_t ndisks, const char *const *names, const uint64_t *sectors, const char *root) {
+    (void)memfd; (void)offset; (void)flags; (void)realtime_ns; (void)mac; (void)seed; (void)ndisks; (void)names; (void)sectors; (void)root;
+    return -ENOSYS;
+}
+int64_t acl_preinit_state(int memfd, uint64_t offset) { (void)memfd; (void)offset; return -ENOSYS; }
+#endif

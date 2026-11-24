@@ -90,6 +90,14 @@ public struct MachineConfig: Sendable {
     /// A snapshot to resume instead of booting (`vm.snap` and `vm.mem` in
     /// this directory, made by FirecrackerMachine.snapshot).
     public var restoreFrom: String?
+    /// A boot template of this VM's shape to start from instead of booting
+    /// the kernel (BootTemplate; a failed start from it boots the ordinary
+    /// way).
+    public var bootTemplate: BootTemplate?
+    /// Firecracker records which pages the guest writes, so a snapshot can
+    /// hold only those (a boot template's own VM; it costs a running guest
+    /// write faults, so nothing else sets it).
+    public var trackDirtyPages = false
     public var extraDisks: [Disk] = []
     public var shares: [Share] = []
     public var network: Network = .none

@@ -60,6 +60,9 @@ public actor FirecrackerMachine {
     private var daemons: [(tag: String, process: ChildProcess)] = []
     private var pendingReason: StopReason?
     private var stopWaiters: [CheckedContinuation<StopInfo, Never>] = []
+    /// Why this start didn't use `config.bootTemplate` after all (it booted
+    /// the ordinary way): the template is no good.
+    public private(set) var templateFailure: String?
 
     // @port-skip linux-only: Firecracker backend
     public init(config: MachineConfig) {
@@ -116,6 +119,19 @@ public actor FirecrackerMachine {
         try config.validate()
         state = .starting
         let fm = FileManager.default
+        // A boot from a template: its memory copied while the disk and the
+        // shares are made ready.
+        let template = config.restoreFrom == nil && peerFD >= 0 ? config.bootTemplate : nil
+        let memory = template.map { t in
+            Task.detached { () -> Int32 in
+                var size: UInt64 = 0
+                let fd = acl_memfd_from_sparse(t.memory, 4, &size)
+                if fd >= 0, size != t.memoryBytes { close(fd); return -EINVAL }
+                return fd
+            }
+        }
+        var memfd: Int32 = -1
+        defer { if memfd >= 0 { close(memfd) } }
         do {
             try fm.createDirectory(atPath: config.runDirectory, withIntermediateDirectories: true)
             // A fresh console log per Firecracker (it appends): the daemon reads
@@ -147,6 +163,26 @@ public actor FirecrackerMachine {
             try? fm.removeItem(atPath: log)
             var args = ["--id", config.name, "--api-sock", config.firecrackerAPISocketPath,
                         "--log-path", log, "--level", "Warning"]
+            if let template, let memory {
+                memfd = await memory.value
+                do {
+                    guard memfd >= 0 else { throw MachineError.io("copying the template's memory", -memfd) }
+                    BootTrace.mark(config.name, "template memory ready (\(template.memoryBytes >> 20) MB guest)")
+                    try await startFromTemplate(template, args: args, peerFD: peerFD, memfd: memfd, log: log)
+                    state = .running
+                    return
+                } catch {
+                    // The ordinary boot, on fresh backends (the template's
+                    // Firecracker had connected to these).
+                    templateFailure = "\(error)"
+                    BootTrace.mark(config.name, "template boot failed (\(error)): booting the ordinary way")
+                    if let p = process, p.isRunning { p.signal(SIGKILL); _ = await p.waitForExit() }
+                    process = nil
+                    stopDaemons()
+                    try await startDaemons()
+                    for p in [config.firecrackerAPISocketPath, config.firecrackerVsockPath] { try? fm.removeItem(atPath: p) }
+                }
+            }
             // A resume loads its snapshot through the API once it's up; a
             // boot is configured from the start.
             if config.restoreFrom == nil {
@@ -194,6 +230,76 @@ public actor FirecrackerMachine {
         }
     }
 
+    /// A boot from `template`: a Firecracker started empty, the template's
+    /// snapshot loaded into it over `memfd` (the template's memory, this
+    /// guest's from here on) with this VM's backends, the placeholder disks
+    /// swapped for the VM's, this boot's parameters written into preinit's
+    /// page, the vCPUs resumed. Returns once preinit handed over to the root
+    /// file system's init; throws when anything before that goes wrong (the
+    /// caller then boots the ordinary way).
+    // @port-skip linux-only: Firecracker boot template
+    private func startFromTemplate(_ template: BootTemplate, args: [String], peerFD: Int32, memfd: Int32, log: String) async throws {
+        // The child's descriptors 3 and 4: the NIC (the snapshot names
+        // fd:3, as a boot's config does) and the guest's memory.
+        let p = try ChildProcess(name: "firecracker", executable: config.firecrackerBinary, arguments: args,
+                                 logPath: config.serialLog, inheritedFDs: [peerFD, memfd])
+        try p.start()
+        process = p
+        BootTrace.mark(config.name, "firecracker spawned")
+        func exitedEarly() -> MachineError? {
+            guard let status = p.exitStatus else { return nil }
+            let out = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+            return .exitedDuringStart(status, String(out.trimmingCharacters(in: .whitespacesAndNewlines).suffix(2000)))
+        }
+        var deadline = ContinuousClock.now + .seconds(10)
+        while !FileManager.default.fileExists(atPath: config.firecrackerAPISocketPath) {
+            if let e = exitedEarly() { throw e }
+            if ContinuousClock.now > deadline { throw MachineError.io("firecracker API \(config.firecrackerAPISocketPath)", ETIMEDOUT) }
+            try await Task.sleep(for: .microseconds(500))
+        }
+        var load: [String: JSONValue] = [
+            "snapshot_path": .string(template.snapshot),
+            "mem_backend": ["backend_type": "File", "backend_path": "/proc/self/fd/4"],
+            "resume_vm": false,
+            "vsock_override": ["uds_path": .string(config.firecrackerVsockPath), "guest_cid": .number(Double(config.vsockCID))],
+        ]
+        if !config.shares.isEmpty {
+            load["fs_overrides"] = .array(config.shares.indices.map { i in
+                ["fs_id": .string("fs\(i)"), "socket": .string(config.shareSocketPath(i))]
+            })
+        }
+        var r = try await api.request("PUT", "/snapshot/load", .object(load), timeout: .seconds(30))
+        guard r.ok else { throw MachineError.toolFailed("firecracker template load", Int32(r.status), r.fault) }
+        BootTrace.mark(config.name, "template loaded")
+        // The workspace's disks in place of the placeholders: the guest
+        // learns their sizes from the change (preinit waits for them).
+        let disks = [config.overlay] + config.extraDisks.map(\.path)
+        for (i, path) in disks.enumerated() {
+            let id = i == 0 ? "root" : "disk\(i)"
+            r = try await api.request("PATCH", "/drives/\(id)", ["drive_id": .string(id), "path_on_host": .string(path)])
+            guard r.ok else { throw MachineError.toolFailed("firecracker template drive \(id)", Int32(r.status), r.fault) }
+        }
+        try template.go(memfd: memfd, mac: config.macAddress, disks: disks, trace: BootTrace.enabled)
+        try await resume()
+        BootTrace.mark(config.name, "guest resumed from the template")
+        deadline = ContinuousClock.now + .seconds(10)
+        while true {
+            let state = acl_preinit_state(memfd, template.paramsOffset)
+            if state == Int64(BROMURE_PREINIT_HANDOFF) { break }
+            if state == Int64(BROMURE_PREINIT_FAILED) || state < 0 {
+                throw MachineError.invalidConfig("preinit failed in the guest: " + Self.lastWords(config.serialLog ?? "", binary: "bromure-preinit"))
+            }
+            if let e = exitedEarly() { throw e }
+            if ContinuousClock.now > deadline { throw MachineError.io("waiting for preinit to start the guest's init", ETIMEDOUT) }
+            try await Task.sleep(for: .microseconds(500))
+        }
+        BootTrace.mark(config.name, "preinit started the guest's init (kernel boot skipped)")
+        Task { [weak self] in
+            let status = await p.waitForExit()
+            await self?.exited(status)
+        }
+    }
+
     /// What a resume maps as the guest's memory: a copy of `vm.mem` (mapped
     /// shared, the running guest writes into it), so a failed resume leaves
     /// the snapshot as it was.
@@ -225,14 +331,18 @@ public actor FirecrackerMachine {
     /// Firecracker and the virtiofsds end (`.suspended`). A failed snapshot
     /// leaves the VM running.
     // @port-skip linux-only: Firecracker snapshot (macOS: VZVirtualMachine.saveMachineStateTo)
-    public func snapshot(into dir: String) async throws {
+    /// `writtenPagesOnly` (a VM started with `trackDirtyPages`): the memory
+    /// file holds only the pages written since the boot, holes elsewhere
+    /// (a boot template's: ~100 MB of data instead of the guest's whole
+    /// memory in zeros).
+    public func snapshot(into dir: String, writtenPagesOnly: Bool = false) async throws {
         guard state == .running, let process else { throw MachineError.notRunning }
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         try await pause()
         let r: FirecrackerAPI.Response
         do {
             r = try await api.request("PUT", "/snapshot/create", [
-                "snapshot_type": "Full",
+                "snapshot_type": writtenPagesOnly ? "Diff" : "Full",
                 "snapshot_path": .string(dir + "/vm.snap"),
                 "mem_file_path": .string(dir + "/vm.mem"),
             ], timeout: .seconds(300))
@@ -322,15 +432,17 @@ public actor FirecrackerMachine {
             let tag = share.tag
             Task { [weak self] in
                 _ = await d.waitForExit()
-                await self?.daemonExited(tag)
+                await self?.daemonExited(tag, d)
             }
         }
     }
 
     // @port-skip linux-only: virtiofsd supervision
-    private func daemonExited(_ tag: String) {
+    private func daemonExited(_ tag: String, _ daemon: ChildProcess) {
         // The guest lost a filesystem it can't get back (no vhost-user
-        // reconnect): take the VM down.
+        // reconnect): take the VM down. Only for a daemon this VM still
+        // runs on: the ones a failed template start had were replaced.
+        guard daemons.contains(where: { $0.process === daemon }) else { return }
         guard state == .running || state == .starting, pendingReason == nil, let process else { return }
         pendingReason = .virtiofsdExited(tag: tag)
         process.signal(SIGKILL)
@@ -401,7 +513,8 @@ extension MachineConfig {
                 "kernel_image_path": .string(kernel),
                 "boot_args": .string(cmdline + " " + Self.kernelArguments),
             ].merging(initrd.map { ["initrd_path": .string($0)] } ?? [:]) { a, _ in a }),
-            "machine-config": ["vcpu_count": .number(Double(cpus)), "mem_size_mib": .number(Double(memoryMiB))],
+            "machine-config": .object(["vcpu_count": .number(Double(cpus)), "mem_size_mib": .number(Double(memoryMiB))]
+                .merging(trackDirtyPages ? ["track_dirty_pages": true] : [:]) { a, _ in a }),
         ]
         // Writeback: the guest's flushes reach the host file (fdatasync).
         // Firecracker's default, Unsafe, drops them: a host crash could lose

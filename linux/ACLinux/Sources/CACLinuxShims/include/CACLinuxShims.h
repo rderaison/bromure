@@ -85,6 +85,38 @@ int acl_pidfd_open(int pid);
 /// pidfd_send_signal(2): signals the process the pidfd refers to, never a recycled pid.
 int acl_pidfd_send_signal(int pidfd, int sig);
 
+// --- boot templates (BootTemplate.swift, linux/preinit) ---
+#include "bromure_preinit_params.h"
+
+/// A memfd (O_CLOEXEC) holding a copy of the file `path`: a guest's memory,
+/// started from a template's. Only the file's data is copied (it is sparse),
+/// by up to `threads` threads. Returns the fd and its size, or -errno.
+int acl_memfd_from_sparse(const char *path, int threads, uint64_t *size_out);
+
+/// Copies a template's memory file `src` to `dst` (created; all-zero pages
+/// become holes) and finds preinit's parameter page in it: the page that
+/// starts with its magic, in state READY, with the highest counter (the
+/// kernel may have left a stale copy behind). Returns 0 with the page's
+/// offset, its version and the bytes of data kept; -ENOENT when there is
+/// no such page; or -errno.
+int acl_template_memory(const char *src, const char *dst, uint64_t *offset_out, uint32_t *version_out,
+                        uint64_t *data_bytes_out);
+
+/// Fills in the parameter page at `offset` of a guest's memory and tells
+/// preinit to go (written last). `mac`: 6 bytes or NULL; `seed`: 64 random
+/// bytes; `names`/`sectors`: the guest's disks, in order, with their real
+/// sizes; `root`: a root= value, or "" for the command line's. 0 or -errno.
+int acl_preinit_go(int memfd, uint64_t offset, uint32_t flags, uint64_t realtime_ns, const uint8_t *mac,
+                   const uint8_t *seed, uint32_t ndisks, const char *const *names, const uint64_t *sectors,
+                   const char *root);
+
+/// The parameter page's state (BROMURE_PREINIT_READY, _HANDOFF, _FAILED), or -errno.
+int64_t acl_preinit_state(int memfd, uint64_t offset);
+
+/// preinit's version (BROMURE_PREINIT_VERSION) and its console line once ready.
+uint32_t acl_preinit_version(void);
+const char *acl_preinit_ready_line(void);
+
 #endif
 
 /// PAM authentication of `user` with `password` under `service` (an unknown

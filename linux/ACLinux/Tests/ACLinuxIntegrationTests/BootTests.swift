@@ -226,3 +226,98 @@ final class NIOLockedValueBoxShim<T: Sendable>: @unchecked Sendable {
     func mutate(_ f: (inout T) -> Void) { lock.lock(); f(&v); lock.unlock() }
     var value: T { lock.lock(); defer { lock.unlock() }; return v }
 }
+
+/// A boot from a template (BootTemplate): needs bromure-preinit
+/// (linux/preinit/build.sh) and a Firecracker with the load's overrides
+/// (linux/firecracker/build.sh, patch 0005).
+/// In BootTests' suite, so one after the other with its tests: each has a
+/// system disk of its own in /tmp, and /tmp has a quota.
+extension BootTests {
+    static var templates: Bool { FileManager.default.isExecutableFile(atPath: BootTemplateStore.defaultPreinit) }
+
+    static func store(_ ws: Workspace) -> BootTemplateStore {
+        BootTemplateStore(root: ws.dir + "/templates", runtimeDir: ws.dir + "/run", preinit: BootTemplateStore.defaultPreinit)
+    }
+
+    /// The agent's first log line: written once the root, the shares and
+    /// the clock are what a boot gives it.
+    static func agentLog(_ ws: Workspace) async throws -> String {
+        let path = ws.dir + "/outbox/agentd.log"
+        for _ in 0..<200 {
+            if let s = try? String(contentsOfFile: path, encoding: .utf8), s.contains("\n") { return s }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return ""
+    }
+
+    @Test("template made -> boot from it -> agentd dials with this VM's CID, its clock right -> stop", .enabled(if: BootTests.templates))
+    func bootsFromItsTemplate() async throws {
+        let ws = try await Workspace()
+        let store = Self.store(ws)
+        #expect(store.ready(for: ws.config) == nil)
+        let t0 = ContinuousClock.now
+        #expect(await store.build(for: ws.config), "the template is made")
+        print("TIMING [cid \(ws.cid)] template made in \(ms(ContinuousClock.now - t0))")
+        let template = try #require(store.ready(for: ws.config))
+        #expect(await store.build(for: ws.config) == false, "and not made twice")
+        var st = stat()
+        #expect(stat(template.memory, &st) == 0 && UInt64(st.st_size) == UInt64(ws.config.memoryMiB) << 20)
+        #expect(Int(st.st_blocks) * 512 < 400 << 20, "sparse: only what the kernel touched")
+
+        var config = ws.config
+        config.bootTemplate = template
+        let listener = try await HybridVsockListener.listen(udsPath: config.firecrackerVsockPath, port: agentPort, cid: ws.cid)
+        let conns = ConnQueue(listener.connections)
+        let vm = FirecrackerMachine(config: config)
+        let t1 = ContinuousClock.now
+        try await vm.start()
+        #expect(await vm.templateFailure == nil, "booted from the template")
+        let first = await next(conns, timeout: .seconds(60))
+        print("TIMING [cid \(ws.cid)] boot from the template: agentd dial \(ms(ContinuousClock.now - t1))")
+        #expect(first != nil, "agentd never dialed")
+        #expect(first?.peer.cid.rawValue == ws.cid, "the guest has this VM's CID, not the template's")
+        // The guest's clock is this boot's (the agent stamps its log with it).
+        let log = try await Self.agentLog(ws)
+        let stamp = log.split(separator: "\n").first.map { String($0.prefix(8)) } ?? ""
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        if let guest = f.date(from: stamp), let host = f.date(from: f.string(from: Date())) {
+            let apart = abs(guest.timeIntervalSince(host)).truncatingRemainder(dividingBy: 3600)
+            #expect(min(apart, 3600 - apart) < 30, "guest clock \(stamp) against the host's \(f.string(from: Date()))")
+        } else {
+            Issue.record("no time stamp in the agent's log: \(log.prefix(200))")
+        }
+        let info = await vm.stop(timeout: .seconds(30))
+        #expect(info.reason == .stopped)
+        await listener.close()
+        await ws.cleanUp()
+    }
+
+    @Test("a template that won't load -> the VM boots the ordinary way, and says why", .enabled(if: BootTests.templates))
+    func aBrokenTemplateFallsBackToAnOrdinaryBoot() async throws {
+        let ws = try await Workspace()
+        let store = Self.store(ws)
+        #expect(await store.build(for: ws.config))
+        let template = try #require(store.ready(for: ws.config))
+        try Data("not a snapshot".utf8).write(to: URL(fileURLWithPath: template.snapshot))
+
+        var config = ws.config
+        config.bootTemplate = template
+        let listener = try await HybridVsockListener.listen(udsPath: config.firecrackerVsockPath, port: agentPort, cid: ws.cid)
+        let conns = ConnQueue(listener.connections)
+        let vm = FirecrackerMachine(config: config)
+        try await vm.start()
+        let failure = await vm.templateFailure
+        #expect(failure?.contains("template load") == true, "\(failure ?? "nil")")
+        let first = await next(conns, timeout: .seconds(60))
+        #expect(first?.peer.cid.rawValue == ws.cid, "booted all the same")
+        store.discard(template, reason: failure ?? "")
+        #expect(store.ready(for: ws.config) == nil)
+        #expect(await store.build(for: ws.config) == false, "not made again by this daemon")
+        let info = await vm.stop(timeout: .seconds(30))
+        #expect(info.reason == .stopped)
+        await listener.close()
+        await ws.cleanUp()
+    }
+}
