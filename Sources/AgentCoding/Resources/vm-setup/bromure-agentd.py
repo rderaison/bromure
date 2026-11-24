@@ -10343,12 +10343,20 @@ def prepare_image():
             os.makedirs(os.path.dirname(_BINFMT_MOUNT_WANT), exist_ok=True)
             os.symlink(unit, _BINFMT_MOUNT_WANT)
 
+    def mount_conditions():
+        # An image baked before setup.sh wrote these (a catalog download):
+        # without them its first boot logs a failed mount per unattached
+        # share slot, until task_mount_conditions installs them for the next.
+        for tag, unit in _MOUNT_SLOTS:
+            put("/etc/systemd/system/%s.d/%s" % (unit, _MOUNT_DROPIN_NAME), _mount_condition_dropin(tag))
+
     step("agent cache directory", cache_dir)
     step("docker on demand", docker_on_demand)
     step("agent launcher", launcher)
     step("agent units (early start, early root setup, boot gate, meta mount)", unit)
     step("/boot/efi mounted on first access", fstab)
     step("binfmt_misc mounted at boot", binfmt_mount)
+    step("virtiofs mount conditions", mount_conditions)
     step("agent bytecode cached", bytecode)
     step("Claude Code nudge keys swept", nudges)
 
