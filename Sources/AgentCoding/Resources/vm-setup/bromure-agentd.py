@@ -6769,15 +6769,38 @@ def ports_loop_service():
         time.sleep(3)
 
 
+def _docker_running():
+    """dockerd is up (its pid file names a live process)."""
+    for path in ("/run/docker.pid", "/var/run/docker.pid"):
+        try:
+            with open(path) as f:
+                pid = int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            continue
+        if pid > 0 and os.path.exists("/proc/%d" % pid):
+            return True
+    return False
+
+
 def docker_loop_service():
     """Container list (NDJSON) → docker.txt every 2s; gated dashboard extras."""
     tick = 0
     vol_sizes = {}   # name -> human size, from the slow `docker system df` probe
     while _RUNNING.is_set():
+        watched = os.path.exists(os.path.join(OUTBOX, ".docker-watch"))
+        # dockerd starts on demand (docker.socket): this loop asking every
+        # two seconds must not be the demand. Not running and nobody looking
+        # at the dashboard: no containers to list. The dashboard open is a
+        # demand, and starts it.
+        if not watched and not _docker_running():
+            _atomic_publish(".docker.tmp", "docker.txt", "")
+            tick = 0
+            time.sleep(2)
+            continue
         out = _sys_capture_docker(["docker", "ps", "-a", "--no-trunc",
                         "--format", "{{json .}}"])
         _atomic_publish(".docker.tmp", "docker.txt", out)
-        if os.path.exists(os.path.join(OUTBOX, ".docker-watch")):
+        if watched:
             s = _sys_capture_docker(["docker", "stats", "--no-stream",
                           "--format", "{{json .}}"])
             if s:
@@ -7418,38 +7441,119 @@ def _home_mode():
     return _read_text(os.path.join(META, "home.mode")) or "virtiofs"
 
 
+def _mountinfo():
+    """/proc/self/mountinfo as [(major:minor, mount point, fstype, source)],
+    in mount order. Read directly: no findmnt process, no udev."""
+    out = []
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                left, _, right = line.partition(" - ")
+                l, r = left.split(), right.split()
+                if len(l) >= 5 and len(r) >= 2:
+                    mp = l[4].replace("\\040", " ")
+                    out.append((l[2], mp, r[0], r[1]))
+    except OSError:
+        pass
+    return out
+
+
 def _home_mounted_fstype():
     """Filesystem type of the TOP mount at /home/ubuntu ('' if none)."""
-    return _sys_capture(["findmnt", "-n", "-o", "FSTYPE", HOME_MOUNT], "home filesystem type").strip()
+    fstype = ""
+    for _, mp, fs, _ in _mountinfo():
+        if mp == HOME_MOUNT:
+            fstype = fs      # the last one listed is on top
+    return fstype
+
+
+def _device_mounted(dev):
+    """True when block device `dev` is mounted somewhere."""
+    try:
+        st = os.stat(dev)
+        want = "%d:%d" % (os.major(st.st_rdev), os.minor(st.st_rdev))
+    except OSError:
+        return False
+    return any(mm == want for mm, _, _, _ in _mountinfo())
+
+
+# What is on a block device, asked of the device itself as root (libblkid's
+# low-level probe, the ext4 superblock): never the udev database, which a
+# boot may not have filled yet and which an unprivileged lsblk reads. The
+# decision to FORMAT the home rests on this: BLKID_RC=2 is libblkid's "no
+# signature found".
+_BLOCKDEV_PROBE = r"""
+dev="$1"
+blkid -p -o export "$dev" 2>/dev/null
+echo "BLKID_RC=$?"
+echo "DEV_BYTES=$(blockdev --getsize64 "$dev" 2>/dev/null)"
+dumpe2fs -h "$dev" 2>/dev/null | sed -n -e 's/^Filesystem state: */FS_STATE=/p' \
+    -e 's/^Filesystem features: */FS_FEATURES=/p' -e 's/^Block count: */FS_BLOCKS=/p' \
+    -e 's/^Block size: */FS_BLOCK_SIZE=/p'
+"""
+
+
+def _probe_blockdev(dev):
+    """{"TYPE", "LABEL", "BLKID_RC", "DEV_BYTES", "FS_STATE", …} for `dev`,
+    or None when it couldn't be probed at all (no sudo, the probe failed)."""
+    if not _have_sudo():
+        return None
+    try:
+        p = subprocess.run(["sudo", "sh", "-c", _BLOCKDEV_PROBE, "sh", dev],
+                           capture_output=True, text=True, errors="replace", timeout=30,
+                           env=_sys_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    info = {}
+    for line in p.stdout.splitlines():
+        k, sep, v = line.partition("=")
+        if sep:
+            info[k.strip()] = v.strip()
+    if "BLKID_RC" not in info:
+        return None
+    return info
+
+
+def _blockdev_is_blank(info):
+    """True only on a positive "nothing there": libblkid found no signature."""
+    return bool(info) and info.get("BLKID_RC") == "2" and not info.get("TYPE")
+
+
+def _candidate_home_disks():
+    """Whole disks without partitions, from sysfs (the system disk always
+    has partitions): where a home image can be."""
+    skip = ("loop", "ram", "zram", "dm-", "sr", "nbd", "md", "fd")
+    out = []
+    try:
+        names = sorted(os.listdir("/sys/block"))
+    except OSError:
+        return out
+    for name in names:
+        if name.startswith(skip):
+            continue
+        base = "/sys/block/" + name
+        try:
+            parts = [c for c in os.listdir(base) if os.path.exists(os.path.join(base, c, "partition"))]
+        except OSError:
+            continue
+        if not parts and os.path.exists("/dev/" + name):
+            out.append("/dev/" + name)
+    return out
 
 
 def _find_home_device():
-    """Locate the attached home image's block device."""
-    # After any previous boot's mkfs the label resolves directly.
-    bylabel = "/dev/disk/by-label/" + HOME_LABEL
-    if os.path.exists(bylabel):
-        return os.path.realpath(bylabel)
-    out = _sys_capture(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,LABEL"], "block devices")
-    try:
-        tree = json.loads(out).get("blockdevices") or []
-    except ValueError:
-        return ""
-    blank = ""
-    for dev in tree:
-        if dev.get("type") != "disk":
+    """Locate the attached home image's block device: (device, probe).
+    The formatted home (its label, read off the device), else the first
+    blank disk (a first boot). ("", None) when there is none."""
+    blank = ("", None)
+    for dev in _candidate_home_disks():
+        info = _probe_blockdev(dev)
+        if info is None:
             continue
-        if dev.get("children"):
-            continue   # the system disk always has children (GPT partitions)
-        name = dev.get("name", "")
-        if not name:
-            continue
-        # Formatted home whose by-label symlink hasn't materialized yet
-        # (udev still settling early in boot).
-        if dev.get("label") == HOME_LABEL:
-            return "/dev/" + name
-        # First boot: the image is a blank, partitionless, childless disk.
-        if not dev.get("fstype") and not blank:
-            blank = "/dev/" + name
+        if info.get("LABEL") == HOME_LABEL:
+            return dev, info
+        if _blockdev_is_blank(info) and not blank[0]:
+            blank = (dev, info)
     return blank
 
 
@@ -7864,24 +7968,20 @@ def _seed_claude_settings():
     _write(settings)
 
 
-def _fsck_home_if_needed(dev):
+def _fsck_home_if_needed(dev, info):
     """e2fsck the home image before it is first mounted, only when the
-    superblock says a check is warranted: state not plain "clean" (covers
-    "not clean" and "clean with errors") or a journal left dirty by a hard
-    stop. A clean boot skips e2fsck entirely. -y answers every repair
-    prompt yes — there is no operator on a headless boot, and an
-    unmountable home is strictly worse than an aggressive repair."""
-    if _sys_capture(["findmnt", "-n", "-S", dev], "is this device mounted").strip():
+    superblock (`info`, _probe_blockdev's) says a check is warranted: state
+    not plain "clean" (covers "not clean" and "clean with errors") or a
+    journal left dirty by a hard stop. A clean boot skips e2fsck entirely.
+    -y answers every repair prompt yes — there is no operator on a headless
+    boot, and an unmountable home is strictly worse than an aggressive
+    repair."""
+    if _device_mounted(dev):
         return  # device already mounted (crashed-boot retry) — never fsck live
     if not _have_sudo():
         return
-    sb = _sys_capture(["sudo", "dumpe2fs", "-h", dev], "ext4 superblock of the home device")
-    state = features = ""
-    for line in sb.splitlines():
-        if line.startswith("Filesystem state:"):
-            state = line.split(":", 1)[1].strip()
-        elif line.startswith("Filesystem features:"):
-            features = line.split(":", 1)[1].strip()
+    state = info.get("FS_STATE", "")
+    features = info.get("FS_FEATURES", "")
     if state == "clean" and "needs_recovery" not in features.split():
         return
     log("home", "fs on %s needs checking (state %r) — running e2fsck -y"
@@ -7892,32 +7992,75 @@ def _fsck_home_if_needed(dev):
         % (p.returncode, (p.stdout + p.stderr).strip()[:500]))
 
 
-def _grow_home_fs(dev):
+def _grow_home_fs(dev, info):
     """The host grows home.img when the workspace's home size goes up
     (at a cold boot — a running VM never sees its disk grow). ext4 grows
-    online, so this runs on the mounted filesystem; with nothing to gain
-    resize2fs just says so.
-
-    The probes are housekeeping (fixed argv, a device path agentd found
-    itself), so they run as agentd via `_sys_capture`, like the fsck next
-    door. Through `_capture` they went into the OpenShell sandbox, where
-    sudo is refused: both came back empty and every grow was skipped."""
-    if not _have_sudo():
-        return
+    online, so this runs on the mounted filesystem. `info`: the device's
+    probe from before the mount (its size, the superblock's block count)."""
     try:
-        dev_bytes = int(_sys_capture(["sudo", "blockdev", "--getsize64", dev],
-                                     "home device size").strip() or 0)
-        head = _sys_capture(["sudo", "dumpe2fs", "-h", dev], "ext4 superblock of the home device")
-        count = int(re.search(r"^Block count:\s+(\d+)", head, re.M).group(1))
-        size = int(re.search(r"^Block size:\s+(\d+)", head, re.M).group(1))
-    except (AttributeError, ValueError):
+        dev_bytes = int(info.get("DEV_BYTES") or 0)
+        count = int(info["FS_BLOCKS"])
+        size = int(info["FS_BLOCK_SIZE"])
+    except (KeyError, ValueError):
         return
     # Only a real gap (the host grew the image) is worth a resize.
     if dev_bytes - count * size < 64 * 1024 * 1024:
         return
+    if not _have_sudo():
+        return
     p = subprocess.run(["sudo", "resize2fs", dev], capture_output=True, text=True, errors="replace")
     log("home", "resize2fs %s (exit %d): %s"
         % (dev, p.returncode, (p.stdout + p.stderr).strip()[:300]))
+
+
+_EARLY_HOME_USED = False
+
+
+def _early_home_info():
+    """The probe bromure-early.service left when it mounted the home (root's
+    file in /run), once per agent: an agent restarted later in the session
+    re-reads it, and redoing what follows a mount is harmless."""
+    global _EARLY_HOME_USED
+    if _EARLY_HOME_USED:
+        return None
+    _EARLY_HOME_USED = True
+    try:
+        with open(_EARLY_HOME_INFO) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    info = {}
+    for line in lines:
+        k, sep, v = line.partition("=")
+        if sep:
+            info[k.strip()] = v.strip()
+    return info if info.get("DEV") else None
+
+
+def _home_after_mount(dev, info):
+    """What follows the home's mount, whoever mounted it: its ownership, its
+    growth to the image's size, mkfs's lost+found, the seed."""
+    # Each only when needed (a cold boot of a workspace finds them so): a
+    # sudo round trip is ~20 ms of the boot.
+    try:
+        st = os.stat(HOME_MOUNT)
+        owned = st.st_uid == os.getuid() and st.st_gid == os.getgid()
+        mode_ok = (st.st_mode & 0o7777) == 0o755
+    except OSError:
+        owned = mode_ok = False
+    if not owned:
+        _sudo(["chown", "ubuntu:ubuntu", HOME_MOUNT])
+    if not mode_ok:
+        _sudo(["chmod", "755", HOME_MOUNT])
+    _grow_home_fs(dev, info)
+    # mkfs scaffolding: lost+found is only e2fsck's relink target, and it
+    # reads as clutter in every home listing (ls, the agent, the file
+    # browser). rmdir removes it only when empty — after a real fsck
+    # repair relinked orphans into it, it stays visible with its contents
+    # (exactly when it matters). e2fsck recreates it on demand.
+    if os.path.lexists(os.path.join(HOME_MOUNT, "lost+found")):
+        _sudo(["rmdir", os.path.join(HOME_MOUNT, "lost+found")])
+    apply_home_seed()
 
 
 def task_home_setup():
@@ -7928,23 +8071,33 @@ def task_home_setup():
     if mode not in ("ext4", "migrate"):
         return
     if _home_mounted_fstype() == "ext4":
-        apply_home_seed()
+        early = _early_home_info()
+        if early:
+            # bromure-early.service mounted it as root: the rest of a
+            # mount's work (ownership, growth, the seed) is still ours.
+            _home_after_mount(early["DEV"], early)
+            log("home", "ext4 home mounted (%s, by the early boot setup)" % early["DEV"])
+        else:
+            apply_home_seed()
         return
-    dev = _find_home_device()
+    dev, info = _find_home_device()
     if not dev:
         log("home", "mode=%s but no home device found — home left as-is" % mode)
         return
-    if not _sys_capture(["lsblk", "-no", "FSTYPE", dev], "device filesystem type").strip():
+    if _blockdev_is_blank(info):
+        # Formatted only on the device's own word that nothing is there
+        # (never because a lookup came back empty).
         log("home", "formatting %s (ext4, label %s)" % (dev, HOME_LABEL))
         if _sudo(["mkfs.ext4", "-q", "-L", HOME_LABEL, dev]).returncode != 0:
             log("home", "mkfs.ext4 failed on %s" % dev)
             return
+        info = _probe_blockdev(dev) or {}
     else:
         # Existing home image: a hard-stopped VM can leave the fs dirty or
         # with errors that make the mount below fail (home silently left as
         # the bootstrap share). Repair BEFORE the first mount — the migrate
         # staging mount included.
-        _fsck_home_if_needed(dev)
+        _fsck_home_if_needed(dev, info)
     if mode == "migrate":
         # The old home must actually be mounted before we snapshot it —
         # racing fstab here would migrate the base image's empty skeleton.
@@ -7963,27 +8116,7 @@ def task_home_setup():
     if _sudo(["mount", "-o", "noatime", dev, HOME_MOUNT]).returncode != 0:
         log("home", "mount %s over %s failed" % (dev, HOME_MOUNT))
         return
-    # Each only when needed (a cold boot of a workspace finds them so): a
-    # sudo round trip is several ms of the boot.
-    try:
-        st = os.stat(HOME_MOUNT)
-        owned = st.st_uid == os.getuid() and st.st_gid == os.getgid()
-        mode_ok = (st.st_mode & 0o7777) == 0o755
-    except OSError:
-        owned = mode_ok = False
-    if not owned:
-        _sudo(["chown", "ubuntu:ubuntu", HOME_MOUNT])
-    if not mode_ok:
-        _sudo(["chmod", "755", HOME_MOUNT])
-    _grow_home_fs(dev)
-    # mkfs scaffolding: lost+found is only e2fsck's relink target, and it
-    # reads as clutter in every home listing (ls, the agent, the file
-    # browser). rmdir removes it only when empty — after a real fsck
-    # repair relinked orphans into it, it stays visible with its contents
-    # (exactly when it matters). e2fsck recreates it on demand.
-    if os.path.lexists(os.path.join(HOME_MOUNT, "lost+found")):
-        _sudo(["rmdir", os.path.join(HOME_MOUNT, "lost+found")])
-    apply_home_seed()
+    _home_after_mount(dev, info)
     log("home", "ext4 home mounted (%s)" % dev)
     if mode == "migrate":
         _publish_migrate("done", 1, 1)
@@ -8048,6 +8181,128 @@ def _sudo(args, **kw):
                           stderr=_DEVNULL, **kw)
 
 
+def _primary_nic():
+    """The VM's network interface: the first eth*/en* backed by a device
+    (not lo, a bridge, a veth or docker's), or ''."""
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        return ""
+    for name in names:
+        if name.startswith(("eth", "en")) and os.path.exists("/sys/class/net/%s/device" % name):
+            return name
+    return ""
+
+
+def _nic_ipv4(nic):
+    """`nic`'s IPv4 address, or '' while it has none."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # SIOCGIFADDR
+            raw = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", nic.encode()[:15]))
+        finally:
+            sock.close()
+        return socket.inet_ntoa(raw[20:24])
+    except OSError:
+        return ""
+
+
+def _has_default_route():
+    try:
+        with open("/proc/net/route") as f:
+            return any(len(l.split()) > 2 and l.split()[1] == "00000000" for l in f.readlines()[1:])
+    except OSError:
+        return False
+
+
+def _dns_ready():
+    """With systemd-resolved's stub as resolv.conf (the image's): resolved is
+    answering and knows an upstream server. Any other resolv.conf: as is."""
+    try:
+        if os.path.realpath("/etc/resolv.conf") != "/run/systemd/resolve/stub-resolv.conf":
+            return True
+        with open("/run/systemd/resolve/resolv.conf") as f:
+            return any(l.startswith("nameserver") for l in f)
+    except OSError:
+        return False
+
+
+# ───────────── Boot gates: when the first command may run ─────────────
+# The unit starts the agent as early as its share is mounted, so Python's own
+# start overlaps the rest of the boot. What a command the host runs may rely
+# on is then waited for explicitly, where the old unit ordering and luck of
+# timing provided it:
+#   - the boot gate (bromure-boot-gate.service: local file systems mounted,
+#     /tmp emptied by systemd-tmpfiles) before any boot task runs;
+#   - the workspace's shares mounted and the network up (address, default
+#     route, DNS) before the shell pool opens.
+_BOOT_GATE = "/run/bromure-boot-gate"
+
+
+def _wait_for(what, ready, timeout, step=0.002):
+    """Poll `ready()` until true or `timeout` seconds; logs a wait worth
+    knowing about. Returns whether it became ready."""
+    t0 = time.monotonic()
+    while not ready():
+        if time.monotonic() - t0 > timeout:
+            log("boot", "%s not ready after %.1fs: going on" % (what, timeout))
+            return False
+        time.sleep(step)
+    waited = time.monotonic() - t0
+    if waited >= 0.02:
+        log("boot", "waited %.0f ms for %s" % (waited * 1000, what))
+    return True
+
+
+def _wait_boot_gate():
+    """Under the early-start unit (it sets BROMURE_AGENTD_EARLY): until the
+    boot gate. A restart later in the session finds it there."""
+    if os.environ.pop("BROMURE_AGENTD_EARLY", None) != "1":
+        return
+    _wait_for("the boot gate (local file systems, /tmp)", lambda: os.path.exists(_BOOT_GATE), 10.0)
+
+
+def _shares_mounted():
+    want = [OUTBOX]
+    try:
+        with open(os.path.join(META, "shares.txt")) as f:
+            for line in f:
+                idx = line.split(" ", 1)[0].strip()
+                if idx.isdigit():
+                    want.append("/mnt/bromure-share-" + idx)
+    except OSError:
+        pass
+    mounted = {mp for _, mp, _, _ in _mountinfo()}
+    return all(w in mounted for w in want)
+
+
+def _wait_first_command_gates():
+    """Before the shell pool opens: the shares and the network a command
+    may use at once. Bounded: a workspace cut off from the network (or a
+    share the host didn't attach) still gets its shell."""
+    _wait_for("the shares", _shares_mounted, 3.0)
+    nic = _primary_nic()
+    if nic:
+        _wait_for("the network (address, route, DNS)",
+                  lambda: bool(_nic_ipv4(nic)) and _has_default_route() and _dns_ready(), 3.0)
+
+
+def _drop_boot_priority():
+    """Back to the default priority, every thread: the unit starts the agent
+    at Nice=-15 so its start isn't starved by the rest of the boot, and
+    what it runs from here on (the user's shells) must not inherit that."""
+    try:
+        for tid in os.listdir("/proc/self/task"):
+            try:
+                if os.getpriority(os.PRIO_PROCESS, int(tid)) < 0:
+                    os.setpriority(os.PRIO_PROCESS, int(tid), 0)
+            except (OSError, ValueError):
+                pass
+    except OSError:
+        pass
+
+
 def task_set_mtu():
     """Lower the primary NIC's MTU (VZ NAT reports 1500 but the real path can be
     smaller; PMTUD doesn't always recover). Default 1280, host-overridable via
@@ -8062,14 +8317,20 @@ def task_set_mtu():
         pass
     if not mtu:
         mtu = "1280"
-    nic = ""
-    for line in _sys_capture(["ip", "route", "show", "default"], "default route").splitlines():
-        if "default" in line:
-            parts = line.split()
-            if len(parts) >= 5:
-                nic = parts[4]   # awk '/default/ {print $5; exit}'
-            break
+    # The VM's own NIC, from sysfs: the default route may not be there yet
+    # (the agent can run before DHCP has answered).
+    nic = _primary_nic()
+    if not nic:
+        for line in _sys_capture(["ip", "route", "show", "default"], "default route").splitlines():
+            if "default" in line:
+                parts = line.split()
+                if len(parts) >= 5:
+                    nic = parts[4]   # awk '/default/ {print $5; exit}'
+                break
     if nic:
+        # Already so (bromure-early.service set it as root): no sudo.
+        if _read_text("/sys/class/net/%s/mtu" % nic) == mtu:
+            return
         _sudo(["ip", "link", "set", "dev", nic, "mtu", mtu])
         log("session", "set %s mtu %s" % (nic, mtu))
 
@@ -8131,10 +8392,17 @@ exec(code, main.__dict__)
 _AGENTD_CACHE_DIR = "/var/cache/bromure-agentd"
 
 
+# The agent starts as soon as its share is mounted (the mount unit below
+# mounts it in the boot's first moments), at a raised priority, so Python's
+# start overlaps the rest of the boot instead of queueing behind it; it then
+# waits itself for the boot gate before doing anything (_wait_boot_gate),
+# and gives the priority back before the shell opens (_drop_boot_priority).
+# BROMURE_AGENTD_EARLY tells it this unit started it.
 _UNIT_CONTENT = r"""[Unit]
 Description=Bromure guest agent daemon
 DefaultDependencies=no
-After=mnt-bromure\x2dmeta.mount local-fs.target systemd-tmpfiles-setup.service systemd-journald.socket
+Wants=bromure-boot-gate.service bromure-early.service
+After=mnt-bromure\x2dmeta.mount systemd-journald.socket
 Conflicts=shutdown.target
 Before=shutdown.target
 StartLimitIntervalSec=0
@@ -8142,6 +8410,8 @@ ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
+Nice=-15
+Environment=BROMURE_AGENTD_EARLY=1
 ExecStart=/usr/bin/python3 -s /usr/local/lib/bromure/agentd-launch.py
 Restart=always
 RestartSec=1
@@ -8149,6 +8419,145 @@ KillMode=process
 TimeoutStopSec=5
 [Install]
 WantedBy=multi-user.target
+"""
+
+
+# What the boot needs root for, done by systemd (no sudo) while the agent
+# starts: see the script's own header.
+_EARLY_ROOT_PATH = "/usr/local/lib/bromure/early-root.sh"
+_EARLY_ROOT_CONTENT = r"""#!/bin/sh
+# Managed by Bromure (bromure-agentd's _EARLY_ROOT_CONTENT, setup.sh): what a
+# boot needs root for, done once by systemd while the agent is still starting,
+# so the agent's own boot needs no sudo (each call ~20 ms this early).
+#   - the NIC's MTU, from the meta share (before the link comes up);
+#   - the home disk mounted, only in the plain case: ext4 mode, no virtiofs
+#     home attached, the disk labelled bromure-home, ext4, clean, its journal
+#     replayed. Anything else (blank, dirty, a migration) is the agent's,
+#     which formats, repairs and migrates as before.
+# What it found goes to /run/bromure-early-home for the agent.
+M=/mnt/bromure-meta
+NL='
+'
+mtu=1280
+if [ -r "$M/mtu" ] && read -r m < "$M/mtu"; then
+    case "$m" in ''|*[!0-9]*) ;; *) mtu=$m ;; esac
+fi
+for n in /sys/class/net/eth* /sys/class/net/en*; do
+    [ -e "$n/device" ] || continue
+    cur=; read -r cur < "$n/mtu" || true
+    [ "$cur" = "$mtu" ] || ip link set dev "${n##*/}" mtu "$mtu" || true
+    break
+done
+
+mode=; [ -r "$M/home.mode" ] && read -r mode < "$M/home.mode"
+[ "$mode" = ext4 ] || exit 0
+[ -d "$M/virtiofs-tags" ] && [ ! -e "$M/virtiofs-tags/bromure-home" ] || exit 0
+while read -r _ _ _ _ mp _; do
+    [ "$mp" = /home/ubuntu ] && exit 0
+done < /proc/self/mountinfo
+for b in /sys/block/*; do
+    d=${b##*/}
+    case "$d" in loop*|ram*|zram*|dm-*|sr*|nbd*|md*|fd*) continue ;; esac
+    part=; for p in "$b"/*/partition; do [ -e "$p" ] && part=1; done
+    [ -z "$part" ] || continue
+    info=$(blkid -p -o export "/dev/$d" 2>/dev/null) || continue
+    case "$NL$info$NL" in *"${NL}LABEL=bromure-home$NL"*) ;; *) continue ;; esac
+    case "$NL$info$NL" in *"${NL}TYPE=ext4$NL"*) ;; *) exit 0 ;; esac
+    fs=$(dumpe2fs -h "/dev/$d" 2>/dev/null | sed -n -e 's/^Filesystem state: */FS_STATE=/p' \
+        -e 's/^Filesystem features: */FS_FEATURES=/p' -e 's/^Block count: */FS_BLOCKS=/p' \
+        -e 's/^Block size: */FS_BLOCK_SIZE=/p')
+    case "$NL$fs$NL" in *"${NL}FS_STATE=clean$NL"*) ;; *) exit 0 ;; esac
+    case "$fs" in *needs_recovery*) exit 0 ;; esac
+    mount -o noatime "/dev/$d" /home/ubuntu || exit 0
+    sectors=0; read -r sectors < "$b/size" || true
+    {
+        echo "DEV=/dev/$d"
+        echo "$info"
+        echo "BLKID_RC=0"
+        echo "DEV_BYTES=$((sectors * 512))"
+        echo "$fs"
+    } > /run/bromure-early-home.tmp && mv -f /run/bromure-early-home.tmp /run/bromure-early-home
+    exit 0
+done
+exit 0
+"""
+_EARLY_UNIT_PATH = "/etc/systemd/system/bromure-early.service"
+_EARLY_UNIT_CONTENT = r"""[Unit]
+Description=Bromure early boot setup (NIC MTU, the home disk)
+DefaultDependencies=no
+After=mnt-bromure\x2dmeta.mount
+Before=bromure-boot-gate.service shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /usr/local/lib/bromure/early-root.sh
+"""
+_EARLY_HOME_INFO = "/run/bromure-early-home"
+
+# The vsock transport loaded by systemd-modules-load in the boot's first
+# moments: left to udev's coldplug it arrived as late as the agent itself,
+# and the shell pool's first connections failed and backed off.
+_MODULES_LOAD_PATH = "/etc/modules-load.d/bromure.conf"
+_MODULES_LOAD_CONTENT = r"""# Managed by Bromure: the host channel (vsock) the guest agent connects through.
+vmw_vsock_virtio_transport
+"""
+
+# binfmt_misc mounted by sysinit.target, not on first access: its automount
+# was first crossed in the middle of the boot (systemd-binfmt opening it,
+# networkd's and resolved's sandboxes walking the mount table) and about one
+# boot in ten then sat ~0.8 s with all three blocked in autofs until PID 1
+# mounted it -- the network came up that much later. Mounted ahead of them,
+# nothing waits. The unit is systemd's own (WantedBy=sysinit.target): this
+# is what `systemctl enable` on it makes.
+_BINFMT_MOUNT_UNITS = ("/usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount",
+                       "/lib/systemd/system/proc-sys-fs-binfmt_misc.mount")
+_BINFMT_MOUNT_WANT = "/etc/systemd/system/sysinit.target.wants/proc-sys-fs-binfmt_misc.mount"
+
+
+def _binfmt_mount_unit():
+    """systemd's binfmt_misc mount unit to enable, or None when it is
+    enabled already (or this system has none)."""
+    if os.path.lexists(_BINFMT_MOUNT_WANT):
+        return None
+    for unit in _BINFMT_MOUNT_UNITS:
+        if os.path.exists(unit):
+            return unit
+    return None
+
+
+# The boot gate: reached when the local file systems are mounted and
+# systemd-tmpfiles has emptied /tmp (what the agent's unit used to be
+# ordered after). The agent waits for the file it leaves.
+_GATE_UNIT_PATH = "/etc/systemd/system/bromure-boot-gate.service"
+_GATE_UNIT_CONTENT = r"""[Unit]
+Description=Bromure boot gate (local file systems mounted, /tmp emptied)
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service bromure-early.service
+Conflicts=shutdown.target
+Before=shutdown.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/touch /run/bromure-boot-gate
+"""
+
+# The meta share's mount, in place of the one systemd generates from
+# /etc/fstab (a unit file here wins over a generated one): the same mount
+# without the default ordering after local-fs-pre.target, so it is there
+# ~80 ms into userspace and the agent can start from it.
+_META_MOUNT_UNIT_PATH = "/etc/systemd/system/mnt-bromure\\x2dmeta.mount"
+_META_MOUNT_UNIT_CONTENT = r"""[Unit]
+Description=Bromure meta share (mounted early: the guest agent starts from it)
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+[Mount]
+What=bromure-meta
+Where=/mnt/bromure-meta
+Type=virtiofs
+Options=ro
 """
 
 
@@ -8327,21 +8736,29 @@ def _mount_condition_dropin(tag):
             "ConditionPathExists=|!%s\n" % (META, os.path.join(markers, tag), markers))
 
 
-def _fstab_efi_nofail(text):
-    """`text` (/etc/fstab) with nofail on the /boot/efi entry, or None when
-    it has it already (or has none). Without it local-fs.target -- and the
-    agent, ordered after it -- waits for the EFI partition's label, fsck and
-    mount, which some boots took ~1 s for; nothing at runtime needs it
-    (Firecracker boots the kernel directly; on macOS the firmware reads the
-    partition, not the mounted copy, and it still mounts, just after)."""
+_EFI_FSTAB_OPTIONS = ("nofail", "x-systemd.automount")
+
+
+def _fstab_efi_lazy(text):
+    """`text` (/etc/fstab) with the /boot/efi entry mounted on first access
+    (x-systemd.automount, nofail) instead of at every boot, or None when it
+    is so already (or there is no entry).
+
+    Nothing at runtime needs it (Firecracker boots the kernel directly; on
+    macOS the firmware reads the partition itself), yet mounting it at boot
+    cost every boot its fsck -- and after a stop that didn't unmount it
+    cleanly, a full check of the FAT that held the VM's one disk queue for
+    ~0.8 s while everything else waited. A grub or kernel update still finds
+    it: the first access mounts it."""
     lines = text.split("\n")
     for i, line in enumerate(lines):
         f = line.split()
         if len(f) >= 4 and not f[0].startswith("#") and f[1] == "/boot/efi":
             opts = f[3].split(",")
-            if "nofail" in opts:
+            missing = [o for o in _EFI_FSTAB_OPTIONS if o not in opts]
+            if not missing:
                 return None
-            f[3] = ",".join(opts + ["nofail"])
+            f[3] = ",".join(opts + missing)
             lines[i] = "\t".join(f)
             return "\n".join(lines)
     return None
@@ -8366,13 +8783,21 @@ def task_mount_conditions():
             fstab = f.read()
     except OSError:
         fstab = ""
-    want_fstab = _fstab_efi_nofail(fstab) if fstab else None
+    want_fstab = _fstab_efi_lazy(fstab) if fstab else None
     if want_fstab is not None and _sudo_write_durable("/etc/fstab", want_fstab):
         changed = True
-        log("agentd", "/boot/efi no longer holds up the boot (nofail)")
+        log("agentd", "/boot/efi is now mounted on first access, not at boot")
     if changed:
         _sudo(["systemctl", "daemon-reload"])
         log("agentd", "virtiofs mount conditions installed")
+
+
+def _read_exact(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 def _install_agentd_launcher():
@@ -8404,12 +8829,31 @@ def task_fix_systemd_unit():
     # the unit names it.
     if not _install_agentd_launcher():
         return
-    if current == _UNIT_CONTENT:
-        return
-    if not _sudo_write_durable(_UNIT_PATH, _UNIT_CONTENT):
+    # The gate and the early mount BEFORE the unit that relies on them: a
+    # stop between two writes must never leave the new unit without its gate.
+    changed = False
+    for path, text, mode in ((_MODULES_LOAD_PATH, _MODULES_LOAD_CONTENT, "0644"),
+                             (_EARLY_ROOT_PATH, _EARLY_ROOT_CONTENT, "0755"),
+                             (_EARLY_UNIT_PATH, _EARLY_UNIT_CONTENT, "0644"),
+                             (_GATE_UNIT_PATH, _GATE_UNIT_CONTENT, "0644"),
+                             (_META_MOUNT_UNIT_PATH, _META_MOUNT_UNIT_CONTENT, "0644")):
+        if _read_exact(path) != text:
+            if not _sudo_write_durable(path, text, mode=mode):
+                return
+            changed = True
+    binfmt = _binfmt_mount_unit()
+    if binfmt:
+        _sudo(["mkdir", "-p", os.path.dirname(_BINFMT_MOUNT_WANT)])
+        if _sudo(["ln", "-sfn", binfmt, _BINFMT_MOUNT_WANT]).returncode == 0:
+            changed = True
+    if current != _UNIT_CONTENT:
+        if not _sudo_write_durable(_UNIT_PATH, _UNIT_CONTENT):
+            return
+        changed = True
+    if not changed:
         return
     _sudo(["systemctl", "daemon-reload"])
-    log("session", "systemd unit upgraded (early start, KillMode=process, python3 -s)")
+    log("session", "systemd units upgraded (agent started early behind the boot gate)")
 
 
 # The guest's URL relay (setup.sh installs it; `xdg-open` is a link to it and
@@ -8885,6 +9329,11 @@ def _install_file_atomic(path, content, mode="755"):
 _CA_INSTALLED_THIS_BOOT = threading.Event()
 
 
+# Work a boot task leaves for after the shell pool is up (main runs these on
+# a background thread).
+_AFTER_SHELL = []
+
+
 def _ca_already_trusted(pem):
     """True when `pem` is what an earlier boot installed: the same bytes in
     ca-certificates' source and node's copy, and its body in the system
@@ -8938,8 +9387,15 @@ def task_install_ca():
     # or resumed session).
     _sudo_write(_JAVA_CA_SYNC_PATH, _JAVA_CA_SYNC, mode="0755")
     _sudo_write(_JAVA_CA_APT_HOOK_PATH, _JAVA_CA_APT_HOOK)
-    if _sudo([_JAVA_CA_SYNC_PATH]).returncode == 0 and shutil.which("keytool"):
-        log("session", "synced MITM CA into Java trust store")
+    def java_sync():
+        if _sudo([_JAVA_CA_SYNC_PATH]).returncode == 0 and shutil.which("keytool"):
+            log("session", "synced MITM CA into Java trust store")
+    if _CA_INSTALLED_THIS_BOOT.is_set():
+        java_sync()
+    else:
+        # The same CA as the last boot: a JVM that appeared since without
+        # apt (whose hook runs the sync) gets it shortly, off the boot's path.
+        _AFTER_SHELL.append(java_sync)
 
     # Containers: the runc wrapper and its helper (see _RUNC_WRAPPER). The
     # helper first, so the wrapper never finds a half-installed one.
@@ -9037,8 +9493,10 @@ def _apply_docker_config(restart_if_unchanged):
     # systemd-networkd-wait-online (~1-2 s) before the shell could start.
     # Early in boot, before docker has started, the queued restart is just
     # its one start, with this config.
-    if _sudo(["systemctl", "restart", "--no-block", "docker"]).returncode == 0:
-        log("session", "docker restart queued (proxy + CA + %d insecure registr%s)"
+    # try-restart: a dockerd that isn't running (it starts on demand) reads
+    # this configuration when it does start.
+    if _sudo(["systemctl", "try-restart", "--no-block", "docker"]).returncode == 0:
+        log("session", "docker configured (proxy + CA + %d insecure registr%s)"
             % (len(_docker_registries()), "y" if len(_docker_registries()) == 1 else "ies"))
         return True
     log("session", "docker restart failed (non-fatal)")
@@ -9061,6 +9519,42 @@ def task_apt_force_ipv4():
         pass
     _sudo_write(_APT_FORCE_IPV4_PATH, _APT_FORCE_IPV4)
     log("session", "apt pinned to IPv4")
+
+
+_DOCKER_BOOT_WANTS = ("/etc/systemd/system/multi-user.target.wants/docker.service",
+                      "/etc/systemd/system/multi-user.target.wants/containerd.service")
+
+
+def task_docker_on_demand():
+    """dockerd and containerd start when docker is first used (docker.socket),
+    not at every boot: ~100 MB and a burst of boot-time CPU a workspace that
+    never runs a container doesn't pay. Converges a system disk made before
+    the image did this itself; this boot's dockerd, if it started, stays."""
+    if not shutil.which("docker"):
+        return
+    if not any(os.path.lexists(p) for p in _DOCKER_BOOT_WANTS):
+        return
+    if _sudo(["sh", "-c", "systemctl disable docker.service containerd.service >/dev/null 2>&1; "
+                          "systemctl enable docker.socket >/dev/null 2>&1"]).returncode == 0:
+        log("session", "docker now starts on demand (docker.socket)")
+
+
+def task_docker_autostart():
+    """Containers meant to come back by themselves (a restart policy) only do
+    once dockerd runs: start it, after the boot's critical path, when there
+    is one. Nothing to do otherwise."""
+    if not shutil.which("docker") or _docker_running() or not _have_sudo():
+        return
+    script = ("grep -lsE '\"RestartPolicy\":\\{\"Name\":\"(always|unless-stopped|on-failure)\"' "
+              "/var/lib/docker/containers/*/hostconfig.json 2>/dev/null | head -1")
+    try:
+        p = subprocess.run(["sudo", "sh", "-c", script], capture_output=True, text=True,
+                           timeout=30, env=_sys_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if p.stdout.strip():
+        _sudo(["systemctl", "start", "--no-block", "docker"])
+        log("session", "docker started: a container has a restart policy")
 
 
 def task_apt_and_docker_proxy():
@@ -9585,12 +10079,22 @@ def task_openshell_sandbox():
 
 
 def _run_once(name, fn):
-    """Run a one-shot startup task; log and swallow any failure (non-fatal)."""
+    """Run a one-shot startup task; log and swallow any failure (non-fatal).
+    A task that took a while says so: the boot's time is counted in these."""
+    t0 = time.monotonic()
     try:
         fn()
     except Exception:
         log("session", "one-shot '%s' failed:\n%s"
             % (name, traceback.format_exc()))
+    ms = (time.monotonic() - t0) * 1000
+    if ms >= _TASK_LOG_MS:
+        log("boot", "task %s: %.0f ms" % (name, ms))
+
+
+# One-shot tasks slower than this are logged (BROMURE_BOOT_TRACE in the
+# meta share's environment: every one).
+_TASK_LOG_MS = 25.0
 
 
 def main():
@@ -9611,6 +10115,10 @@ def main():
     except OSError:
         pass
 
+    # 1b. Started early by the unit: nothing below runs before the boot has
+    # mounted the local file systems and emptied /tmp.
+    _wait_boot_gate()
+
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
     # Under an applied strict sandbox these privileged tasks already ran in
     # the first incarnation (and sudo is gone now): skip straight on.
@@ -9624,6 +10132,7 @@ def main():
         _run_once("mount-conditions", task_mount_conditions)
         _run_once("mtu", task_set_mtu)
         _run_once("ca", task_install_ca)
+        _run_once("docker-on-demand", task_docker_on_demand)
         _run_once("docker-proxy", task_apt_and_docker_proxy)
         _run_once("apt-ipv4", task_apt_force_ipv4)
         _run_once("timezone", task_set_timezone)
@@ -9672,6 +10181,10 @@ def main():
     ]
     for name, fn in bridges:
         start_service(name, fn)
+    # What the first command may rely on, then the boot's priority given
+    # back before anything of the user's can be started.
+    _run_once("first-command-gates", _wait_first_command_gates)
+    _drop_boot_priority()
     start_service("shell", shell_agent_service)
     # Claude Code's nudge keys, which the home setup above left out so the
     # shell wouldn't wait for the sweep: before the session starts Claude.
@@ -9683,6 +10196,11 @@ def main():
     _run_once("session", create_session)
 
     # One-shot background jobs (fire-and-forget, not supervised).
+    def _after_shell():
+        for fn in list(_AFTER_SHELL):
+            _run_once("after-shell", fn)
+        _run_once("docker-autostart", task_docker_autostart)
+    threading.Thread(target=_after_shell, daemon=True).start()
     threading.Thread(target=task_reapply_binfmt, daemon=True).start()
     threading.Thread(target=task_fstrim, daemon=True).start()
     # Stale duplicate delegation entries in old Kimi project files — once
@@ -9766,11 +10284,16 @@ def prepare_image():
         put(_LAUNCHER_PATH, _LAUNCHER_CONTENT)
 
     def unit():
+        put(_MODULES_LOAD_PATH, _MODULES_LOAD_CONTENT)
+        put(_EARLY_ROOT_PATH, _EARLY_ROOT_CONTENT, 0o755)
+        put(_EARLY_UNIT_PATH, _EARLY_UNIT_CONTENT)
+        put(_GATE_UNIT_PATH, _GATE_UNIT_CONTENT)
+        put(_META_MOUNT_UNIT_PATH, _META_MOUNT_UNIT_CONTENT)
         put(_UNIT_PATH, _UNIT_CONTENT)
 
     def fstab():
         with open("/etc/fstab") as f:
-            want = _fstab_efi_nofail(f.read())
+            want = _fstab_efi_lazy(f.read())
         if want is not None:
             put("/etc/fstab", want)
 
@@ -9802,10 +10325,30 @@ def prepare_image():
         put(_NUDGE_IMAGE_CACHE, json.dumps({"path": bundle, "size": st.st_size, "mtime": int(st.st_mtime),
                                             "keys": keys}, indent=2, sort_keys=True))
 
+    def docker_on_demand():
+        for path in _DOCKER_BOOT_WANTS:
+            if os.path.lexists(path):
+                os.unlink(path)
+        want = "/etc/systemd/system/sockets.target.wants/docker.socket"
+        if shutil.which("docker") and not os.path.lexists(want):
+            for unit in ("/usr/lib/systemd/system/docker.socket", "/lib/systemd/system/docker.socket"):
+                if os.path.exists(unit):
+                    os.makedirs(os.path.dirname(want), exist_ok=True)
+                    os.symlink(unit, want)
+                    break
+
+    def binfmt_mount():
+        unit = _binfmt_mount_unit()
+        if unit:
+            os.makedirs(os.path.dirname(_BINFMT_MOUNT_WANT), exist_ok=True)
+            os.symlink(unit, _BINFMT_MOUNT_WANT)
+
     step("agent cache directory", cache_dir)
+    step("docker on demand", docker_on_demand)
     step("agent launcher", launcher)
-    step("agent unit", unit)
-    step("/boot/efi nofail", fstab)
+    step("agent units (early start, early root setup, boot gate, meta mount)", unit)
+    step("/boot/efi mounted on first access", fstab)
+    step("binfmt_misc mounted at boot", binfmt_mount)
     step("agent bytecode cached", bytecode)
     step("Claude Code nudge keys swept", nudges)
 
