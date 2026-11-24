@@ -187,6 +187,12 @@ pipeline {
                             export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
                             mkdir -p sentry-ci/amd64
                             while read -r label epoch hash; do
+                                # A release from before the module knew x86_64
+                                # stops at its #error for every kernel, each run.
+                                if ! grep -q 'defined(CONFIG_X86_64)' "sentry-ci/ctx-$label/bromure_sentry.c"; then
+                                    echo "=== source $label ($hash) is arm64-only: no amd64 build ==="
+                                    continue
+                                fi
                                 echo "=== building amd64 for source $label ($hash) ==="
                                 docker rm -f "sentry-amd64-$label" 2>/dev/null || true
                                 docker build --pull --platform linux/amd64 -q \
