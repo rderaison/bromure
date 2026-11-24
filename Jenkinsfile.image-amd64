@@ -10,19 +10,18 @@
 // disk then the catalog (1s TTL), smoke-test the origin and the CDN, and only
 // then retire the previous image.
 //
-// The bromure-ac that bakes is the one servers get: the amd64 .deb the Linux
-// package job (Jenkinsfile.linux) archived, unpacked (not installed), with
-// its own Firecracker, passt and virtiofsd. The repository is checked out at
-// the commit that .deb was built from, so setup.sh and the catalog's steps
-// match the binary.
+// The bromure-ac that bakes is built here, from this checkout, by the Linux
+// package's own recipe (Jenkinsfile.linux: linux/packaging/Dockerfile.toolchain
+// and build-deb.sh), natively on the amd64 agent: the same .deb servers get,
+// with its own Firecracker, passt and virtiofsd, then unpacked (not
+// installed). So setup.sh and the catalog's steps are this commit's, as the
+// binary's. No other job is needed.
 //
 // The agent (label linux-kvm-amd64), set up once:
 //   - x86_64 Ubuntu 24.04 or newer; /dev/kvm read-write for the Jenkins user
-//     (the kvm group); git, python3, curl, dpkg-deb, node 20+ (npm), pigz
-//     optional; ~40 GB free in the workspace.
-//   - The Copy Artifact plugin. The package job allows the copy itself
-//     (copyArtifactPermission in Jenkinsfile.linux, once it has run with
-//     it); PACKAGE_JOB must be that job's full name (folder/name in a folder).
+//     (the kvm group); Docker usable by that user (the docker group), for
+//     the package build; git, python3, curl, dpkg-deb, node 20+ (npm), pigz
+//     optional; ~40 GB free in the workspace, ~15 GB for Docker.
 //   - /opt/bromure-image-ci owned by the Jenkins user (the .deb is unpacked
 //     there: a fixed path, for the AppArmor profile below).
 //   - The package's AppArmor profile for that path (Ubuntu lets only
@@ -43,9 +42,10 @@ pipeline {
     }
 
     options {
-        // Bake (~10 min) + client install and boot check (~5) + gzip +
-        // multi-GB upload + up to 1h of CDN polling.
-        timeout(time: 3, unit: 'HOURS')
+        // The package build (a cold toolchain image ~10 min, the release
+        // build ~20) + bake (~10 min) + client install and boot check (~5) +
+        // gzip + multi-GB upload + up to 1h of CDN polling.
+        timeout(time: 4, unit: 'HOURS')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
@@ -55,10 +55,8 @@ pipeline {
             description: 'Build, boot-check and compress the image, write an unsigned preview catalog, but upload and delete nothing.')
         booleanParam(name: 'KEEP_PREVIOUS', defaultValue: false,
             description: 'Publish the new image but keep the previous images/<major>/amd64/<uuid>/ objects.')
-        string(name: 'PACKAGE_JOB', defaultValue: 'bromure-linux',
-            description: 'The Jenkins job that runs Jenkinsfile.linux (its archived amd64 .deb is the bromure-ac that bakes). Its full name: folder/name when it is in a folder.')
-        string(name: 'PACKAGE_BUILD', defaultValue: '',
-            description: 'That job\'s build number to take the .deb from. Empty: its last successful build.')
+        string(name: 'SWIFT_IMAGE', defaultValue: 'swift:6.4-noble',
+            description: 'The Swift image the package\'s toolchain is built on (as Jenkinsfile.linux).')
     }
 
     environment {
@@ -73,16 +71,82 @@ pipeline {
     }
 
     stages {
-        stage('Package') {
+        stage('Version') {
             steps {
-                script {
-                    def selector = params.PACKAGE_BUILD?.trim() ? specific(params.PACKAGE_BUILD.trim()) : lastSuccessful()
-                    copyArtifacts(projectName: params.PACKAGE_JOB, selector: selector,
-                                  filter: 'deb-ci/out/bromure-ac-*_amd64.deb, deb-ci/out/bromure-ac-*_amd64.deb.sha256',
-                                  flatten: true, target: 'image-ci/pkg', fingerprintArtifacts: true)
+                // As Jenkinsfile.linux: `git describe` and the commit go in the
+                // binary's build info; the tags first (the SCM credential is
+                // only bound during Checkout SCM).
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
+                    keyFileVariable: 'SSH_KEY')]) {
+                    sh '''
+                        set -eu
+                        export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                        git fetch --tags --force --quiet origin || echo "WARNING: tags not fetched; the version falls back to the commit"
+                    '''
                 }
                 sh '''
                     set -eu
+                    [ "$(uname -m)" = x86_64 ] || { echo "this job builds and bakes natively: an x86_64 agent, not $(uname -m)"; exit 1; }
+                    docker version --format 'docker: client {{.Client.Version}} · daemon {{.Server.Version}}' \
+                        || { echo "docker isn't usable by $(id -un) (the docker group)"; exit 1; }
+                    rm -rf image-ci/pkg image-ci/ctx image-ci/src image-ci/toolchain-ctx
+                    mkdir -p image-ci/pkg
+                    v=$(git describe --tags --always --match 'agentic-coding-v*')
+                    c=$(git rev-parse --short=8 HEAD)
+                    printf 'BROMURE_BUILD_VERSION=%s\\nBROMURE_BUILD_COMMIT=%s\\n' "$v" "$c" > image-ci/version.env
+                    cat image-ci/version.env
+                '''
+            }
+        }
+
+        stage('Toolchain image') {
+            steps {
+                // Jenkinsfile.linux's, for a native x86_64 build (no cross
+                // pieces). Its own tag per (Swift image, Dockerfile): a
+                // daemon that kept the layers reuses them.
+                sh '''
+                    set -eu
+                    swift_image="${SWIFT_IMAGE:-swift:6.4-noble}"
+                    mkdir -p image-ci/toolchain-ctx
+                    cp linux/packaging/Dockerfile.toolchain image-ci/toolchain-ctx/Dockerfile
+                    key=$( { echo "$swift_image x86_64"; cat linux/packaging/Dockerfile.toolchain; } | sha256sum | cut -c1-12)
+                    tag="bromure-linux-toolchain:x86_64-$key"
+                    echo "$tag" > image-ci/toolchain-tag
+                    echo "=== toolchain $tag"
+                    docker build --pull -t "$tag" \
+                        --build-arg SWIFT_IMAGE="$swift_image" \
+                        --build-arg TARGET_ARCH=x86_64 \
+                        image-ci/toolchain-ctx
+                '''
+            }
+        }
+
+        stage('Build bromure-ac') {
+            steps {
+                // The committed tree only, built in a container (in with
+                // `docker build`, out with `docker cp`, as Jenkinsfile.linux),
+                // then unpacked where the AppArmor profile expects it.
+                sh '''
+                    set -eu
+                    name="bromure-image-deb-$BUILD_NUMBER"
+                    ctx=image-ci/ctx
+                    mkdir -p "$ctx/src"
+                    git archive --format=tar HEAD | tar -x -C "$ctx/src"
+                    cp image-ci/version.env "$ctx/version.env"
+                    printf 'FROM %s\\nCOPY src /src\\nCOPY version.env /version.env\\nWORKDIR /src\\n' "$(cat image-ci/toolchain-tag)" > "$ctx/Dockerfile"
+                    docker build -q -t "bromure-image-deb-src:$BUILD_NUMBER" "$ctx"
+                    rm -rf "$ctx"
+                    docker rm -f "$name" 2>/dev/null || true
+                    docker run --name "$name" \
+                        -e TARGET_ARCH=x86_64 -e BUILD_NUMBER="$BUILD_NUMBER" \
+                        "bromure-image-deb-src:$BUILD_NUMBER" \
+                        bash -c 'set -a; . /version.env; set +a; linux/packaging/build-deb.sh /out'
+                    rm -rf image-ci/pkg
+                    docker cp "$name:/out" image-ci/pkg
+                    docker rm "$name" >/dev/null
+                    docker rmi "bromure-image-deb-src:$BUILD_NUMBER" >/dev/null || true
+                    ls -l image-ci/pkg
                     cd image-ci/pkg
                     debs=$(ls bromure-ac-*_amd64.deb)
                     [ "$(echo "$debs" | wc -l)" = 1 ] || { echo "expected one amd64 .deb, got: $debs"; exit 1; }
@@ -97,25 +161,7 @@ pipeline {
                         [ -x "$B/$f" ] || { echo "the .deb has no $f"; exit 1; }
                     done
                     cat "$B/bromure-ac.build-info.json"
-                    python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' \
-                        "$B/bromure-ac.build-info.json" > image-ci/commit
                 '''
-                // The repository at the .deb's commit: its setup.sh and catalog
-                // steps are the ones that binary expects.
-                withCredentials([sshUserPrivateKey(
-                    credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
-                    keyFileVariable: 'SSH_KEY')]) {
-                    sh '''
-                        set -eu
-                        commit=$(cat image-ci/commit)
-                        if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-                            export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-                            git fetch --quiet origin
-                        fi
-                        git -c advice.detachedHead=false checkout --quiet --detach "$commit"
-                        echo "checked out $(git rev-parse --short=8 HEAD) (the .deb's commit)"
-                    '''
-                }
             }
         }
 
@@ -191,7 +237,11 @@ pipeline {
             archiveArtifacts artifacts: 'image-ci/out/img-catalog.json, image-ci/out/build-info.json', allowEmptyArchive: true
         }
         always {
-            sh 'rm -rf image-ci/tmp image-ci/out/base.img.gz'
+            sh '''
+                rm -rf image-ci/tmp image-ci/out/base.img.gz image-ci/ctx
+                docker rm -f "bromure-image-deb-$BUILD_NUMBER" >/dev/null 2>&1 || true
+                docker rmi "bromure-image-deb-src:$BUILD_NUMBER" >/dev/null 2>&1 || true
+            '''
         }
     }
 }

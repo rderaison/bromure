@@ -32,12 +32,6 @@ pipeline {
         timeout(time: 2, unit: 'HOURS')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
-        // The image job (Jenkinsfile.image-amd64) takes the amd64 .deb from
-        // here with Copy Artifact, which refuses ("Unable to find project
-        // for artifact copy") unless this job allows it. Any job may: the
-        // packages are the ones published to the public APT repository.
-        // Takes effect once this job has run with it.
-        copyArtifactPermission('*')
     }
 
     // A blank parameter (or any on the run that first registers them) isn't
