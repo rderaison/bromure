@@ -4608,6 +4608,11 @@ struct ProfileEditorView: View {
                         Toggle("Tell the agent when policy blocks it",
                                isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }))
                     }
+                    settingRow(caption: "Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge.",
+                               info: "Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts.") {
+                        Toggle("Allow /ship and /steward",
+                               isOn: Binding(get: { !draft.claudeShipDisabled }, set: { draft.claudeShipDisabled = !$0 }))
+                    }
                     settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
                                info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {
                         Picker("Agent watchdog", selection: $draft.watchdogMode) {
