@@ -110,6 +110,40 @@ struct GatewayP2PIngressTests {
         #expect(Self.firstTCPBytes(port).hasPrefix("SSH-2.0-"))
     }
 
+    /// The web client's way in, on a multi-user server: the broker joins
+    /// bromure.io's relay (WSRelayListener) and connects to the port it
+    /// announces, this user's ingress, by loopback. What the dialer sends
+    /// through the relay reaches the gateway pinned to this user, and the
+    /// gateway's SSH banner comes back through the relay.
+    @Test(.enabled(if: WSRelayLinuxTests.hasPython))
+    func theWebClientsRelayReachesTheGatewayAsThatUser() async throws {
+        guard getuid() != 0 else { return }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/sock", withIntermediateDirectories: true)
+        let router = GatewayRouter(socketDir: dir + "/sock")
+        let server = await MainActor.run { () -> RemoteAccessServer in
+            let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: dir + "/remote", isDirectory: true)))
+            s.accountRouter = router
+            s.accountPin = GatewayP2PIngress.pin(router: router)
+            return s
+        }
+        try await MainActor.run { try server.start(.init(port: 0, bindAddress: "", passwordAuth: false, pubkeyAuth: true,
+                                                          unixSocketPath: dir + "/p2p.sock", proxyHeader: true)) }
+        defer { Task { @MainActor in server.stop() } }
+        let mine = try await GatewayKeyAccessTests.daemon(dir + "/sock", Self.me, GatewayKeyAccessTests.Keys([]))
+        defer { Task { await mine.close() } }
+        let forwarder = P2PIngressForwarder()
+        let port = try #require(forwarder.ensure(gatewaySocket: dir + "/p2p.sock"))
+        defer { forwarder.stop() }
+        try await WSRelayLinuxTests.withWorld { w in
+            let id = WSRelayLinuxTests.id("banner")
+            try w.join(id, sshPort: port)
+            let banner = await w.wait { $0.contains("head \(id) SSH-2.0-") }
+            #expect(banner != nil, "the gateway's banner never came back through the relay: \(w.events)")
+            #expect(!w.events.contains("sshd-open"), "the stand-in sshd isn't part of this path")
+        }
+    }
+
     static func firstTCPBytes(_ port: Int) -> String {
         guard let fd = P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 2) else { return "" }
         defer { close(fd) }
@@ -196,6 +230,30 @@ struct GatewayP2PIngressTests {
         f.stop()
         #expect(P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 1) == nil, "closed")
         #expect(P2PIngressForwarder.listen(on: "not-an-address") == nil)
+    }
+
+    /// On an address of the admin's that isn't loopback, the ingress answers
+    /// on 127.0.0.1 too, same port: the broker's relay legs (TURN's, the web
+    /// client's ws-relay) connect to the announced port from this process, by
+    /// loopback. Both close when P2P stops.
+    @Test func anIngressOnALANAddressAnswersOnLoopbackToo() throws {
+        #expect(P2PIngressForwarder.coversLoopback("0.0.0.0") && P2PIngressForwarder.coversLoopback("::")
+                && P2PIngressForwarder.coversLoopback("127.0.0.1") && P2PIngressForwarder.coversLoopback(""))
+        #expect(!P2PIngressForwarder.coversLoopback("10.1.2.3") && !P2PIngressForwarder.coversLoopback("fd00::1"))
+        // This machine's first LAN address (none: nothing to bind).
+        guard let lan = P2PCandidateGatherer.hostCandidates(sshPort: 1).first(where: { $0.ip.contains(".") })?.ip else { return }
+        let f = P2PIngressForwarder()
+        let port = try #require(f.ensure(gatewaySocket: "/nonexistent", bindAddress: lan))
+        for ip in [lan, "127.0.0.1"] {
+            let probe = P2PTCP.connect(ip: ip, port: port, timeout: 2)
+            #expect(probe != nil, "\(ip):\(port)")
+            if let probe { close(probe) }
+        }
+        f.stop()
+        for ip in [lan, "127.0.0.1"] {
+            #expect(P2PTCP.connect(ip: ip, port: port, timeout: 1) == nil, "\(ip):\(port) still open")
+        }
+        #expect(P2PIngressForwarder.open(on: "not-an-address") == nil)
     }
 
     /// A pinned account has its own cap on password checks in flight

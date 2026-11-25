@@ -75,10 +75,16 @@ extension Daemon {
 /// socket, connected as this daemon's user, so the gateway pins it to this
 /// account; each starts with a PROXY v1 line naming the client, for the
 /// gateway's per-client password limit.
+///
+/// The broker's relay legs don't come in from outside: TURN's relayed leg
+/// (TurnRelayListener.serve) and the web client's ws-relay (WSRelayListener)
+/// are opened by this process, which then connects to the announced port on
+/// 127.0.0.1 (macOS: its sshd, on every interface). When the admin's address
+/// doesn't cover loopback, the ingress listens on 127.0.0.1 too, same port.
 // @port-skip linux-only: the multi-user server's per-user P2P ingress
 final class P2PIngressForwarder: @unchecked Sendable {
     static let shared = P2PIngressForwarder()
-    private let state = NIOLockedValueBox<(fd: Int32, port: Int)>((-1, 0))
+    private let state = NIOLockedValueBox<(fd: Int32, loopbackFD: Int32, port: Int)>((-1, -1, 0))
     /// Connections being spliced; more than `maxConnections` at once are closed.
     private static let open = NIOLockedValueBox(0)
     static let maxConnections = 64
@@ -88,11 +94,34 @@ final class P2PIngressForwarder: @unchecked Sendable {
     func ensure(gatewaySocket: String, bindAddress: String? = nil) -> Int? {
         state.withLockedValue { s -> Int? in
             if s.fd >= 0 { return s.port }
-            guard let (fd, port) = Self.listen(on: bindAddress ?? "0.0.0.0") else { return nil }
-            s = (fd, port)
-            Thread.detachNewThread { Self.acceptLoop(fd, gatewaySocket: gatewaySocket) }
-            return port
+            guard let made = Self.open(on: bindAddress ?? "0.0.0.0") else { return nil }
+            s = made
+            for fd in [made.fd, made.loopbackFD] where fd >= 0 {
+                Thread.detachNewThread { Self.acceptLoop(fd, gatewaySocket: gatewaySocket) }
+            }
+            return made.port
         }
+    }
+
+    /// The ingress's listener on `address`, and one on 127.0.0.1 at the same
+    /// port when `address` doesn't take loopback connections itself.
+    // @port-skip linux-only: see P2PIngressForwarder
+    static func open(on address: String) -> (fd: Int32, loopbackFD: Int32, port: Int)? {
+        guard !coversLoopback(address) else { return listen(on: address).map { ($0.0, -1, $0.1) } }
+        // Loopback picks the port; the admin's address must have it free too.
+        for _ in 0..<8 {
+            guard let (loopback, port) = listen(on: "127.0.0.1") else { return nil }
+            if let (fd, _) = listen(on: address, port: port) { return (fd, loopback, port) }
+            close(loopback)
+        }
+        return nil
+    }
+
+    /// Whether a listener on `address` (numeric) takes connections to
+    /// 127.0.0.1: every interface (v6's too, dual-stack), or loopback itself.
+    // @port-skip linux-only: see P2PIngressForwarder
+    static func coversLoopback(_ address: String) -> Bool {
+        address.isEmpty || address == "0.0.0.0" || address == "::" || address.hasPrefix("127.")
     }
 
     /// Whether the ingress is listening.
@@ -102,20 +131,22 @@ final class P2PIngressForwarder: @unchecked Sendable {
     /// The ingress closed (P2P not served any more); a later ensure opens a new one.
     // @port-skip linux-only: see P2PIngressForwarder
     func stop() {
-        let fd = state.withLockedValue { s -> Int32 in let fd = s.fd; s = (-1, 0); return fd }
-        guard fd >= 0 else { return }
-        Glibc.shutdown(fd, Int32(SHUT_RDWR))   // wakes the accept
-        close(fd)
+        let fds = state.withLockedValue { s -> [Int32] in let fds = [s.fd, s.loopbackFD]; s = (-1, -1, 0); return fds }
+        for fd in fds where fd >= 0 {
+            Glibc.shutdown(fd, Int32(SHUT_RDWR))   // wakes the accept
+            close(fd)
+        }
     }
 
-    /// A listener on `address` (numeric, v4 or v6), an ephemeral port.
+    /// A listener on `address` (numeric, v4 or v6), on `port` (0: an
+    /// ephemeral one).
     // @port-skip linux-only: see P2PIngressForwarder
-    static func listen(on address: String) -> (Int32, Int)? {
+    static func listen(on address: String, port: Int = 0) -> (Int32, Int)? {
         var hints = addrinfo()
-        hints.ai_flags = AI_NUMERICHOST | AI_PASSIVE
+        hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV | AI_PASSIVE
         hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
         var res: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(address, "0", &hints, &res) == 0, let ai = res else { return nil }
+        guard getaddrinfo(address, String(port), &hints, &res) == 0, let ai = res else { return nil }
         defer { freeaddrinfo(res) }
         let fd = socket(ai.pointee.ai_family, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
         guard fd >= 0 else { return nil }
