@@ -92,6 +92,8 @@ export class SSHChannel {
   localWindow = WINDOW;
   closed = false;
   private eofSent = false;
+  /** eof() was called with bytes still queued: sent once they've gone. */
+  private eofPending = false;
   private outQueue: Uint8Array[] = [];
   private buffered: Uint8Array[] = [];
   private eofSeen = false;
@@ -105,7 +107,7 @@ export class SSHChannel {
   constructor(readonly conn: SSHConnection, readonly localId: number) {}
 
   write(data: Uint8Array) {
-    if (this.closed || this.eofSent) return;
+    if (this.closed || this.eofSent || this.eofPending) return;
     this.outQueue.push(data);
     this.flush();
   }
@@ -119,7 +121,10 @@ export class SSHChannel {
   flush() {
     const had = this.outQueue.length > 0;
     this.flushQueue();
-    if (had && !this.outQueue.length && !this.closed) this.onDrain();
+    if (this.outQueue.length || this.closed) return;
+    // The EOF asked for while bytes were queued goes right after the last.
+    if (this.eofPending) { this.eofPending = false; this.sendEOF(); }
+    if (had) this.onDrain();
   }
   private flushQueue() {
     while (this.outQueue.length && this.remoteWindow > 0 && !this.closed) {
@@ -131,8 +136,15 @@ export class SSHChannel {
       this.conn.sendPacket(new Writer().byte(MSG.CHANNEL_DATA).u32(this.remoteId).string(chunk).bytes());
     }
   }
+  /** No more data from us. Sent after everything already written: bytes
+   *  still queued for the peer's window go first (the EOF follows the last
+   *  of them, from flush), never after it. */
   eof() {
-    if (this.closed || this.eofSent) return;
+    if (this.closed || this.eofSent || this.eofPending) return;
+    if (this.outQueue.length) { this.eofPending = true; return; }
+    this.sendEOF();
+  }
+  private sendEOF() {
     this.eofSent = true;
     this.conn.sendPacket(new Writer().byte(MSG.CHANNEL_EOF).u32(this.remoteId).bytes());
   }
