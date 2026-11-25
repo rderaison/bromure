@@ -154,7 +154,12 @@ func serve(c *net.UnixConn) {
 		fail("bad request")
 		return
 	}
-	cidr, err := admit(line, routeTable())
+	routes, err := routeTable()
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	cidr, err := admit(line, routes)
 	if err != nil {
 		fail(err.Error())
 		return
@@ -304,14 +309,18 @@ type route struct {
 	Table string `json:"table"`
 }
 
-func routeTable() []route {
+// routeTable is every IPv4 route, all tables. An error (not an empty list)
+// when they can't be read: admission then refuses rather than assume none.
+func routeTable() ([]route, error) {
 	out, err := exec.Command("ip", "-j", "-4", "route", "show", "table", "all").Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("can't read the routing table: %v", err)
 	}
 	var rs []route
-	_ = json.Unmarshal(out, &rs)
-	return rs
+	if err := json.Unmarshal(out, &rs); err != nil {
+		return nil, fmt.Errorf("can't read the routing table: %v", err)
+	}
+	return rs, nil
 }
 
 // admit validates a SETUP line: one private /24, strictly spelled, that no
@@ -358,10 +367,11 @@ func privateSlash24(s string) (string, bool) {
 	return ipString(ip) + "/24", true
 }
 
-// coveringRoute is a route (any table, any kind but default) that already
-// claims the /24's network address: a LAN, a VPN, another tunnel.
+// coveringRoute is a route (any table, any kind but default) that overlaps
+// the /24: one covering it (a LAN, a VPN, another tunnel) or one inside it
+// (a host route, a smaller subnet).
 func coveringRoute(cidr string, routes []route) *route {
-	netw, _, _ := parseCIDR(cidr)
+	netw, mask24, _ := parseCIDR(cidr)
 	for i := range routes {
 		r := &routes[i]
 		if r.Dst == "" || r.Dst == "default" || r.Type == "broadcast" || r.Type == "multicast" {
@@ -375,7 +385,7 @@ func coveringRoute(cidr string, routes []route) *route {
 		if !ok || m == 0 {
 			continue
 		}
-		if netw&m == n {
+		if netw&m == n || n&mask24 == netw {
 			return r
 		}
 	}
