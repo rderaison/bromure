@@ -168,7 +168,9 @@ export class SSHChannel {
     if (this.paused) { this.buffered.push(d); return; }
     this.onData(d);
     this.consumed += d.length;
-    if (this.localWindow < WINDOW / 2 && this.consumed > 0) {
+    // (Not for a channel the peer already closed: data it buffered is still
+    // delivered, but no window adjust goes out for a dead channel.)
+    if (!this.closed && this.localWindow < WINDOW / 2 && this.consumed > 0) {
       const add = this.consumed;
       this.consumed = 0;
       this.localWindow += add;
