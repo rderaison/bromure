@@ -48,6 +48,8 @@ export function App() {
     return () => { live = false; };
   }, [peerID]);
 
+  // Neither route (#/ — Disconnect, "Connect to Another Server…"): back to the
+  // picker. Keyed on both ids: leaving a peer route doesn't change hostID.
   useEffect(() => {
     if (!hostID) { if (!peerID) setHost(null); return; }
     const saved = savedHosts.all().find(h => h.id === hostID);
@@ -55,7 +57,7 @@ export function App() {
     const h = connectionFor(targetForSaved(saved));
     setHost(h);
     h.start().catch(() => {});
-  }, [hostID]);
+  }, [hostID, peerID]);
 
   // Electron smoke tests (shot mode only): connect to BROMURE_TEST_HOST.
   useEffect(() => {
