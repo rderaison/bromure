@@ -65,11 +65,11 @@ struct BromureAC: ParsableCommand {
         // `__attach-window` (native terminal view pump) are app-internal;
         // bromure-cli exposes none of them and has no GUI default.
         let topLevel: [ParsableCommand.Type] =
-            asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self,
+            asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self, FatClientProxy.self,
                      FatClientSocks.self, FatClientDial.self, FatClientBrowserMCPProbe.self,
                      TunnelHelper.self]
                   : [Run.self, RemoteMenu.self, VMAttachWindow.self, FatClientPost.self,
-                     FatClientAuthProbe.self, FatClientForward.self, FatClientSocks.self,
+                     FatClientAuthProbe.self, FatClientForward.self, FatClientProxy.self, FatClientSocks.self,
                      FatClientDial.self, FatClientBrowserMCPProbe.self, TunnelHelper.self]
         let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
         return CommandConfiguration(
@@ -113,6 +113,18 @@ struct BromureAC: ParsableCommand {
         // default. (Bug#4.)
         if filtered.isEmpty, invokedName == "bromure-cli" {
             filtered = ["help"]
+        }
+        // BROMURE_AC_REMOTE_HOST=<host id|name> (hosts.json): every CLI
+        // subcommand talks to that remote bromure-ac through the fat-client
+        // SSH tunnel instead of the local control socket — the fat-client E2E
+        // suite runs its CLI tests this way. Never for the app itself (`run`,
+        // or no subcommand) or its plumbing children (`__…`).
+        if let remote = ProcessInfo.processInfo.environment["BROMURE_AC_REMOTE_HOST"], !remote.isEmpty,
+           let sub = filtered.first, sub != "run", !sub.hasPrefix("__"), !sub.hasPrefix("-") {
+            guard RemoteTransport.installCLIRemote(remote) else {
+                FileHandle.standardError.write(Data("BROMURE_AC_REMOTE_HOST: no remote host \"\(remote)\" in remote-client/hosts.json\n".utf8))
+                Darwin.exit(2)
+            }
         }
         // Hidden verification hook: run the PII detector over files and print
         // what it finds and how long it took. Standalone, no servers or VMs.
@@ -4787,6 +4799,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "connect": "ssh -p \(cfg.port) \(user)@\(host)",
             "authorizedKeys": keys,
             "authorizedKeysProblem": server.authorizedKeysProblem ?? "",
+            // The fat-client E2E's app-generated login, by name only (its
+            // password is only ever in POST /remote/test-login's reply).
+            "testLoginUser": RemoteTestLogin.shared.current?.user ?? "",
         ]
     }
 
@@ -5764,6 +5779,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         || $0.address == key
                 }) ?? hosts.first
                 guard let host else { return ["error": "no remote host configured"] }
+                if (params["action"] as? String) == "close-mirror" {
+                    // E2E teardown: close this host's mirror window (if open)
+                    // without opening one — its poller stops with it.
+                    let wasOpen = self.remoteHostWindows[host.id] != nil
+                    self.remoteHostWindows[host.id]?.close()
+                    return ["ok": true, "wasOpen": wasOpen]
+                }
                 if self.remoteHostWindows[host.id] == nil { self.openRemoteHost(host) }
                 guard let win = self.remoteHostWindows[host.id] else {
                     return ["error": "mirror window not open"]

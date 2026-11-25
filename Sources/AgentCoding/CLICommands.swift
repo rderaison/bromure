@@ -1656,6 +1656,7 @@ private func printRemoteStatus(_ s: [String: Any]) {
         print("  Login as: \(user)")
         print("  Connect:  \(connect)")
     }
+    if let t = s["testLoginUser"] as? String, !t.isEmpty { print("  Test login: \(t) (E2E, until relaunch)") }
     let keys = s["authorizedKeys"] as? [[String: Any]] ?? []
     print("  Keys:     \(keys.count) authorized")
     if let problem = s["authorizedKeysProblem"] as? String, !problem.isEmpty { print("  Warning:  \(problem)") }

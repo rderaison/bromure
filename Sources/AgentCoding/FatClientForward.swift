@@ -190,6 +190,66 @@ struct FatClientForward: ParsableCommand {
     }
 }
 
+/// `bromure-ac __fatclient-proxy <host> --socket <path>` — a local Unix socket
+/// whose every connection is a fresh `bromure-fatclient control` channel to
+/// the remote's control socket, over the app's own fat-client SSH transport
+/// (`RemoteTransport.client`, pooled connection, pinned host key, keychain
+/// identity). A tool that speaks the control-socket HTTP API — the fat-client
+/// E2E suite — points at this socket instead of the local control.sock and
+/// drives the remote exactly as the mirror does. Plumbing/testing.
+struct FatClientProxy: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__fatclient-proxy", abstract: "Fat-client control-socket proxy (plumbing).",
+        shouldDisplay: false)
+    @Argument(help: "Remote host id or name (from remote-client/hosts.json).") var host: String
+    @Option(name: .long, help: "Unix socket path to listen on.") var socket: String
+
+    func run() throws {
+        guard let remote = RemoteTransport.loadHosts().first(where: {
+            $0.id.uuidString.caseInsensitiveCompare(host) == .orderedSame
+                || $0.name.caseInsensitiveCompare(host) == .orderedSame
+        }) else { throw ValidationError("unknown remote host: \(host)") }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(socket.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
+            throw ValidationError("socket path too long (max \(MemoryLayout.size(ofValue: addr.sun_path) - 1) bytes)")
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            buf.copyBytes(from: pathBytes)
+            buf[pathBytes.count] = 0
+        }
+        unlink(socket)
+        let lfd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard lfd >= 0 else { throw ValidationError("socket(): \(String(cString: strerror(errno)))") }
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(lfd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0, Darwin.listen(lfd, 64) == 0 else {
+            throw ValidationError("couldn't listen on \(socket): \(String(cString: strerror(errno)))")
+        }
+        chmod(socket, 0o600)   // owner-only, like the control socket it stands in for
+        // One connection up front: a dead tunnel fails here, loudly, instead
+        // of as a confusing first request.
+        let probe = RemoteTransport.client(for: remote)
+        guard ((try? probe.request("GET", "/health"))?.status ?? 0) == 200 else {
+            throw ValidationError("remote \(remote.connectLabel) didn't answer /health over the tunnel")
+        }
+        FileHandle.standardError.write(Data("fatclient-proxy: \(socket) → \(remote.connectLabel) control\n".utf8))
+        while let cfd = FatForward.acceptConnection(lfd, label: "fatclient-proxy") {
+            Thread.detachNewThread {
+                guard let rfd = RemoteTransport.client(for: remote).dial() else {
+                    Darwin.close(cfd); return
+                }
+                FatForward.splice(cfd, rfd)
+            }
+        }
+    }
+}
+
 /// `bromure-ac __dial <ip> <port>` — connect to a guest TCP endpoint and pump
 /// stdin↔socket↔stdout. Runs as a SUBPROCESS of the server so it can actually
 /// reach the guest: the app process that owns the vmnet interface cannot

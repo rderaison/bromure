@@ -1142,6 +1142,48 @@ final class ACAutomationServer {
             let r = DispatchQueue.main.sync { self.onRemoteApply?(bodyJSON) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
+        // The AppleScript verbs (BromureAC.sdef) over the control socket:
+        // {command: "get profile json", direct: "<name|id>", args: {key,
+        // toValue, color}} → {result: "<what AppleScript would return>"}.
+        // How the fat-client E2E suite drives a REMOTE app's scripting
+        // surface through the SSH tunnel. Debug runs only.
+        case ("POST", "/scripting"):
+            guard isTrustedLocal, debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Scripting needs BROMURE_DEBUG_CLAUDE and the local control socket"])
+                return
+            }
+            guard let command = bodyJSON["command"] as? String, !command.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "command required"])
+                return
+            }
+            let direct = bodyJSON["direct"]
+            let args = bodyJSON["args"] as? [String: Any]
+            let result = DispatchQueue.main.sync {
+                ScriptCall(directParameter: direct, evaluatedArguments: args).run(command)
+            }
+            sendResponse(fd: fd, status: 200, body: ["result": result.map { "\($0)" } ?? ""])
+
+        // Fat-client E2E: mint (POST) or end (DELETE) an app-generated SSH
+        // login (RemoteTestLogin). Only when the app runs with
+        // BROMURE_DEBUG_CLAUDE, and only over the owner's control socket —
+        // the password is in the reply.
+        case ("POST", "/remote/test-login"), ("DELETE", "/remote/test-login"):
+            guard isTrustedLocal, debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Test logins need BROMURE_DEBUG_CLAUDE and the local control socket"])
+                return
+            }
+            if method == "DELETE" {
+                RemoteTestLogin.shared.clear()
+                sendResponse(fd: fd, status: 200, body: ["ok": true])
+                return
+            }
+            let c = RemoteTestLogin.shared.mint()
+            var body = DispatchQueue.main.sync { self.onRemoteStatus?() ?? [:] }
+            body["user"] = c.user
+            body["password"] = c.password
+            body.removeValue(forKey: "connect")
+            sendResponse(fd: fd, status: 200, body: body)
+
         case ("POST", "/remote/keys"):
             guard isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])

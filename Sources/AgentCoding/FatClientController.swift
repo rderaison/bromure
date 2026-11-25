@@ -6821,7 +6821,7 @@ final class RemoteHostWindow: NSWindow {
 
     private static let debugReadBackActions: Set<String> = [
         "get-mirror-state", "window-info", "focused", "trace-records", "shot", "fc-drop-images",
-        "request-report",
+        "request-report", "settings-window",
     ]
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -7214,7 +7214,12 @@ final class RemoteHostWindow: NSWindow {
         case "start", "stop", "suspend", "reboot":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             switch action {
-            case "start":   controller.startWorkspace(id)
+            case "start":
+                // Refused (nothing sent) until the workspace's profile has
+                // come over the tunnel — say so, so a caller can retry.
+                guard controller.startWorkspace(id) else {
+                    return ["error": "workspace not mirrored yet", "retry": true]
+                }
             case "stop":    controller.shutdownWorkspace(id)
             case "suspend": controller.suspendWorkspace(id)
             default:
@@ -7232,6 +7237,20 @@ final class RemoteHostWindow: NSWindow {
             // the profile + the remote's global models over the tunnel).
             guard let id = resolveID() else { return ["error": "workspace required"] }
             openWorkspaceSettings(id)
+            return ["ok": true]
+        case "settings-window":
+            // E2E read-back: the open workspace-settings editors (the mirror's
+            // counterpart of the local app's `get editor window id`).
+            let open = settingsSessions.filter { $0.value.window.isVisible }
+            let first = open.min { $0.value.window.windowNumber < $1.value.window.windowNumber }
+            return ["ok": true, "open": !open.isEmpty,
+                    "windowId": first?.value.window.windowNumber ?? 0,
+                    "workspace": first?.key.uuidString ?? "",
+                    "workspaces": open.keys.map(\.uuidString)]
+        case "close-settings":
+            // E2E hook: close the workspace-settings editors (one, or all).
+            let target = resolveID()
+            for (id, s) in settingsSessions where target == nil || id == target { s.close() }
             return ["ok": true]
         case "shot-settings":
             // E2E hook: render that editor window to a PNG (`path`).
