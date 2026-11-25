@@ -176,4 +176,8 @@ if [ $sign -eq 1 ]; then
 fi
 
 # --- Checksums, after signing --------------------------------------------------
-( cd "$out" && sha256 BromureClient-"$version"-*-setup.exe "Bromure Client-win32-"*.zip | sed 's/ \*/  /' > win-SHA256SUMS && cat win-SHA256SUMS )
+# Of this run's files only, by name: out/ may hold another architecture's from
+# an earlier (maybe unsigned) run, which a glob would list as this run's.
+sums=()
+for a in "${archs[@]}"; do sums+=("BromureClient-$version-$a-setup.exe" "Bromure Client-win32-$a.zip"); done
+( cd "$out" && sha256 "${sums[@]}" | sed 's/ \*/  /' > win-SHA256SUMS && cat win-SHA256SUMS )
