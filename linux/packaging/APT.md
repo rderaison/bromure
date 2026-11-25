@@ -67,10 +67,17 @@ a `bromure-ac` publish keeps `bromure-client` and the reverse.
 
 **Never run two publishes to the same suite at the same time**, from either
 pipeline: each one reads the index, adds to it and writes it back, so the
-second to finish drops what the first added (its package stays in the pool,
+second to write drops what the first added (its package stays in the pool,
 in no index). Each pipeline has `disableConcurrentBuilds()`, which only
-covers its own runs. If it happens, publish the dropped version again: the
-tool replaces the pool file and adds the entry.
+covers its own runs.
+
+The tool catches most of it: just before writing the indexes it reads the
+suite's `Packages` again, and stops ("index changed while this publish ran")
+if another publish finished since it started, leaving the suite as that
+publish wrote it. Run the stopped publish again: it replaces its package in
+the pool and adds the entry. What it can't catch is a publish that writes
+during the few seconds of this one's own index upload; if a version is
+missing from the index after two runs that overlapped, publish it again.
 
 `tools/apt-publish.mjs` exists on both branches (`linux-port`, `web-client`)
 and must stay the same file.

@@ -7,7 +7,8 @@
 # (beta's package, not a new one), a second version in beta, a repeat
 # refused, another signing key refused, a dry run writes nothing, the
 # indexes by hash, a second package in the same suites (--package: each
-# publish keeps the other package's entries), and apt (update + candidate)
+# publish keeps the other package's entries), a publish that another one
+# overlapped stops before writing its indexes, and apt (update + candidate)
 # for each step.
 #
 # Needs node, dpkg-deb, gpg, apt-get, python3. Exit 0 = PASS.
@@ -21,8 +22,10 @@ done
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/apt-test.XXXXXX")
 SERVER=""
+HELD=""
 cleanup() {
     [ -n "$SERVER" ] && kill "$SERVER" 2>/dev/null || true
+    [ -n "$HELD" ] && kill "$HELD" 2>/dev/null || true
     rm -rf "$W"
 }
 trap cleanup EXIT
@@ -64,6 +67,7 @@ mkdeb 1.0 i386 >/dev/null
 # A second package for the same repository (the Electron client's).
 C20=$(mkdeb 2.0 amd64 bromure-client); CR20=$(mkdeb 2.0 arm64 bromure-client)
 C11=$(mkdeb 1.1 amd64 bromure-client)
+C21=$(mkdeb 2.1 amd64 bromure-client); R12=$(mkdeb 1.2 arm64)
 
 BUCKET="$W/bucket"
 mkdir -p "$BUCKET"
@@ -157,6 +161,32 @@ pub --suite stable --package bromure-client "$C20" "$CR20" >"$W/c7.log" 2>&1 && 
 grep -q "stable gets that one" "$W/c7.log" && pass "it reused beta's package" || fail "promotion message (bromure-client)"
 check --suite stable --package bromure-client --expect 2.0 && pass "apt sees bromure-client 2.0 in stable" || { fail "verify stable bromure-client"; cat "$W/verify.log"; }
 check --suite stable --expect 1.0 && pass "bromure-ac still 1.0 in stable" || { fail "stable bromure-ac"; cat "$W/verify.log"; }
+
+echo "== a publish that another one overlapped stops before its indexes"
+# bromure-client 2.1 (amd64) uploads its package, then is held where the tool
+# reads the indexes again; meanwhile bromure-ac 1.2 (arm64) is published. The
+# first one's indexes, built before that, would drop bromure-ac 1.2.
+HOLD="$W/hold"
+APT_SIGNING_KEY_FILE="$W/key-a.asc" APT_PUBLISH_TEST_HOLD="$HOLD" timeout 120 node "$TOOL" publish --local "$BUCKET" \
+    --suite beta --package bromure-client "$C21" >"$W/o1.log" 2>&1 &
+HELD=$!
+pool="$BUCKET/apt/pool/main/b/bromure-client/bromure-client_2.1_amd64.deb"
+for _ in $(seq 200); do [ -f "$pool" ] && break; sleep 0.1; done
+[ -f "$pool" ] && kill -0 "$HELD" 2>/dev/null && pass "the first publish uploaded its package and waits" || { fail "the first publish isn't waiting"; cat "$W/o1.log"; }
+pub --suite beta "$R12" >"$W/o2.log" 2>&1 && pass "bromure-ac 1.2 arm64 published meanwhile" || { fail "publish meanwhile"; cat "$W/o2.log"; }
+touch "$HOLD"
+rc=0; wait "$HELD" || rc=$?
+HELD=""
+[ "$rc" = 1 ] && grep -q "arm64 index changed while this publish ran" "$W/o1.log" \
+    && pass "the overlapped publish stopped" || { fail "the overlapped publish ended $rc"; cat "$W/o1.log"; }
+check --suite beta --expect 1.2 --arches arm64 && pass "bromure-ac 1.2 arm64 kept" || { fail "bromure-ac 1.2 dropped"; cat "$W/verify.log"; }
+[ "$(count beta bromure-client)" = 2 ] && pass "bromure-client 2.1 in no index" || fail "beta amd64 has $(count beta bromure-client) bromure-client entries"
+check --suite beta --package bromure-client --expect 2.0 && pass "beta still verifies (bromure-client 2.0)" || { fail "beta after the stop"; cat "$W/verify.log"; }
+# Running it again is the recovery.
+pub --suite beta --package bromure-client "$C21" >"$W/o3.log" 2>&1 && pass "published on the second run" || { fail "second run"; cat "$W/o3.log"; }
+grep -q "an interrupted publish" "$W/o3.log" && pass "it replaced the package left in the pool" || fail "no word of the leftover package"
+check --suite beta --package bromure-client --expect 2.1 --arches amd64 && pass "apt sees bromure-client 2.1" || { fail "verify bromure-client 2.1"; cat "$W/verify.log"; }
+check --suite beta --expect 1.2 --arches arm64 && pass "bromure-ac 1.2 arm64 still there" || { fail "bromure-ac 1.2 dropped by the second run"; cat "$W/verify.log"; }
 
 echo "== a tampered index is caught"
 printf '\n' >> "$BUCKET/apt/dists/stable/main/binary-arm64/Packages"
