@@ -3,7 +3,8 @@
 // half. Sign-in opens bromure.io/app/enroll with a one-shot `state` nonce;
 // only a callback echoing that nonce completes it (an unsolicited link can't
 // enroll this device into someone else's workspace):
-//   Electron: the system browser, back on `bromure://enroll?code&api&state`.
+//   Electron: the system browser, back on `bromure-client://enroll?code&api&state`
+//   (its own scheme: `bromure://` belongs to the macOS app / Bromure).
 //   Hosted:   this tab goes to the page (return_to=/client/) and comes back
 //             with `#enroll?code=…&api=…&state=…`.
 // After enrolling, the device publishes its SSH key (POST /v1/devices/ssh-key)
@@ -80,6 +81,8 @@ export const account = {
       u.searchParams.set('return_to', '/client/');
       location.assign(u.toString());
     } else {
+      // The desktop client's own scheme (bromure:// is the macOS app's).
+      u.searchParams.set('return_scheme', 'bromure-client');
       openExternal(u.toString());
     }
   },
@@ -200,8 +203,8 @@ function describeEnrollError(e: any): string {
 // ── callbacks ────────────────────────────────────────────────────────────
 
 if (typeof window !== 'undefined') {
-  // Electron: bromure://enroll?code=…&api=…&state=…
-  electron?.onDeepLink(url => { if (/^bromure:\/\/enroll/i.test(url)) account.complete(url); });
+  // Electron: bromure-client://enroll?code=…&api=…&state=…
+  electron?.onDeepLink(url => { if (/^bromure-client:\/\/enroll/i.test(url)) account.complete(url); });
   // Hosted: the enroll page returns to /client/#enroll?…
   if (location.hash.startsWith('#enroll?')) {
     const h = location.hash;

@@ -1,6 +1,6 @@
 // Electron main process (Linux / Windows). Owns what a page can't do:
 // raw TCP sockets for direct `address:port` hosts, bromure.io HTTP without
-// CORS, the `bromure://` deep link (enrollment), file saves, window controls.
+// CORS, the `bromure-client://` deep link (enrollment), file saves, window controls.
 // The renderer is the exact same bundle the hosted app serves.
 
 import { app, BrowserWindow, ipcMain, shell, dialog, net as enet, protocol, session } from 'electron';
@@ -31,6 +31,15 @@ let mainWindow: BrowserWindow | null = null;
 let pendingDeepLink: string | null = null;
 
 if (!SHOT && !app.requestSingleInstanceLock()) app.quit();
+
+// Its own URL scheme: `bromure://` belongs to the macOS app / Bromure and must
+// never be taken over on a machine that has them.
+const SCHEME = 'bromure-client';
+if (!SHOT) {
+  // A dev run (`electron .`) registers the Electron binary WITH the app path.
+  if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [path.resolve(process.argv[1])]);
+  else app.setAsDefaultProtocolClient(SCHEME);
+}
 // Screenshot runs are concurrent (several at once): each gets a throwaway
 // profile, or they fight over the IndexedDB lock and lose the device key.
 // A shot run never outlives its job, whatever happens to the page or its parent.
@@ -170,11 +179,11 @@ ipcMain.handle('save-file', async (e, name: string, data: Uint8Array) => {
 ipcMain.handle('deeplink:pending', () => { const d = pendingDeepLink; pendingDeepLink = null; return d; });
 
 function handleDeepLink(url: string) {
-  if (!url.startsWith('bromure://')) return;
+  if (!url.startsWith(SCHEME + '://')) return;
   if (mainWindow) { mainWindow.webContents.send('deeplink', url); if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
   else pendingDeepLink = url;
 }
-app.on('second-instance', (_e, argv) => { const u = argv.find(a => a.startsWith('bromure://')); if (u) handleDeepLink(u); });
+app.on('second-instance', (_e, argv) => { const u = argv.find(a => a.startsWith(SCHEME + '://')); if (u) handleDeepLink(u); });
 app.on('open-url', (e, url) => { e.preventDefault(); handleDeepLink(url); });
 
 app.whenReady().then(() => {
@@ -191,7 +200,7 @@ app.whenReady().then(() => {
     cb({ responseHeaders: { ...details.responseHeaders,
       'Content-Security-Policy': ["default-src 'self'; script-src 'self'" + (process.env.BROMURE_DEV_URL ? " 'unsafe-inline'" : '') + "; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://bromure.io wss://bromure.io" + (DEV_ORIGINS ? ' ' + DEV_ORIGINS : '')] } });
   });
-  const argLink = process.argv.find(a => a.startsWith('bromure://'));
+  const argLink = process.argv.find(a => a.startsWith(SCHEME + '://'));
   if (argLink) pendingDeepLink = argLink;
   mainWindow = createWindow(process.env.BROMURE_HASH || '');
   mainWindow.on('closed', () => { mainWindow = null; });

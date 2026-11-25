@@ -154,7 +154,9 @@ could not be carried over, or that works differently, and why.
   always offers Sign Out (no "Managed by your organization").
 - **Sign-in on the hosted app navigates this tab** to bromure.io/app/enroll
   (`return_to=/client/`) and completes from `#enroll?…` on return; Electron
-  opens the system browser and completes on the `bromure://enroll` deep link.
+  opens the system browser and completes on the `bromure-client://enroll` deep link
+  (its own scheme — `bromure://` belongs to the macOS app / Bromure; needs
+  bromure.io to honour `return_scheme=bromure-client`).
   Both check the `state` nonce (kept in sessionStorage across the round trip).
 - **The menu bar is drawn in the window.** A web page / frameless Electron
   window has no system menu bar, so the native one (Bromure · Workspaces · Edit

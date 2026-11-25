@@ -14,7 +14,7 @@ const paths = await packager({
   dir: '.', out: 'out', overwrite: true, platform, arch,
   name: 'Bromure Client', executableName: platform === 'win32' ? 'Bromure Client' : 'bromure-client',
   appBundleId: 'io.bromure.client', appCopyright: '© Bromure',
-  protocols: [{ name: 'Bromure', schemes: ['bromure'] }],
+  protocols: [{ name: 'Bromure Client', schemes: ['bromure-client'] }],
   asar: true, prune: false,
   ignore: p => p !== '' && (!keep.test(p) || !noMaps(p)),
   win32metadata: { CompanyName: 'Bromure', ProductName: 'Bromure Client', FileDescription: 'Bromure Client' },
