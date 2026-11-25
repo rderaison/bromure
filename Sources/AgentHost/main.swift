@@ -14,6 +14,7 @@ import AppKit
 
 AgentHostPaths.migrateFromNative()
 AgentHostPaths.migrateFromAgentHost()
+HostProcess.raiseFileLimit()
 
 let args = CommandLine.arguments
 let invokedAs = (args[0] as NSString).lastPathComponent

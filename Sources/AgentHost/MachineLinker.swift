@@ -353,14 +353,19 @@ final class MachineLinker: @unchecked Sendable {
     private func setParked(_ delta: Int) {
         lock.lock()
         parkedCount = max(0, parkedCount + delta)
+        let recovered = parkedCount > 0 && lastError != nil
         if parkedCount > 0 { lastError = nil }
+        let label = target?.label
         lock.unlock()
+        if recovered, let label { AgentHostLog.log("attach: linked to \(label) again") }
     }
 
     private func note(error: String) {
         lock.lock()
+        let changed = parkedCount == 0 && lastError != error
         if parkedCount == 0 { lastError = error }
         lock.unlock()
+        if changed { AgentHostLog.log("attach: \(error)") }
     }
 }
 
@@ -370,12 +375,35 @@ final class MachineLinker: @unchecked Sendable {
 enum ClientKey {
     static var url: URL { AgentHostPaths.support.appendingPathComponent("client_ed25519") }
 
+    private static let lock = NSLock()
+    private static var cached: Curve25519.Signing.PrivateKey?
+
+    /// The key, made on first use. Only a MISSING file makes a new one: a
+    /// read that fails for another reason (out of file descriptors, once)
+    /// used to mint a fresh key per dial — one no server knows — and to
+    /// overwrite the authorized one with it.
     static func load() -> Curve25519.Signing.PrivateKey? {
-        if let d = try? Data(contentsOf: url), d.count == 32,
-           let k = try? Curve25519.Signing.PrivateKey(rawRepresentation: d) { return k }
+        lock.lock(); defer { lock.unlock() }
+        if let cached { return cached }
+        do {
+            let d = try Data(contentsOf: url)
+            if d.count == 32, let k = try? Curve25519.Signing.PrivateKey(rawRepresentation: d) {
+                cached = k
+                return k
+            }
+        } catch {
+            guard (error as? CocoaError)?.code == .fileReadNoSuchFile else {
+                AgentHostLog.log("attach: can't read the client key: \(error.localizedDescription)")
+                return nil
+            }
+        }
         let k = Curve25519.Signing.PrivateKey()
-        FileManager.default.createFile(atPath: url.path, contents: k.rawRepresentation,
-                                       attributes: [.posixPermissions: 0o600])
+        guard FileManager.default.createFile(atPath: url.path, contents: k.rawRepresentation,
+                                             attributes: [.posixPermissions: 0o600]) else {
+            AgentHostLog.log("attach: can't save a new client key")
+            return nil
+        }
+        cached = k
         return k
     }
 
