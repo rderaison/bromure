@@ -7,6 +7,7 @@
 // models are the SERVER's (/state.localModels, POST /models/download|…).
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { probeCustomServer } from './probeServer';
 import { Button, Popover, Segmented, Spinner, cx, useMenu, type MenuItem } from '../../../ui/kit';
 import { SF } from '../../../ui/icons';
 import { useEditor } from '../ctx';
@@ -376,22 +377,17 @@ export function ModelsBoard({ ctx, settings, onChange, layer }: {
     if (!s.localServer) return;
     if (field === 'apiKey') s.localServer.apiKey = txt || null; else s.localServer.baseURL = txt;
   });
-  /** Test Connection — from THIS client (the host's launches reach the server
-   *  from the host: one on the host's loopback or LAN may not answer here). */
+  /** Test Connection — run BY the host (its network and source address are
+   *  what its launches use); this client never contacts the server itself. */
   const probeServer = async () => {
-    const base = (res.localServer?.baseURL ?? '').replace(/\/+$/, ''); if (!base) return;
+    const base = (res.localServer?.baseURL ?? '').trim(); if (!base) return;
     setProbe({ s: 'probing' });
     try {
-      const url = base + (/\/v1$/.test(base) ? '' : '/v1') + '/models';
-      const key = res.localServer?.apiKey;
-      const r = await fetch(url, { headers: key && key !== REDACTED ? { Authorization: `Bearer ${key}` } : {} });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      const ids: string[] = (j.data ?? j.models ?? []).map((m: any) => m.id ?? m.name).filter(Boolean);
+      const ids = await probeCustomServer((m, p, b, o) => ctx.host.request(m, p, b, o), base, res.localServer?.apiKey);
       setServerModels(ids); setProbe({ s: 'ok', n: ids.length });
     } catch (e: any) {
       setServerModels([]);
-      setProbe({ s: 'failed', why: `Couldn’t reach it from this client (${e?.message ?? e}). Type the model id with “Custom id…” — ${ctx.hostName} reaches the server itself.` });
+      setProbe({ s: 'failed', why: `${ctx.hostName} couldn’t reach it: ${e?.message ?? e}` });
     }
   };
   useEffect(() => { if (res.localServer?.baseURL) probeServer(); }, []); // eslint-disable-line react-hooks/exhaustive-deps

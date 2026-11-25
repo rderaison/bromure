@@ -1415,7 +1415,9 @@ struct ProfileEditorView: View {
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
             },
-            health: { provider in subscriptionHealth?(provider) })
+            health: { provider in subscriptionHealth?(provider) },
+            // Fat client: the custom server is tested by the remote.
+            probeServer: (localModelsRemoteAny as? RemoteModelBackend)?.probeServer)
     }
     #endif
 
@@ -1445,15 +1447,18 @@ struct ProfileEditorView: View {
 
     /// Ask the custom engine for its /v1/models ids (macOS only — the iOS
     /// editor keeps the free-typed field; ExternalEngine isn't in its
-    /// shared subset). On the fat client this probes from the CLIENT Mac,
-    /// so a server-loopback URL can fail here yet work at launch — the
-    /// typed-id fallback covers that.
+    /// shared subset). On the fat client the SERVER asks (the machine whose
+    /// launches reach it); the client never contacts the engine itself.
     private func probeExternalEngineModels() {
         #if os(macOS)
         guard let base = draft.localEngineBaseURL else { return }
         let key = draft.localEngineAPIKey
+        let remote = localModelsRemoteAny as? RemoteModelBackend
         Task {
-            if let models = try? await ExternalEngine.listModels(base: base, apiKey: key),
+            let probed: [String]?
+            if let remote { probed = try? await remote.probeServer(base.absoluteString, key) }
+            else { probed = try? await ExternalEngine.listModels(base: base, apiKey: key) }
+            if let models = probed,
                !models.isEmpty {
                 await MainActor.run { externalEngineModels = models }
             }
@@ -5582,6 +5587,17 @@ struct RemoteModelBackend {
     var installedRepos: () -> [String]
     var removeRepo: (_ repo: String) -> Void
     var installedSizeGB: (_ repo: String) -> Double?
+    /// "Test Connection" for a custom inference server (vLLM, Ollama, …): the
+    /// SERVER probes it — the machine whose launches use it, from its own
+    /// address — and returns the model ids or throws its error. The client
+    /// never contacts that server itself.
+    var probeServer: (_ baseURL: String, _ apiKey: String?) async throws -> [String]
+}
+
+/// A custom-server probe that failed on the remote (its reason, verbatim).
+struct RemoteProbeError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 struct LocalModelsSettingsView: View {
@@ -5703,9 +5719,13 @@ struct LocalModelsSettingsView: View {
         guard let base = normalizedEngineBase else { return }
         engineProbe = .probing
         let key = engineKey
+        let remote = remote
         Task {
             do {
-                let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+                // Fat client: the server tests it (its network, its address).
+                let models: [String]
+                if let remote { models = try await remote.probeServer(base.absoluteString, key) }
+                else { models = try await ExternalEngine.listModels(base: base, apiKey: key) }
                 await MainActor.run { engineModels = models; engineProbe = .ok(models.count) }
             } catch {
                 await MainActor.run { engineModels = []; engineProbe = .failed(error.localizedDescription) }

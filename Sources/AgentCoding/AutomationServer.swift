@@ -279,6 +279,11 @@ final class ACAutomationServer {
     /// Replace the global model settings from a redacted document (a blank or
     /// redacted key keeps the stored one). Returns `{ok}` or `{ok:false, error}`.
     var onUpdateModelSettings: ((_ doc: [String: Any]) -> [String: Any])?
+    /// "Test Connection" for a custom inference server (vLLM, Ollama, …),
+    /// run FROM THIS HOST — the machine whose launches will reach it, with its
+    /// source address and network. A blank/redacted key uses the key stored
+    /// for that same server. `{ok, models}` or `{ok:false, error}`.
+    var onProbeEngine: ((_ base: String, _ apiKey: String?) async -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -940,6 +945,26 @@ final class ACAutomationServer {
         // model ON THE SERVER (that's where the engine + downloads live). The
         // fat client's Local Models pane calls these instead of downloading
         // to the client. Result state comes back via /state's `localModels`.
+        // Fat-client "Test Connection" for a custom inference server: the
+        // probe runs here, so the client never contacts that server itself.
+        // A failed probe is still a 200 (the answer is the error).
+        case ("POST", "/models/probe-server"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let base = bodyJSON["baseURL"] as? String, !base.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'baseURL'"]); return
+            }
+            let key = bodyJSON["apiKey"] as? String
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["ok": false, "error": "unavailable"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onProbeEngine?(base, key) ?? ["ok": false, "error": "unavailable"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: 200, body: result)
+
         case ("POST", let p) where p.hasPrefix("/models/"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let action = String(p.dropFirst("/models/".count))

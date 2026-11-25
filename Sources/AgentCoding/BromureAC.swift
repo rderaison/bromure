@@ -5955,6 +5955,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
         server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
+        server.onProbeEngine = { [weak self] base, key in
+            await self?.automationProbeEngine(base: base, apiKey: key) ?? ["ok": false, "error": "unavailable"]
+        }
         server.onUpdateModelSettings = { [weak self] doc in
             self?.automationUpdateModelSettings(doc) ?? ["ok": false, "error": "unavailable"]
         }
@@ -12254,6 +12257,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return nil
         }
         return dict
+    }
+
+    /// A fat client's "Test Connection" for a custom inference server, run
+    /// from this host. The client's copy of a stored key is redacted, so a
+    /// blank or redacted key means "the key stored for this server" — looked
+    /// up only for that exact server (global settings, the template, any
+    /// workspace), so a client can't send a stored key anywhere else.
+    @MainActor
+    func automationProbeEngine(base raw: String, apiKey: String?) async -> [String: Any] {
+        guard let base = Profile.normalizedEngineBase(raw),
+              ["http", "https"].contains(base.scheme?.lowercased() ?? "") else {
+            return ["ok": false, "error": NSLocalizedString("That isn't a valid server URL.", comment: "engine probe")]
+        }
+        let key = ModelSettings.isRedactedSecret(apiKey) ? storedEngineKey(for: base) : apiKey
+        do {
+            let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+            return ["ok": true, "models": models]
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
+    /// The API key stored for the custom server at `base`, wherever it's
+    /// configured (normalized URLs compared), or nil.
+    @MainActor
+    private func storedEngineKey(for base: URL) -> String? {
+        var candidates: [(url: String?, key: String?)] = []
+        if let ls = ModelSettingsStore.shared.settings.localServer { candidates.append((ls.baseURL, ls.apiKey)) }
+        for p in profiles + [store.loadTemplate()] {
+            if let ls = p.modelOverride?.settings.localServer { candidates.append((ls.baseURL, ls.apiKey)) }
+            candidates.append((p.localEngineURL, p.localEngineAPIKey))
+        }
+        return Self.engineKey(for: base, among: candidates)
+    }
+
+    /// Pure lookup (tested): the first non-blank key whose server URL
+    /// normalizes to `base`.
+    nonisolated static func engineKey(for base: URL, among candidates: [(url: String?, key: String?)]) -> String? {
+        for c in candidates {
+            guard let k = c.key, !ModelSettings.isRedactedSecret(k),
+                  Profile.normalizedEngineBase(c.url)?.absoluteString == base.absoluteString else { continue }
+            return k
+        }
+        return nil
     }
 
     /// Replace the global model settings from a document round-tripped
