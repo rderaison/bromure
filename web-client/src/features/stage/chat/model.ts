@@ -24,6 +24,7 @@ import {
 } from '../transcript/guestCommands';
 import { builtInCommands, discoveryCommand, parseDiscovery, type SlashCommand } from './slash';
 import { toolDisplayName } from '../sessionState';
+import { writeStreamChunked } from '../../../core/remote/chunkedWrite';
 
 export interface HeldMessage {
   id: string; text: string; failure?: string; awaitingAnswer?: boolean; sending?: boolean;
@@ -379,14 +380,11 @@ export class ChatModel {
     for (let n = 0; n < files.length; n++) {
       const f = files[n];
       const path = `${DROP_DIR}/${n}_${dropSafeName(stamp + '_' + f.name)}`;
-      const data = new Uint8Array(await f.arrayBuffer());
       let ok = true;
-      const CH = 6 * 1024 * 1024;
-      for (let off = 0, first = true; first || off < data.length; off += CH, first = false) {
-        try { await this.host.guestFileOp(this.workspaceID, { op: 'write', path, data: b64(data.subarray(off, off + CH)), append: !first }, 60); }
-        catch { ok = false; break; }
-        if (data.length === 0) break;
-      }
+      try {
+        await writeStreamChunked(f.stream(), 6 * 1024 * 1024,
+          (bytes, append) => this.host.guestFileOp(this.workspaceID, { op: 'write', path, data: b64(bytes), append }, 60));
+      } catch { ok = false; }
       if (ok) {
         paths.push(path);
         if (f.type.startsWith('image/')) {

@@ -38,24 +38,24 @@ function header(name: string, size: number, type: '0' | '5', mtime: number): Uin
   return h;
 }
 
-/** A .tgz of the entries (paths relative to the archive root, "./x/y"). */
-export async function tarGz(entries: TarEntry[]): Promise<Uint8Array> {
-  const parts: Uint8Array[] = [];
+/** A .tgz of the entries (paths relative to the archive root, "./x/y"), as a
+ *  stream: each member's File is read lazily while the archive is consumed,
+ *  so neither the files nor the archive are ever held whole in memory. */
+export function tarGzStream(entries: TarEntry[]): ReadableStream<Uint8Array> {
+  const parts: BlobPart[] = [];
   for (const e of entries) {
     const rel = safeRelativePath(e.path);
     if (!rel) continue;                                // a `..` / absolute member never goes in
     const p = './' + rel;
-    if (e.dir) { parts.push(header(p.endsWith('/') ? p : p + '/', 0, '5', Date.now())); continue; }
-    const data = new Uint8Array(await e.file!.arrayBuffer());
-    parts.push(header(p, data.length, '0', e.file!.lastModified || Date.now()));
-    parts.push(data);
-    const pad = (512 - (data.length % 512)) % 512;
+    if (e.dir) { parts.push(header(p.endsWith('/') ? p : p + '/', 0, '5', Date.now()) as BlobPart); continue; }
+    const f = e.file!;
+    parts.push(header(p, f.size, '0', f.lastModified || Date.now()) as BlobPart);
+    parts.push(f);                                     // a Blob part: referenced, not copied
+    const pad = (512 - (f.size % 512)) % 512;
     if (pad) parts.push(new Uint8Array(pad));
   }
   parts.push(new Uint8Array(1024));
-  const blob = new Blob(parts as BlobPart[]);
-  const gz = blob.stream().pipeThrough(new CompressionStream('gzip'));
-  return new Uint8Array(await new Response(gz).arrayBuffer());
+  return new Blob(parts).stream().pipeThrough(new CompressionStream('gzip'));
 }
 
 /** Walk dropped items: files and whole folders (FileSystemEntry API). */

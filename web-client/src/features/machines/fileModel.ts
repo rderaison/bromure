@@ -7,7 +7,8 @@
 import type { RemoteHost } from '../../core/remote/host';
 import { saveFile } from '../../platform';
 import { RepoGitPrograms, shellQuote as q, b64ToBytes, bytesToB64, decodeUTF8, joinPath, safeRelativePath, dirname, lastPathComponent, fileBytes } from './util';
-import { tarGz, type TarEntry } from './tar';
+import { tarGzStream, type TarEntry } from './tar';
+import { writeStreamChunked } from '../../core/remote/chunkedWrite';
 
 export type GitStatus = 'modified' | 'added' | 'untracked' | 'deleted' | 'renamed' | 'conflicted';
 export const STATUS_TINT: Record<GitStatus, string> = {
@@ -344,23 +345,19 @@ export class FileExplorerModel {
     if (note) { this.loadError = note; this.emit(); }
   }
 
-  private async writeBytes(bytes: Uint8Array, guestPath: string, label: string) {
-    let sent = 0, first = true;
-    while (first || sent < bytes.length) {
-      const chunk = bytes.subarray(sent, sent + CHUNK);
-      await this.fileOp({ op: 'write', path: guestPath, data: bytesToB64(chunk), append: !first }, 60);
-      sent += chunk.length; first = false;
-      this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit();
-    }
+  /** Stream into a guest file, one CHUNK in memory at a time. */
+  private async writeStream(stream: ReadableStream<Uint8Array>, guestPath: string, label: string) {
+    await writeStreamChunked(stream, CHUNK,
+      (bytes, append) => this.fileOp({ op: 'write', path: guestPath, data: bytesToB64(bytes), append }, 60),
+      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
   }
   private async uploadFile(file: File, guestPath: string, label: string) {
-    await this.writeBytes(new Uint8Array(await file.arrayBuffer()), guestPath, label);
+    await this.writeStream(file.stream(), guestPath, label);
   }
   private async uploadFolder(name: string, entries: TarEntry[], guestDir: string): Promise<string | null> {
     this.transferText = `Packing ${name}…`; this.emit();
-    const archive = await tarGz(entries);
     const guestArchive = `/tmp/bromure-drop-${crypto.randomUUID().toUpperCase()}.tgz`;
-    await this.writeBytes(archive, guestArchive, name);
+    await this.writeStream(tarGzStream(entries), guestArchive, name);
     this.transferText = `Unpacking ${name}…`; this.emit();
     try {
       const r = await this.fileOp({ op: 'untar', path: guestDir, archive: guestArchive }, 600);
