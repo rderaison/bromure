@@ -5,7 +5,8 @@
 // Everything runs in containers (kube-builder-a is Docker-in-Docker, so no
 // bind mounts: inputs go in via `docker build`, results out via `docker cp`,
 // as in Jenkinsfile.sentry):
-//   1. Build (web-client/ci/linux/Dockerfile, node:22): socket.dev-wrapped
+//   1. Build (web-client/ci/linux/Dockerfile, BuildKit): the network tunnel's
+//      Go program (vet, tests, both arches), then in node:22 socket.dev-wrapped
 //      npm ci, typecheck, unit tests, vite + esbuild builds, then
 //      scripts/package.mjs for every arch in ARCHES — both from one container
 //      on either host arch (packaging only swaps Electron's prebuilt binary).
@@ -88,8 +89,11 @@ pipeline {
                         bxarch=$([ "$arch" = aarch64 ] && echo arm64 || echo amd64)
                         curl -fsSL -o .docker-cli/config/cli-plugins/docker-buildx \
                             "https://github.com/docker/buildx/releases/download/$bx/buildx-$bx.linux-$bxarch" \
-                            && chmod +x .docker-cli/config/cli-plugins/docker-buildx || echo "buildx not installed; legacy builder"
+                            && chmod +x .docker-cli/config/cli-plugins/docker-buildx || bx=""
                     fi
+                    # BuildKit is required: ci/linux/Dockerfile's Go stage is
+                    # FROM --platform=$BUILDPLATFORM (the legacy builder can't).
+                    [ -n "$bx" ] || { echo "couldn't install docker buildx"; exit 1; }
                     PATH="$PWD/.docker-cli:$PATH" DOCKER_CONFIG="$PWD/.docker-cli/config" docker version --format 'client {{.Client.Version}} (API {{.Client.APIVersion}}) · daemon {{.Server.Version}} (API {{.Server.APIVersion}})'
                 '''
             }
@@ -103,7 +107,7 @@ pipeline {
                     c="bcl-build-$BUILD_NUMBER"
                     img="bromure-client-linux-builder:$BUILD_NUMBER"
                     docker rm -f "$c" 2>/dev/null || true
-                    docker build --pull -t "$img" -f web-client/ci/linux/Dockerfile web-client
+                    docker buildx build --load --pull -t "$img" -f web-client/ci/linux/Dockerfile web-client
                     docker run --name "$c" -e ARCHES="${ARCHES:-x64,arm64}" "$img"
                     rm -rf client-linux && mkdir -p client-linux
                     docker cp "$c:/home/node/artifacts/." client-linux/

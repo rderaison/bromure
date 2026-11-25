@@ -105,6 +105,13 @@ docker buildx build --load -t bwc -f ci/web/Dockerfile . && docker run --rm -p 8
   README-linux.txt. On first launch the app writes its own .desktop entry + icon
   into `~/.local/share` and becomes the `bromure-client://` handler
   (`registerLinuxDesktopEntry` in electron/main.ts); a .deb install owns it instead.
+- **Network tunnel** (Linux): `tunnel/` is a Go program (stdlib only, static,
+  cross-built for both arches by `package-linux.mjs` — Go on PATH — or by the
+  CI image's Go stage). The .deb puts it in `resources/bromure-client-tunnel`
+  with `bromure-client-tunnel.socket` / `@.service` (the root helper, one
+  instance per tunnel) and Depends on iproute2. `cd tunnel && go test ./...`
+  for its unit tests; how it works and its security model are in
+  `tunnel/daemon_linux.go` and `tunnel/forwarder.go`.
 - The desktop id `io.bromure.client` (package.json `desktopName`) is also the
   Wayland app_id / X11 WM_CLASS, so the window matches its launcher icon.
   Electron runs natively on Wayland in a Wayland session, X11 otherwise.
@@ -128,7 +135,7 @@ sudo apt update && sudo apt install bromure-client
 ```
 Locally, the same as Jenkins:
 ```bash
-docker build -t bcl-builder -f ci/linux/Dockerfile . && docker run --name bcl bcl-builder
+docker buildx build --load -t bcl-builder -f ci/linux/Dockerfile . && docker run --name bcl bcl-builder
 docker cp bcl:/home/node/artifacts ./ci-out && docker rm bcl
 sh ci/linux/smoke-host.sh ./ci-out ./ci-out/smoke      # the .deb for this machine's arch
 ```

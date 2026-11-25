@@ -37,6 +37,14 @@ for arch in $(echo "$ARCHES" | tr ',' ' '); do
     # The right Electron for the arch (ELF machine field at offset 18).
     m=$(od -An -tx2 -j18 -N2 "$x/opt/bromure-client/bromure-client" | tr -d ' ')
     case "$elf:$m" in X86-64:003e|AArch64:00b7) ;; *) fail "$deb: binary machine $m, expected $elf" ;; esac
+    # The network tunnel: its program (same arch, static) and its helper's units.
+    t="$x/opt/bromure-client/resources/bromure-client-tunnel"
+    [ -x "$t" ] || fail "$deb: no tunnel program"
+    m=$(od -An -tx2 -j18 -N2 "$t" | tr -d ' ')
+    case "$elf:$m" in X86-64:003e|AArch64:00b7) ;; *) fail "$deb: tunnel program machine $m, expected $elf" ;; esac
+    grep -q '^ListenStream=/run/bromure-client-tunnel.sock$' "$x/usr/lib/systemd/system/bromure-client-tunnel.socket" || fail "$deb: tunnel socket unit"
+    grep -qx 'ExecStart=/opt/bromure-client/resources/bromure-client-tunnel helper' "$x/usr/lib/systemd/system/bromure-client-tunnel@.service" || fail "$deb: tunnel service unit"
+    dpkg-deb --field "$deb" Depends | grep -q 'iproute2' || fail "$deb: Depends lacks iproute2"
     rm -rf "$x"
     echo "=== checking $tgz"
     top=$(tar -tzf "$tgz" | head -1)
