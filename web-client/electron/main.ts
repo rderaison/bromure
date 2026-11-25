@@ -8,6 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -30,12 +31,20 @@ const DEV_ORIGINS = (process.env.BROMURE_DEV_URL || SHOT)
 let mainWindow: BrowserWindow | null = null;
 let pendingDeepLink: string | null = null;
 
-if (!SHOT && !app.requestSingleInstanceLock()) app.quit();
+// A second launch hands its argv (a deep link, on Windows/Linux) to the first
+// and goes away without opening anything — app.quit() alone is asynchronous,
+// so everything below that shows UI or touches the registry checks PRIMARY.
+const PRIMARY = !!SHOT || app.requestSingleInstanceLock();
+if (!PRIMARY) app.quit();
+// Windows: the taskbar button, jump list and notifications are keyed on this id
+// (it must match the shortcut an installer creates, or a pinned app gets a
+// second taskbar button). Same value as the packager's appBundleId.
+if (process.platform === 'win32') app.setAppUserModelId('io.bromure.client');
 
 // Its own URL scheme: `bromure://` belongs to the macOS app / Bromure and must
 // never be taken over on a machine that has them.
 const SCHEME = 'bromure-client';
-if (!SHOT) {
+if (!SHOT && PRIMARY) {
   // A dev run (`electron .`) registers the Electron binary WITH the app path.
   if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [path.resolve(process.argv[1])]);
   else app.setAsDefaultProtocolClient(SCHEME);
@@ -183,10 +192,17 @@ function handleDeepLink(url: string) {
   if (mainWindow) { mainWindow.webContents.send('deeplink', url); if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
   else pendingDeepLink = url;
 }
-app.on('second-instance', (_e, argv) => { const u = argv.find(a => a.startsWith(SCHEME + '://')); if (u) handleDeepLink(u); });
+// Launching the app again (Start menu, or a deep link — which Windows and Linux
+// pass as argv to a new process) brings the running window forward.
+app.on('second-instance', (_e, argv) => {
+  const u = argv.find(a => a.startsWith(SCHEME + '://'));
+  if (u) handleDeepLink(u);
+  else if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }
+});
 app.on('open-url', (e, url) => { e.preventDefault(); handleDeepLink(url); });
 
 app.whenReady().then(() => {
+  if (!PRIMARY) return;
   // Serve the bundle from app:// (a real origin: IndexedDB/WebCrypto persist,
   // CSP applies) instead of file://.
   protocol.handle('app', req => {
@@ -194,7 +210,9 @@ app.whenReady().then(() => {
     let p = path.normalize(decodeURIComponent(u.pathname)).replace(/^([/\\])+/, '');
     const file = path.resolve(DIST, p || 'index.html');
     if (file !== DIST && !file.startsWith(DIST + path.sep)) return new Response('forbidden', { status: 403 });
-    return enet.fetch('file://' + (fs.existsSync(file) ? file : path.join(DIST, 'index.html')));
+    // pathToFileURL: a Windows path (drive letter, backslashes), or any path
+    // with '#', '%' or '?' in it, is not a URL by concatenation.
+    return enet.fetch(pathToFileURL(fs.existsSync(file) ? file : path.join(DIST, 'index.html')).href);
   });
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({ responseHeaders: { ...details.responseHeaders,
