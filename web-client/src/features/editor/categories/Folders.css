@@ -1,0 +1,138 @@
+/* Machine panes + Appearance (FoldersKit.tsx). Measured from
+ * .reference/editor-{folders,environment,mcp,browser,resources,appearance}.png. */
+
+/* ── checkbox (macOS 26: grey rounded square; accent when on, key window) ── */
+.edm-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; line-height: 16px; position: relative; }
+.edm-check input { position: absolute; opacity: 0; width: 16px; height: 16px; margin: 0; left: 0; }
+.edm-check-box {
+  width: 16px; height: 16px; border-radius: 4.5px; flex-shrink: 0; display: grid; place-items: center;
+  background: #E6E6E6;
+}
+.edm-check-box svg { fill: none; stroke: transparent; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+.edm-check input:checked + .edm-check-box { background: var(--accent); }
+.edm-check input:checked + .edm-check-box svg { stroke: #fff; }
+.win:not(.key) .edm-check input:checked + .edm-check-box, .ed-shot.inactive .edm-check input:checked + .edm-check-box { background: #E6E6E6; }
+.win:not(.key) .edm-check input:checked + .edm-check-box svg, .ed-shot.inactive .edm-check input:checked + .edm-check-box svg { stroke: rgba(0,0,0,.85); }
+:root[data-theme="dark"] .edm-check-box { background: rgba(255,255,255,.12); }
+:root[data-theme="dark"] .win:not(.key) .edm-check input:checked + .edm-check-box svg,
+:root[data-theme="dark"] .ed-shot.inactive .edm-check input:checked + .edm-check-box svg { stroke: rgba(255,255,255,.85); }
+.edm-check input:focus-visible + .edm-check-box { outline: 3px solid color-mix(in srgb, var(--accent) 50%, transparent); }
+.edm-check.disabled { opacity: 0.45; }
+.edm-check-label { display: inline-flex; align-items: center; }
+.edm-symlabel { display: inline-flex; align-items: center; gap: 8px; }
+.edm-symlabel > span { font-size: 11.5px; font-weight: 600; letter-spacing: 0.1px; }
+.edm-symlabel svg { width: 14px; }
+
+/* ── row cards, borderless buttons ─────────────────────────────────────── */
+.edm-card { padding: 8px; border-radius: 6px; background: var(--text-bg); }
+:root[data-theme="dark"] .edm-card { background: rgba(255,255,255,.05); }
+.edm-borderless {
+  border: none; background: transparent; padding: 0; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--label-secondary); line-height: 16px;
+}
+.edm-borderless:hover:not(:disabled) { color: var(--label); }
+.edm-borderless:disabled { color: var(--label-tertiary); }
+.edm-remove { color: var(--label-secondary); }
+.edm-trailing { display: flex; justify-content: flex-end; align-self: stretch; }
+
+/* ── stepper ────────────────────────────────────────────────────────────── */
+.edm-stepper {
+  display: inline-flex; flex-direction: column; width: 20px; height: 24px; border-radius: 6px; flex-shrink: 0;
+  background: var(--fill-secondary); overflow: hidden;
+}
+.edm-stepper button { flex: 1; border: none; background: transparent; padding: 0; display: grid; place-items: center; color: var(--label); }
+.edm-stepper button:disabled { color: var(--label-tertiary); }
+.edm-stepper button:active:not(:disabled) { background: var(--fill); }
+.edm-stepper svg { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; width: 11px; }
+.edm-stepper.disabled { opacity: .5; }
+
+/* ── slider ─────────────────────────────────────────────────────────────── */
+.edm-slider { -webkit-appearance: none; appearance: none; height: 16px; background: transparent; margin: 0; flex: 1; min-width: 0; }
+.edm-slider::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 3px;
+  background: linear-gradient(to right, var(--accent) var(--pct), var(--fill) var(--pct));
+}
+.win:not(.key) .edm-slider::-webkit-slider-runnable-track, .ed-shot.inactive .edm-slider::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, #C8C8C8 var(--pct), #EBEBEB var(--pct));
+}
+.edm-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; margin-top: -7.5px; background: #fff;
+  box-shadow: 0 0.5px 2px rgba(0,0,0,.25), 0 0 0 0.5px rgba(0,0,0,.08);
+}
+
+/* ── radio group ───────────────────────────────────────────────────────── */
+.edm-radios { display: flex; flex-direction: column; gap: 6px; }
+.edm-radio { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; line-height: 16px; position: relative; }
+.edm-radio input { position: absolute; opacity: 0; margin: 0; width: 16px; height: 16px; }
+.edm-radio-dot { width: 16px; height: 16px; border-radius: 50%; background: #E6E6E6; display: grid; place-items: center; flex-shrink: 0; }
+:root[data-theme="dark"] .edm-radio-dot { background: rgba(255,255,255,.12); }
+.edm-radio input:checked + .edm-radio-dot { background: var(--accent); }
+.edm-radio input:checked + .edm-radio-dot::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #fff; }
+.win:not(.key) .edm-radio input:checked + .edm-radio-dot, .ed-shot.inactive .edm-radio input:checked + .edm-radio-dot { background: #E6E6E6; }
+.win:not(.key) .edm-radio input:checked + .edm-radio-dot::after, .ed-shot.inactive .edm-radio input:checked + .edm-radio-dot::after { background: rgba(0,0,0,.85); }
+
+/* ── color well ─────────────────────────────────────────────────────────── */
+.edm-colorrow { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; }
+.edm-colorwell { position: relative; width: 46px; height: 23px; border-radius: 999px; background: var(--fill-secondary); padding: 3px; display: block; }
+.edm-colorwell-fill { display: block; width: 100%; height: 100%; border-radius: 999px; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.15); }
+.edm-colorwell input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; padding: 0; border: none; cursor: default; }
+
+/* ── bordered pop-up ───────────────────────────────────────────────────── */
+.edm-popup {
+  position: relative; display: inline-flex; align-items: center; gap: 10px; height: 24px; padding: 0 9px 0 12px;
+  border-radius: 7px; background: var(--fill-secondary); font-size: 13px; color: var(--label); max-width: 100%;
+}
+.edm-popup-label { display: grid; overflow: hidden; white-space: nowrap; }
+.edm-popup-label > span { grid-area: 1 / 1; overflow: hidden; text-overflow: ellipsis; }
+.edm-popup-sizer { visibility: hidden; height: 0; }
+.edm-popup-chev { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; margin-left: auto; }
+.edm-popup select { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; font-size: 13px; }
+
+/* ── text prompt (alert) ───────────────────────────────────────────────── */
+.edm-prompt { padding: 20px 16px 16px; display: flex; flex-direction: column; align-items: stretch; text-align: center; gap: 8px; }
+.edm-prompt-title { font-size: 13px; font-weight: 700; }
+.edm-prompt-msg { font-size: 11px; line-height: 14px; }
+.edm-prompt .field { width: 100%; margin-top: 4px; }
+.edm-prompt-buttons { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.edm-prompt-buttons .btn { width: 100%; }
+
+/* ── panes ──────────────────────────────────────────────────────────────── */
+.edm-pane { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+.edm-empty { text-align: center; color: var(--label-secondary); font-size: 13px; padding: 16px 0; }
+.edm-empty-small { text-align: center; color: var(--label-tertiary); font-size: 10px; line-height: 13px; padding: 12px 0; }
+.edm-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.edm-folder-name { font-size: 12px; line-height: 15px; }
+.edm-folder-path { font-size: 10px; line-height: 13px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.edm-mono12 { font-family: var(--font-mono); font-size: 12px; }
+.edm-caption2 { font-size: 10px; line-height: 13px; }
+.edm-section-caps { font-size: 10px; font-weight: 600; color: var(--label-secondary); letter-spacing: 0.3px; }
+.edm-texteditor {
+  width: 100%; min-height: 120px; max-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 12px; line-height: 15px;
+  padding: 6px 11px; border-radius: 8px; border: 1px solid var(--fill); background: var(--text-bg); color: var(--label); outline: none;
+}
+.edm-json { width: 100%; min-height: 80px; max-height: 160px; resize: vertical; font-family: var(--font-mono); font-size: 11px; line-height: 14px;
+  padding: 4px; border-radius: 4px; border: 1px solid transparent; background: var(--control-bg); color: var(--label); outline: none; }
+.edm-json.invalid { border-color: color-mix(in srgb, var(--red) 50%, transparent); }
+
+/* storage stack */
+.edm-stack { border-radius: 10px; overflow: hidden; background: #FAFAFA; box-shadow: inset 0 0 0 1px rgba(142,142,147,.18); }
+:root[data-theme="dark"] .edm-stack { background: rgba(255,255,255,.04); }
+.edm-layer { display: flex; align-items: stretch; }
+.edm-layer + .edm-layer { border-top: 1px solid var(--ed-sep); }
+.edm-layer-edge { width: 4px; flex-shrink: 0; }
+.edm-layer-body { flex: 1; min-width: 0; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+.edm-layer-head { display: flex; align-items: baseline; gap: 8px; }
+.edm-layer-head .edm-layer-sym { width: 18px; display: inline-grid; place-items: center; align-self: center; }
+.edm-layer-title { font-size: 13px; font-weight: 600; }
+.edm-layer-size { margin-left: auto; font-size: 12px; color: var(--label-secondary); font-variant-numeric: tabular-nums; }
+.edm-layer-meta { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.edm-layer-meta .ed-caption { color: var(--label-tertiary); }
+.edm-layer-meta .btn { margin-left: auto; }
+.edm-layer-meta .btn + .btn { margin-left: 0; }
+
+/* appearance */
+.edm-app-row { display: flex; align-items: center; gap: 12px; }
+.edm-app-row:first-child { min-height: 26px; }
+.edm-app-label { width: 110px; text-align: right; flex-shrink: 0; font-size: 13px; }
+.edm-app-slot { width: 240px; display: flex; justify-content: center; flex-shrink: 0; }
+.edm-numfield { width: 72px; text-align: right; height: 24px; }

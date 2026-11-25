@@ -1,0 +1,50 @@
+/* The session stage: SessionHeaderView over the chat. */
+
+.stage-session { display: flex; flex-direction: column; height: 100%; min-width: 0; background: var(--ac-canvas); }
+.stage-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.sh { flex-shrink: 0; background: var(--ac-canvas); border-bottom: 1px solid color-mix(in srgb, var(--ac-hairline) 60%, transparent); }
+.sh-row { display: flex; align-items: center; gap: 12px; padding: 12px 20px; min-width: 0; }
+.sh-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sh-title { font-size: 16px; font-weight: 600; line-height: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--label); }
+.sh-title-edit { font: inherit; font-size: 16px; font-weight: 600; line-height: 19px; border: none; background: transparent; color: var(--label); padding: 0; margin: 0; }
+.sh-meta-box { min-width: 0; overflow: hidden; }
+.sh-meta { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; line-height: 15px; color: var(--label-secondary); white-space: nowrap; }
+.sh-item { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.sh-click { cursor: default; }
+.sh-dot { color: var(--label-tertiary); }
+.sh-nick { font-size: 12px; font-weight: 500; color: var(--accent); }
+.sh-status { font-weight: 500; }
+.sh-bdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.sh-square { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+.sh-mono { font-size: 11.5px; }
+.sh-resume {
+  display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; border: none;
+  font-size: 12.5px; font-weight: 600; color: #fff; padding: 6px 12px; border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent));
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.sh-resume:active { filter: brightness(0.92); }
+.sh-more { width: 26px; height: 26px; border: none; background: transparent; color: var(--label); display: grid; place-items: center; flex-shrink: 0; border-radius: 6px; }
+.sh-more:hover { background: var(--fill-tertiary); }
+.sh-merge { display: inline-flex; align-items: center; height: 24px; border-radius: 6px; background: var(--fill-secondary); flex-shrink: 0; }
+.sh-merge button { border: none; background: transparent; color: var(--label); height: 24px; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.sh-merge-main { padding: 0 10px 0 9px; }
+.sh-merge-chev { padding: 0 7px; }
+.sh-merge-sep { width: 1px; height: 14px; background: var(--separator); }
+.sh-merge-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 5px 10px; border-radius: 999px; background: var(--fill-tertiary); }
+.sh-banner { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: color-mix(in srgb, var(--orange) 7%, transparent); border-top: 1px solid color-mix(in srgb, var(--ac-hairline) 60%, transparent); }
+.sh-banner-icon { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--orange) 16%, transparent); flex-shrink: 0; }
+.sh-banner-text { flex: 1; min-width: 0; }
+.sh-banner-title { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sh-banner-sub { font-size: 11.5px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Sheets ─────────────────────────────────────────────────────────── */
+.stage-sheet { display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+.stage-sheet-title { font-size: 15px; font-weight: 600; }
+.stage-sheet-sub { font-size: 12px; color: var(--label-secondary); margin-top: 4px; line-height: 1.35; }
+.stage-sheet-label { font-size: 12px; font-weight: 500; color: var(--label-secondary); }
+.stage-sheet-area { height: auto; min-height: 60px; padding: 6px; resize: vertical; font: inherit; }
+.stage-sheet-badge { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 12%, transparent); flex-shrink: 0; }
+.stage-sheet-note { font-size: 11.5px; color: var(--label-secondary); }

@@ -1,0 +1,174 @@
+/* Security window (SecurityTimelineView.swift) — measured from
+ * .reference/security-overview.png and manual/images/security-timeline.en.jpg
+ * (2x renders). */
+
+.sec-window {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  background: var(--window-bg-sec, #FFFFFF); color: var(--label);
+}
+:root[data-theme="dark"] .sec-window { --window-bg-sec: #1E1E1E; }
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+.sec-toolbar {
+  position: relative; flex-shrink: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px;
+  border-bottom: 1px solid var(--separator);
+}
+.sec-tb-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sec-tb-measure { position: absolute; visibility: hidden; pointer-events: none; left: 0; top: 0; width: max-content; }
+.sec-tabs .segmented { padding: 2px; background: var(--fill-tertiary); }
+.sec-tabs .segmented button { height: 20px; padding: 0 10px; font-size: 13px; }
+.sec-tabs .segmented button.on,
+:root[data-theme="dark"] .sec-tabs .segmented button.on { background: var(--fill); box-shadow: none; }
+.sec-count { font-size: 11px; color: var(--label-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sec-tb-btn.btn.small { height: 21px; padding: 0 10px; font-size: 12px; gap: 6px; border-radius: 6px; background: var(--fill-tertiary); }
+.sec-ocsf { gap: 5px !important; padding-right: 7px !important; }
+.sec-ocsf svg:last-child { margin-left: 10px; }
+
+.sec-filters { display: flex; align-items: center; gap: 10px; }
+.sec-search {
+  display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border-radius: 6px;
+  background: var(--text-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 14%, transparent);
+  color: var(--label-secondary);
+}
+.sec-search input {
+  width: 200px; border: none; outline: none; background: transparent; font: inherit; font-size: 13px; color: var(--label); padding: 0;
+}
+.sec-search input::placeholder { color: var(--label-secondary); }
+.sec-pop.popup.bordered { height: 24px; border-radius: 6px; padding: 0 6px 0 12px; gap: 14px; background: var(--fill-tertiary); }
+
+/* ── Overview ─────────────────────────────────────────────────────────── */
+.sec-overview { flex: 1; min-height: 0; overflow: auto; }
+.sec-ov-inner { max-width: 900px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 22px; }
+.sec-ov-head { display: flex; flex-direction: column; gap: 4px; }
+.sec-ov-title { font-size: 20px; font-weight: 600; line-height: 24px; }
+.sec-ov-sub { font-size: 13px; color: var(--label-secondary); }
+
+.sec-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.sec-tile {
+  all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 14px;
+  border-radius: 14px; background: var(--control-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 7%, transparent), 0 2px 6px rgba(0,0,0,.04);
+  cursor: default;
+}
+.sec-tile:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 50%, transparent); }
+.sec-tile-top { display: flex; align-items: center; }
+.sec-tile-icon { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
+.sec-tile-n {
+  font-family: var(--font-rounded); font-size: 30px; font-weight: 600; line-height: 34px;
+  font-variant-numeric: tabular-nums; color: var(--label);
+}
+.sec-tile-title { font-size: 12px; font-weight: 500; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.sec-section { display: flex; flex-direction: column; gap: 10px; }
+.sec-section-head { display: flex; flex-direction: column; gap: 2px; }
+.sec-section-title { font-size: 15px; font-weight: 600; }
+.sec-section-sub { font-size: 10px; color: var(--label-secondary); }
+
+.sec-card {
+  border-radius: 14px; background: var(--control-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 7%, transparent);
+}
+.sec-posture-row { display: flex; align-items: center; padding: 9px 14px; font-size: 12.5px; min-height: 39px; }
+.sec-posture-row + .sec-posture-row { border-top: 1px solid color-mix(in srgb, var(--separator) 50%, transparent); }
+.sec-posture-header { font-size: 11px; font-weight: 600; color: var(--label-secondary); min-height: 46px; }
+.sec-posture-name { flex: 1; min-width: 0; }
+.sec-posture-col { width: 84px; flex-shrink: 0; text-align: center; line-height: 14px; }
+.sec-ws-link { all: unset; display: flex; align-items: center; gap: 8px; cursor: default; flex: 1; min-width: 0; }
+.sec-ws-swatch { width: 10px; height: 10px; border-radius: 2.5px; flex-shrink: 0; }
+.sec-ws-arrow { visibility: hidden; color: var(--label-tertiary); display: grid; }
+.sec-ws-link:hover .sec-ws-label { text-decoration: underline; }
+.sec-ws-link:hover .sec-ws-arrow { visibility: visible; }
+.sec-cell { all: unset; box-sizing: border-box; width: 84px; min-height: 20px; display: grid; place-items: center; cursor: default; }
+.sec-cell > * { grid-area: 1 / 1; }
+.sec-turn-on {
+  display: none; font-size: 11px; font-weight: 600; color: #fff; background: var(--accent);
+  padding: 3px 8px; border-radius: 999px; white-space: nowrap; line-height: 13px;
+}
+.sec-cell.off:hover .sec-turn-on { display: inline-block; }
+.sec-cell.off:hover .sec-minus { visibility: hidden; }
+
+.sec-blocks { display: flex; flex-direction: column; gap: 6px; }
+.sec-block {
+  all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px;
+  border-radius: 10px; background: color-mix(in srgb, var(--red) 9%, transparent); cursor: default; min-width: 0;
+}
+.sec-block:hover { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.sec-block-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sec-block-cond { font-size: 13px; color: var(--label); }
+.sec-block-sub { font-size: 10px; color: var(--label-secondary); }
+.sec-block-count {
+  font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--red);
+  padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+.sec-block-time { font-size: 10px; color: var(--label-tertiary); white-space: nowrap; }
+.sec-block-search { color: var(--label-tertiary); opacity: 0; display: grid; }
+.sec-block:hover .sec-block-search { opacity: 1; }
+
+/* ── Timeline table (SwiftUI Table) ───────────────────────────────────── */
+.sec-table-scroll { flex: 1; min-height: 0; overflow: auto; outline: none; }
+.sec-table { display: flex; flex-direction: column; min-height: 100%; }
+.sec-thead {
+  position: sticky; top: 0; z-index: 2; display: flex; height: 28px; flex-shrink: 0;
+  background: var(--window-bg-sec, #fff); border-bottom: 1px solid var(--separator);
+}
+.sec-th {
+  position: relative; display: flex; align-items: center; padding: 0 9px; font-size: 13px; color: var(--label);
+  flex-shrink: 0; min-width: 0;
+}
+.sec-th:first-child { padding-left: 18px; }
+.sec-th + .sec-th::before {
+  content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 1px; background: var(--separator);
+}
+.sec-th-resize { position: absolute; right: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
+.sec-tbody { padding: 6px 0; }
+.sec-tr { display: flex; height: 24.4px; align-items: center; margin: 0 0; }
+.sec-tr:nth-child(even) { background: var(--fill-quaternary); }
+:root:not([data-theme="dark"]) .sec-tr:nth-child(even) { background: #F4F4F4; }
+.sec-tr.selected { background: var(--accent) !important; color: #fff; }
+.sec-tr.selected .sec-secondary, .sec-tr.selected .sec-time, .sec-tr.selected .sec-repeat, .sec-tr.selected .sec-row-action { color: rgba(255,255,255,.85); }
+.sec-td {
+  display: flex; align-items: center; gap: 6px; padding: 0 9px; font-size: 13px; min-width: 0; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden;
+}
+.sec-td:first-child { padding-left: 17px; }
+.sec-time { color: var(--label-secondary); font-variant-numeric: tabular-nums; }
+.sec-secondary { color: var(--label-secondary); }
+.sec-engine-icon { margin-right: 3px; }
+.sec-cond { justify-content: space-between; }
+.sec-mid { display: inline-block; white-space: nowrap; }
+.sec-chain { flex-shrink: 0; }
+.sec-decision { gap: 5px; }
+.sec-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.sec-repeat {
+  font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--label-secondary);
+  padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--label-secondary) 15%, transparent); flex-shrink: 0;
+}
+.sec-row-action { font-size: 10px; color: var(--label-tertiary); }
+
+.sec-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  padding: 24px; text-align: center;
+}
+.sec-empty-title { font-size: 17px; font-weight: 700; color: var(--label); margin-top: 6px; }
+.sec-empty-desc { font-size: 13px; color: var(--label-secondary); max-width: 440px; line-height: 1.35; }
+
+/* ── Alert sheets (NSAlert beginSheetModal) ───────────────────────────── */
+.sec-alert-backdrop { z-index: 7000; background: rgba(0,0,0,0.08); }
+.sec-alert {
+  width: 420px; padding: 20px 20px 16px; display: flex !important; flex-direction: column; gap: 10px;
+  border-radius: 18px; margin-top: 52px;
+}
+.sec-alert-icon { position: relative; width: 64px; height: 64px; display: grid; place-items: center; align-self: flex-start;
+  border-radius: 14px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.sec-alert-badge { position: absolute; right: -4px; bottom: -4px; display: grid; }
+.sec-alert-text { display: flex; flex-direction: column; gap: 6px; }
+.sec-alert-title { font-size: 13px; font-weight: 700; line-height: 16px; }
+.sec-alert-message { font-size: 11px; line-height: 14px; color: var(--label); white-space: pre-wrap; }
+.sec-alert-buttons { display: flex; flex-direction: row-reverse; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.sec-alert-buttons .btn { min-width: 76px; }
+.sec-alert-buttons.stacked { flex-direction: column; }
+.sec-alert-buttons.stacked .btn { width: 100%; }
+.sec-glyph { width: 13px; height: 13px; border-radius: 50%; display: inline-grid; place-items: center; flex-shrink: 0; }
+.sec-seal { width: 15px; height: 15px; }
+.sec-tabs .segmented button { padding: 0 11px; }
+.sec-td > .truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

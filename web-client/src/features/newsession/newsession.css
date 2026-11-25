@@ -1,0 +1,170 @@
+/* New session screen — SessionStageViews.swift NewSessionView metrics. */
+
+.ns-host { position: absolute; inset: 0; z-index: 20; background: var(--ac-canvas); }
+.ns { position: absolute; inset: 0; overflow-y: auto; container-type: size; background: var(--ac-canvas); }
+.ns-loading { height: 100%; display: grid; place-items: center; }
+.ns-column {
+  min-height: 100%; max-width: calc(720px + 64px); margin: 0 auto; padding: 0 32px;
+  display: flex; flex-direction: column; align-items: center; gap: 22px;
+}
+.ns-top-spacer { flex: 1 1 0; min-height: max(24px, 24cqh); }
+.ns-bottom-spacer { flex: 1 1 0; min-height: 48px; }
+.ns-greeting {
+  font-size: 30px; font-weight: 600; letter-spacing: -0.3px; line-height: 36px; text-align: center;
+  padding-bottom: 2px; color: var(--label);
+}
+
+/* composer */
+.ns-composer {
+  position: relative; width: 100%;
+  display: flex; flex-direction: column; gap: 12px; padding: 14px;
+  background: var(--text-bg); border-radius: 16px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.04), inset 0 0 0 1px var(--ac-hairline);
+  transition: box-shadow 0.12s ease-out;
+}
+.ns-composer.focused { box-shadow: 0 3px 10px rgba(0, 0, 0, 0.04), inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent); }
+.ns-composer.drop { box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--text-bg)); }
+.ns-drop-hint {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: 13px; font-weight: 500; color: var(--accent); pointer-events: none;
+}
+.ns-message {
+  margin: 4px 4px 0; padding: 0; border: 0; outline: none; resize: none; background: transparent;
+  font: inherit; font-size: 15px; line-height: 23px; color: var(--label); min-height: 66px;
+}
+.ns-message::placeholder { color: var(--placeholder); }
+:root:not([data-theme="dark"]) .ns-message::placeholder { color: rgba(0, 0, 0, 0.42); }
+.ns-chips { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ns-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; flex-shrink: 0;
+  border: 0; border-radius: 14px; background: color-mix(in srgb, var(--label) 7%, transparent);
+  font-size: 12.5px; font-weight: 500; color: var(--label); cursor: default; min-width: 0;
+}
+.ns-chip:hover { background: color-mix(in srgb, var(--label) 11.5%, transparent); }
+.ns-chip.shrink { flex-shrink: 1; }
+/* Where: Text.frame(maxWidth: 220) — grows to 220 and centers, gives way first */
+.ns-chip-text.middle { width: 220px; flex-shrink: 1; text-align: center; }
+.ns-chip-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ns-chip-text.nowrap { overflow: visible; }
+.ns-chip-chev { color: var(--label-tertiary); }
+.ns-square { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.ns-run-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.ns-run-dot.big { width: 6px; height: 6px; }
+.ns-hint-slot { flex: 1 1 0; min-width: 22px; display: flex; justify-content: flex-end; overflow: hidden; }
+.ns-hint { font-size: 10.5px; color: var(--label-quaternary); white-space: pre; overflow: hidden; min-width: 0; }
+:root[data-theme="dark"] .ns-hint { color: rgba(255, 255, 255, 0.25); }
+.ns-start {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 13px; flex-shrink: 0;
+  border: 0; border-radius: 14px; color: #fff; font-size: 12.5px; font-weight: 600;
+  background: color-mix(in srgb, var(--label-secondary) 56%, transparent);
+}
+.ns-start.on { background: var(--accent); }
+.ns-start .progress-spin { border-color: rgba(255,255,255,.4); border-top-color: #fff; }
+
+.ns-attachments { display: flex; gap: 8px; overflow-x: auto; padding: 6px 4px 2px; }
+.ns-attachment { position: relative; width: 84px; height: 64px; flex-shrink: 0; border-radius: 8px; overflow: hidden;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 15%, transparent); }
+.ns-attachment img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ns-attachment-ph { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  background: color-mix(in srgb, var(--label) 6%, transparent); color: var(--label-secondary); font-size: 9.5px; }
+.ns-attachment-ph span { max-width: 76px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-attachment-x { position: absolute; top: 3px; right: 3px; border: 0; background: rgba(0,0,0,.55); color: #fff; border-radius: 50%;
+  width: 16px; height: 16px; display: grid; place-items: center; padding: 0; }
+
+.ns-needs-model { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--label-secondary); align-self: stretch; }
+
+/* "pick up where you were" */
+.ns-recent-starts { display: flex; gap: 8px; justify-content: center; max-width: 100%; }
+.ns-recent-start {
+  display: flex; align-items: center; gap: 7px; padding: 6px 10px; width: 190px; min-width: 0; flex: 0 1 190px;
+  border: 0; border-radius: 11px; text-align: left; color: var(--label);
+  background: color-mix(in srgb, var(--label) 5.3%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 7%, transparent);
+}
+.ns-recent-start.on { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
+.ns-recent-start-text { display: flex; flex-direction: column; min-width: 0; }
+.ns-recent-start-name { font-size: 11.5px; font-weight: 600; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-recent-start-folder { font-family: var(--font-mono); font-size: 10.5px; line-height: 13px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ns-recent { display: flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; }
+.ns-recent-label { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--label-tertiary); padding-right: 2px; }
+.ns-recent-folder {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 24px; padding: 0 8px; width: 200px; flex: 0 1 200px; min-width: 0;
+  border: 0; border-radius: 12px; color: var(--label-secondary);
+  background: color-mix(in srgb, var(--label) 6%, transparent);
+}
+.ns-recent-folder.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.ns-head-trunc { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; min-width: 0; }
+.ns-footnote { font-size: 11.5px; color: var(--label-tertiary); text-align: center; }
+
+/* first machine */
+.ns-first { width: 100%; display: flex; gap: 16px; padding: 18px; background: var(--text-bg); border-radius: 16px;
+  box-shadow: 0 3px 10px rgba(0,0,0,.04), inset 0 0 0 1px var(--ac-hairline); }
+.ns-first-icon { color: var(--accent); margin-top: 2px; }
+.ns-first-body { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.ns-first-title { font-size: 15px; font-weight: 600; }
+.ns-first-text { font-size: 12.5px; color: var(--label-secondary); margin-bottom: 4px; }
+
+/* popovers */
+.ns-pop-list { padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.ns-pop-row {
+  display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 10px; border: 0; border-radius: 8px;
+  background: transparent; text-align: left; color: var(--label); flex-shrink: 0; width: 100%;
+}
+.ns-pop-row.short { height: 34px; }
+.ns-pop-row.auto { height: auto; padding: 6px 10px; }
+.ns-pop-row.mono { font-family: var(--font-mono); font-size: 12px; }
+.ns-pop-row:hover:not(:disabled) { background: color-mix(in srgb, var(--label) 5%, transparent); }
+.ns-pop-row.on, .ns-pop-row.on:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ns-pop-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ns-pop-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-pop-title.sel { font-weight: 600; }
+.ns-pop-sub { font-size: 11px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-pop-sub.two { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ns-pop-divider { height: 0.5px; background: var(--separator); margin: 4px 0; flex-shrink: 0; }
+.ns-machine-icon { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; color: #fff; flex-shrink: 0; }
+.ns-machine-icon.dashed { background: transparent; color: var(--label-secondary); border: 1px dashed color-mix(in srgb, var(--label-secondary) 100%, transparent); }
+
+.ns-where { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.ns-where .segmented { align-self: stretch; }
+.ns-where .segmented button { flex: 1; }
+.ns-where-note { font-size: 12px; color: var(--label-secondary); }
+.ns-where-row { display: flex; align-items: center; gap: 8px; }
+.ns-where-into { font-size: 12px; color: var(--label-secondary); }
+.ns-where-done { display: flex; justify-content: flex-end; }
+.ns-path {
+  display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border-radius: 9px; min-width: 0;
+  background: var(--text-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 12%, transparent);
+}
+.ns-path input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font-family: var(--font-mono); font-size: 13px; color: var(--label); }
+.secondary { color: var(--label-secondary); }
+
+/* folder picker + presets editor */
+.ns-fp, .ns-ip { height: 100%; display: flex; flex-direction: column; }
+.ns-fp-head { height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 14px; flex-shrink: 0; }
+.ns-fp-path { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; font-size: 13px; font-weight: 500; color: var(--label); padding: 2px 4px; border-radius: 5px; }
+.ns-fp-path:hover { background: var(--fill-tertiary); }
+.ns-fp-machine { font-size: 11.5px; color: var(--label-tertiary); }
+.ns-fp-sep { height: 0.5px; background: var(--separator); flex-shrink: 0; }
+.ns-fp-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 10px; }
+.ns-fp-row { display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 8px; border-radius: 5px; }
+.ns-fp-row span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-fp-row.on { background: var(--accent); color: #fff; }
+.ns-fp-ph { height: 100%; display: grid; place-items: center; font-size: 13px; color: var(--label-secondary); }
+.ns-fp-foot { display: flex; align-items: center; gap: 10px; padding: 14px; flex-shrink: 0; }
+.ns-fp-chosen { font-size: 12px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ns-ip-main { flex: 1; min-height: 0; display: flex; }
+.ns-ip-side { width: 200px; display: flex; flex-direction: column; border-right: 0.5px solid var(--separator); }
+.ns-ip-list { flex: 1; overflow-y: auto; padding: 8px; }
+.ns-ip-item { height: 24px; line-height: 24px; padding: 0 8px; border-radius: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-ip-item.on { background: var(--ac-selection); }
+.ns-ip-item.unusable { color: var(--label-secondary); }
+.ns-ip-pm { display: flex; gap: 2px; padding: 6px; }
+.ns-ip-form { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+.ns-ip-text { flex: 1; resize: none; font: inherit; font-size: 13px; padding: 6px; border-radius: 6px; border: 0; outline: none; color: var(--label);
+  background: var(--text-bg); box-shadow: inset 0 0 0 1px var(--ac-hairline); }
+.ns-ip-note { font-size: 11px; color: var(--label-secondary); }
+
+.ns-alert { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 20px 4px; text-align: center; }
+.ns-alert-title { font-weight: 600; font-size: 13px; }
+.ns-alert-text { font-size: 11px; color: var(--label); }
