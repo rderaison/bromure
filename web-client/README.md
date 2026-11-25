@@ -22,6 +22,11 @@ how the port is organised and verified is in [PORTING.md](PORTING.md).
   key is a loud, explicit decision — as in the macOS client.
 - bromure.io only relays opaque bytes for peer connections (`/v1/connections/:id/relay`);
   it never sees keys or plaintext.
+- The hosted app's bromure.io device identity is an **httpOnly cookie** the page
+  can't read (a device credential can publish an authorized SSH key, so it must
+  not be reachable by script); mutating calls carry a CSRF token; the identity
+  lapses after 24 h without the page on screen (heartbeat while visible). The
+  desktop app keeps a bearer token in its own profile.
 
 ## Build
 

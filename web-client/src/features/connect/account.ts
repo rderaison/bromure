@@ -14,7 +14,7 @@ import {
   ControlPlane, normalizeApiBase, loadDeviceRecord, saveDeviceRecord, clearDeviceRecord,
   type DeviceInfo, type DeviceRecord,
 } from '../../core/cloud/controlPlane';
-import { idbPut, idbDelete } from '../../core/ssh/keys';
+import { idbGet, idbPut, idbDelete } from '../../core/ssh/keys';
 import { electron, http, openExternal, shell, SITE_BASE, API_BASE } from '../../platform';
 import { publicKeyLine } from '../../app/store';
 
@@ -107,7 +107,11 @@ export const account = {
     set({ busy: true, error: null });
     try {
       const cp = new ControlPlane(api, http);
-      const { record, key } = await cp.enroll(code, deviceName());
+      // Hosted: the identity is an httpOnly cookie (never readable by script).
+      // The enrollment key is kept (non-extractable, IndexedDB) and re-used, so
+      // a re-enroll is the same device with a fresh credential.
+      const prior = await idbGet<CryptoKeyPair>('device-identity').catch(() => undefined);
+      const { record, key } = await cp.enroll(code, deviceName(), { cookie: shell === 'web', key: prior });
       await idbPut('device-identity', { privateKey: key.privateKey, publicKey: key.publicKey });
       await saveDeviceRecord(record);
       directoryEverLoaded = false; firstLoad401Retries = 0;
@@ -126,8 +130,11 @@ export const account = {
     stopTimer();
     if (rec && !DEMO) {
       const cp = new ControlPlane(rec.apiBase, http);
-      cp.removeSSHKey(rec.deviceToken).catch(() => {});
-      cp.selfRevoke(rec.deviceToken).catch(() => {});
+      if (rec.delivery === 'cookie') await cp.webLogout().catch(() => {});   // revokes + clears the cookies
+      else {
+        cp.removeSSHKey(rec.deviceToken).catch(() => {});
+        cp.selfRevoke(rec.deviceToken).catch(() => {});
+      }
     }
     await clearDeviceRecord().catch(() => {});
     await idbDelete('device-identity').catch(() => {});
@@ -215,6 +222,23 @@ if (typeof window !== 'undefined') {
     account.complete(h);
   }
   account.load();
+  // Hosted (cookie identity): a sliding 24 h idle TTL, extended while the page
+  // is on screen — on load, when it becomes visible, and every 5 min while
+  // visible. Hidden pages don't beat; a lapsed device gets a 401 → sign in again.
+  const beat = () => {
+    const rec = account.get().record;
+    if (!rec || rec.delivery !== 'cookie' || document.visibilityState !== 'visible') return;
+    new ControlPlane(rec.apiBase, http).heartbeat().catch(async (e: any) => {
+      // Lapsed (24 h without a beat) or revoked: forget the credential but KEEP
+      // the enrollment key — signing in again re-enrolls the same device.
+      if (e?.status !== 401 || account.get().record !== rec) return;
+      await clearDeviceRecord().catch(() => {});
+      set({ record: null, servers: [], directoryError: 'Your bromure.io session for this browser expired. Sign in again.' });
+    });
+  };
+  setTimeout(beat, 1500);
+  document.addEventListener('visibilitychange', beat);
+  setInterval(beat, 5 * 60 * 1000);
   // Dev/test runs only (a dev relay is configured): drive sign-in from scripts.
   if (new URLSearchParams(location.search).has('devRelay') || import.meta.env?.DEV) {
     (window as any).__bromure = { ...(window as any).__bromure, account };

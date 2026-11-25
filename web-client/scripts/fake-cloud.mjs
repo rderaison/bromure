@@ -13,6 +13,8 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const PORT = +(process.env.FAKE_CLOUD_PORT || 5190);
 const SSH_PORT = +(process.env.DEMO_SSH_PORT || 2399);
@@ -22,14 +24,23 @@ const SERVER = { id: 'srv-demo-0001', name: 'Demo server', capability: 'server',
 
 const challenges = new Map();     // challengeId -> { challenge, pubkeyHex, name }
 const tokens = new Map();         // deviceToken -> deviceId
+const csrfOf = new Map();         // cookie deviceToken -> csrf token
+// The hosted app is served same-origin from here (production: bromure.io/client)
+// so the httpOnly-cookie identity works exactly as it will in production.
+const STATIC = process.env.FAKE_CLOUD_STATIC || path.resolve('.build-qa');
 const grants = new Map();         // connectionId -> { dialer, expires }
 const relays = new Map();         // connectionId -> { dialer?: ws, listener?: net.Socket, buf: [] }
 const log = (...a) => console.log('[fake-cloud]', ...a);
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
+function cookies(req) {
+  return Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(p => p[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
+}
 function bearer(req) {
   const h = req.headers.authorization;
   if (h?.startsWith('Bearer ')) return h.slice(7);
+  const c = cookies(req).bromure_device;
+  if (c) return c;
   const proto = (req.headers['sec-websocket-protocol'] || '').split(',').map(s => s.trim());
   const b = proto.find(p => p.startsWith('bearer.'));
   return b ? b.slice(7) : null;
@@ -44,6 +55,16 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE');
   }
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  // Static hosted app at /client/ (same origin as the API, like bromure.io).
+  if (req.method === 'GET' && req.url.startsWith('/client')) {
+    let rel = decodeURIComponent(new URL(req.url, 'http://x').pathname.replace(/^\/client\/?/, '')) || 'index.html';
+    const file = path.resolve(STATIC, rel);
+    if (!file.startsWith(STATIC + path.sep) || !fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
+    const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.woff2': 'font/woff2' }[path.extname(file)] || 'application/octet-stream';
+    res.writeHead(200, { 'content-type': type }); fs.createReadStream(file).pipe(res); return;
+  }
+  // Production mounts the device API under /api.
+  if (req.url.startsWith('/api/')) req.url = req.url.slice(4);
   let body = '';
   req.on('data', d => body += d);
   req.on('end', () => {
@@ -62,11 +83,29 @@ const server = http.createServer((req, res) => {
       if (!ok) return json(res, 401, { error: 'bad signature' });
       const deviceId = 'dev-' + crypto.randomUUID(), deviceToken = 'tok-' + crypto.randomBytes(24).toString('hex');
       tokens.set(deviceToken, deviceId);
-      log('enrolled', deviceId, JSON.stringify(c.name));
+      log('enrolled', deviceId, JSON.stringify(c.name), j.delivery === 'cookie' ? '(cookie delivery)' : '(bearer)');
+      if (j.delivery === 'cookie') {
+        const csrfToken = crypto.randomBytes(16).toString('hex');
+        csrfOf.set(deviceToken, csrfToken);
+        res.setHeader('Set-Cookie', [`bromure_device=${deviceToken}; HttpOnly; SameSite=Strict; Path=/`, `bromure_device_csrf=${csrfToken}; SameSite=Strict; Path=/`]);
+        return json(res, 201, { deviceId, capability: 'client', orgKind: 'individual', userId: 'u1', orgSlug: 'personal', delivery: 'cookie', csrfToken });
+      }
       return json(res, 201, { deviceId, deviceToken, capability: 'client', orgKind: 'individual', userId: 'u1', orgSlug: 'personal' });
     }
     const dev = authed(req);
     if (!dev) return json(res, 401, { error: 'unauthorized' });
+    // Cookie-authed mutations need the CSRF header (double-submit).
+    const viaCookie = !req.headers.authorization;
+    if (viaCookie && req.method !== 'GET' && req.headers['x-csrf-token'] !== csrfOf.get(bearer(req))) {
+      log('CSRF rejected', req.method, url.pathname);
+      return json(res, 403, { error: 'csrf' });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/devices/heartbeat') { log('heartbeat'); return json(res, 200, { ok: true }); }
+    if (req.method === 'POST' && url.pathname === '/v1/devices/web/logout') {
+      tokens.delete(bearer(req));
+      res.setHeader('Set-Cookie', ['bromure_device=; Max-Age=0; Path=/', 'bromure_device_csrf=; Max-Age=0; Path=/']);
+      log('web logout'); return json(res, 200, { ok: true });
+    }
     if (req.method === 'GET' && url.pathname === '/v1/devices') return json(res, 200, { devices: [SERVER, { id: dev, name: 'This device', capability: 'client' }] });
     if (req.method === 'POST' && url.pathname === '/v1/devices/ssh-key') {
       // The server's account-key sync, short-circuited: authorize on the demo server.
@@ -87,6 +126,7 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true, handleProtocols: protos => [...protos].find(p => p === 'bromure.device.v1' || p === 'bromure.relay.v1') ?? false });
 server.on('upgrade', (req, sock, head) => {
+  if (req.url.startsWith('/api/')) req.url = req.url.slice(4);
   const url = new URL(req.url, 'http://x');
   const dev = authed(req);
   if (!dev) { sock.end('HTTP/1.1 401 Unauthorized\r\n\r\n'); return; }
