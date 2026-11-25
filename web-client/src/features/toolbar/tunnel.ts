@@ -127,8 +127,6 @@ interface Flow {
   ch: SSHChannel | null; unacked: number; closed: boolean;
   /** Held by main (the local program isn't reading). */
   paused: boolean;
-  /** The remote closed while held: the close waits for what's buffered. */
-  closePending: boolean;
 }
 const flows = new Map<number, Flow>();
 
@@ -148,18 +146,23 @@ if (bridge) {
   bridge.onFlow((id, verb) => {
     const c = active;
     if (!c) { bridge.flowOpened(id, false, 'the tunnel is off'); return; }
-    const f: Flow = { ch: null, unacked: 0, closed: false, paused: false, closePending: false };
+    const f: Flow = { ch: null, unacked: 0, closed: false, paused: false };
     flows.set(id, f);
     c.host.openForward(verb).then(ch => {
       if (f.closed) { ch.close(); return; }
       f.ch = ch;
       ch.onData = d => bridge.flowData(id, d);
       ch.onEOF = () => bridge.flowEnd(id);
-      // A channel closed while held still has the bytes it buffered (and
-      // its EOF): the close goes to main after them, on resume.
+      // A channel closed while held (the server finished, or the SSH
+      // connection failed) still has the bytes it buffered and its EOF. They
+      // go to main now, then the close, in that order: main ends the local
+      // socket after them, and destroys it if the program never reads them.
+      // Not waiting for a drain that may never come (the flow, its socket
+      // and the forwarder's flow would stay open for good). What's handed
+      // over is bounded by the channel's window.
       ch.onClose = () => {
         if (f.closed) return;
-        if (f.paused) { f.closePending = true; return; }
+        if (f.paused) { f.paused = false; ch.resume(); }
         finishFlow(id, f);
       };
       ch.onDrain = () => { if (f.unacked) { bridge.flowAck(id, f.unacked); f.unacked = 0; } };
@@ -185,7 +188,6 @@ if (bridge) {
     f.paused = paused;
     if (paused) { f.ch.pause(); return; }
     f.ch.resume();   // delivers what was held, then its EOF
-    if (f.closePending) finishFlow(id, f);
   });
   bridge.onFlowEnd(id => flows.get(id)?.ch?.eof());
   bridge.onFlowClose(id => {
