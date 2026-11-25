@@ -148,7 +148,7 @@ export type SessionActions = ReturnType<typeof sessionActions>;
 export function selectInitial(c: ActionCtx) {
   const s = initialSession(c.sessions(), c.model());
   if (s) c.select({ kind: 'session', sessionID: s.id });
-  else { c.select({ kind: 'new-session' }); openSurface('new-session'); }
+  else c.select({ kind: 'new-session' });   // NewSessionHost opens on it
 }
 
 // ── workspace (VM) verbs ─────────────────────────────────────────────────

@@ -28,8 +28,17 @@ export function NewSessionHost() {
   useEffect(() => {
     (window as any).__bromure = { ...(window as any).__bromure, newSession: () => { selAtOpen.current = selection; setOpen({ key: Date.now() }); } };
   });
-  // Another session / room / machine picked in the sidebar: the stage is theirs.
-  useEffect(() => { if (open && selection !== selAtOpen.current) setOpen(null); }, [selection]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The stage's own "new session" selection (the initial selection on a host
+  // with no sessions — RemoteHostWindow.selectInitialSession → showNewSession)
+  // opens it; any other session / room / machine picked takes the stage back.
+  useEffect(() => {
+    if (selection.kind === 'new-session') {
+      selAtOpen.current = selection;
+      if (!open) setOpen({ room: (selection as any).roomID, key: Date.now() });
+      return;
+    }
+    if (open && selection !== selAtOpen.current) setOpen(null);
+  }, [selection]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open) setSlot(document.querySelector<HTMLElement>('.hw-stage')); }, [open]);
 
   if (!open || !slot) return null;
