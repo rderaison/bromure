@@ -11,6 +11,7 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { setupTunnel, stopTunnel } from './tunnel';
+import { closeGracefully } from './sockClose';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -222,7 +223,8 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
 });
 const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(id); return x && x.owner === e.sender.id ? x.s : undefined; };
 ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => { owned(e, id)?.write(data); });
-ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { s.destroy(); sockets.delete(id); } });
+// Graceful: the renderer's last writes (sent just before) still reach the peer.
+ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { closeGracefully(s); sockets.delete(id); accepted.delete(id); } });
 
 // ── Loopback listener (a model sign-in's OAuth callback) ───────────────────
 // The provider sends the browser back to http://localhost:<port>/… — the port

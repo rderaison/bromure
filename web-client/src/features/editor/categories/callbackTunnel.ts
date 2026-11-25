@@ -30,6 +30,8 @@ export async function startCallbackTunnel(host: RemoteHost, vmIP: string, port: 
       local.onData = d => ch.write(d);
       local.onClose = () => ch.close();
       ch.onData = d => local.write(d);
+      // The VM's answer is complete: close our side (main flushes what we
+      // wrote first — see electron/sockClose.ts — never drops it).
       ch.onEOF = () => local.close();
       ch.onClose = () => local.close();
       ch.resume();
