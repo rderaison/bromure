@@ -1,0 +1,10 @@
+# Build context for ci/linux/Dockerfile: sources only (the image runs npm ci
+# and builds everything itself).
+node_modules
+dist
+dist-electron
+out
+.reference*
+.build-*
+*.tgz
+ci/linux/Dockerfile.smoke

@@ -92,3 +92,15 @@ BROMURE_TEST_USER=<user> BROMURE_TEST_PASSWORD=<code> xvfb-run -a ./bromure-clie
 - The desktop id `io.bromure.client` (package.json `desktopName`) is also the
   Wayland app_id / X11 WM_CLASS, so the window matches its launcher icon.
   Electron runs natively on Wayland in a Wayland session, X11 otherwise.
+
+CI: `Jenkinsfile.client-linux` (repo root) builds in Docker on kube-builder-a
+(`ci/linux/Dockerfile` + `build.sh`: npm ci via Socket, typecheck, tests,
+packages for x64 + arm64 from one container, checks each .deb/tarball), then
+apt-installs each .deb on clean `ubuntu:24.04` / `debian:12` containers and
+renders it under Xvfb (`ci/linux/smoke-host.sh`), arm64 there and amd64 on
+linux-kvm-amd64. Locally, the same as Jenkins:
+```bash
+docker build -t bcl-builder -f ci/linux/Dockerfile . && docker run --name bcl bcl-builder
+docker cp bcl:/home/node/artifacts ./ci-out && docker rm bcl
+sh ci/linux/smoke-host.sh ./ci-out ./ci-out/smoke      # the .deb for this machine's arch
+```
