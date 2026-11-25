@@ -109,10 +109,17 @@ export class ControlPlane {
     // headers. Cookie (hosted): nothing — the cookie rides the same-origin upgrade.
     const ch = await WebSocketStream.open(`${this.wsBase()}/v1/device-channel`, bearer ? ['bromure.device.v1', `bearer.${bearer}`] : undefined);
     // The device channel is text JSON; WebSocketStream hands us bytes.
-    const frame = JSON.stringify({ connectionId: grant.id, seq: 1, kind: 'offer', payload: { v: 1, note: 'ws-relay' } });
-    ch.sendText(frame);
-    const relay = await WebSocketStream.open(`${this.wsBase()}/v1/connections/${encodeURIComponent(grant.id)}/relay`,
-      bearer ? ['bromure.relay.v1', `bearer.${bearer}`] : undefined);
+    let relay: ByteStream;
+    try {
+      const frame = JSON.stringify({ connectionId: grant.id, seq: 1, kind: 'offer', payload: { v: 1, note: 'ws-relay' } });
+      ch.sendText(frame);
+      relay = await WebSocketStream.open(`${this.wsBase()}/v1/connections/${encodeURIComponent(grant.id)}/relay`,
+        bearer ? ['bromure.relay.v1', `bearer.${bearer}`] : undefined);
+    } catch (e) {
+      // No relay: the signaling socket has nothing left to carry.
+      ch.close();
+      throw e;
+    }
     // The signaling socket is only needed to deliver the offer.
     setTimeout(() => ch.close(), 5000);
     return relay;
