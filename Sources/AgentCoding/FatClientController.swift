@@ -442,7 +442,32 @@ final class RemoteHostController {
             remove: { [weak self] model in self?.removeServerModel(repo: model.repo) },
             installedRepos: { [weak self] in Array(self?.serverInstalledModels ?? []) },
             removeRepo: { [weak self] repo in self?.removeServerModel(repo: repo) },
-            installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] })
+            installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] },
+            probeServer: { [host] base, key in try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key) })
+    }
+
+    /// "Test Connection" for a custom inference server, run BY THE REMOTE
+    /// (`POST /models/probe-server`): the server's network and source address
+    /// are what its launches use, and the client never contacts the engine.
+    /// A redacted/blank key makes the remote use the key it stores for that
+    /// server. Throws the remote's reason on failure.
+    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?) async throws -> [String] {
+        var body: [String: Any] = ["baseURL": baseURL]
+        if let apiKey, !apiKey.isEmpty { body["apiKey"] = apiKey }
+        let payload = body
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/models/probe-server", body: payload)
+        }.value
+        if resp.json["ok"] as? Bool == true { return (resp.json["models"] as? [String]) ?? [] }
+        let why = resp.json["error"] as? String
+        // A server that predates the route answers the generic /models/ action's 400.
+        if resp.status == 400, why == "bad action or repo" {
+            throw RemoteProbeError(message: NSLocalizedString(
+                "This server's Bromure is too old to test the connection. Update Bromure on it, then try again.",
+                comment: "engine probe: old server"))
+        }
+        throw RemoteProbeError(message: (why?.isEmpty == false ? why! : nil)
+            ?? String(format: NSLocalizedString("The server couldn't test the connection (HTTP %d).", comment: "engine probe"), resp.status))
     }
 #endif
 
