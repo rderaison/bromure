@@ -1,0 +1,106 @@
+/* Network lineage sheet (NetworkLineageView.swift). */
+
+.lin-sheet {
+  display: flex; flex-direction: column; height: 100%; min-height: 0; width: 100%;
+  background: var(--control-bg); color: var(--label);
+  --lin-card: var(--control-bg);
+  --lin-stroke: color-mix(in srgb, var(--label) 8%, transparent);
+}
+:root[data-theme="dark"] .lin-sheet { background: var(--window-bg); }
+
+.lin-header { display: flex; align-items: center; gap: 14px; padding: 14px 20px; flex-shrink: 0; border-bottom: 0.5px solid var(--separator); }
+.lin-header-icon {
+  width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0; display: grid; place-items: center; color: #fff;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--tint) 82%, #fff), var(--tint));
+}
+.lin-header-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lin-title { font-size: 17px; font-weight: 600; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lin-subtitle { display: flex; gap: 6px; font-size: var(--fs-caption); color: var(--label-secondary); line-height: 13px; }
+
+.lin-badge {
+  flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; line-height: 15px;
+  color: var(--tint); background: color-mix(in srgb, var(--tint) 16%, transparent);
+}
+.lin-chip {
+  display: inline-block; font-size: var(--fs-caption); font-weight: 500; padding: 2px 7px; border-radius: 999px; line-height: 13px;
+  color: var(--tint); background: color-mix(in srgb, var(--tint) 14%, transparent);
+}
+
+.lin-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.lin-steps { padding: 20px; max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; }
+
+.lin-step { position: relative; display: flex; align-items: flex-start; gap: 14px; padding-bottom: 12px; }
+.lin-step.last { padding-bottom: 0; }
+.lin-rail { position: absolute; left: 14px; top: 32px; bottom: 0; width: 2px; background: color-mix(in srgb, var(--label) 12%, transparent); }
+.lin-step-icon {
+  width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center;
+  color: var(--tint); background: color-mix(in srgb, var(--tint) 15%, transparent);
+}
+.lin-step.dimmed .lin-step-icon { color: var(--label-tertiary); background: color-mix(in srgb, var(--tint) 6%, transparent); }
+.lin-card {
+  flex: 1; min-width: 0; padding: 14px; border-radius: 12px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--lin-card); box-shadow: inset 0 0 0 1px var(--lin-stroke);
+}
+.lin-step.dimmed .lin-card { background: color-mix(in srgb, var(--lin-card) 50%, transparent); }
+.lin-card-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; line-height: 16px; }
+.lin-step.dimmed .lin-card-title { color: var(--label-secondary); }
+
+.lin-why { display: flex; flex-direction: column; gap: 10px; }
+.lin-labeled { display: flex; flex-direction: column; gap: 3px; }
+.lin-label { display: flex; align-items: center; gap: 5px; font-size: var(--fs-caption); font-weight: 600; color: var(--label-secondary); line-height: 13px; }
+.lin-callout { font-size: var(--fs-callout); line-height: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lin-callout.clamp4, .lin-callout.clamp5 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.lin-callout.clamp4 { -webkit-line-clamp: 4; }
+.lin-callout.clamp5 { -webkit-line-clamp: 5; }
+.lin-muted { color: var(--label-secondary); }
+.lin-italic { font-style: italic; }
+.lin-caption { font-size: var(--fs-caption); color: var(--label-secondary); line-height: 13px; }
+.lin-reasoning { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.lin-more { font-size: var(--fs-caption); }
+
+.lin-code {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-radius: 8px;
+  background: color-mix(in srgb, var(--indigo) 7%, transparent);
+}
+.lin-code-text { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--fs-callout); line-height: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lin-copy { color: var(--label-secondary); height: 18px; display: grid; place-items: center; }
+
+.lin-procs { display: flex; flex-direction: column; }
+.lin-proc { display: flex; align-items: baseline; gap: 6px; padding-top: 4px; padding-bottom: 4px; }
+.lin-elbow { font-family: var(--font-mono); font-size: var(--fs-callout); color: var(--label-tertiary); }
+.lin-proc-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.lin-proc-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 16px; }
+.lin-comm { font-size: var(--fs-callout); }
+.lin-comm.leaf { font-weight: 600; }
+.lin-pid { font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--label-tertiary); }
+.lin-exe { font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lin-argv {
+  font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--label-secondary); line-height: 13px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere;
+}
+.lin-more-procs { font-size: var(--fs-caption); display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; align-self: flex-start; }
+
+.lin-grid { display: grid; grid-template-columns: auto 1fr; column-gap: 14px; row-gap: 6px; align-items: center; font-size: var(--fs-callout); line-height: 15px; }
+.lin-k { color: var(--label-secondary); }
+.lin-v { font-family: var(--font-mono); }
+.lin-chips { display: flex; align-items: center; gap: 6px; }
+.lin-chips.gap8 { gap: 8px; }
+.lin-decision { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+
+.lin-siblings { display: flex; flex-direction: column; gap: 8px; }
+.lin-siblings-title { font-size: 13px; font-weight: 600; padding-top: 18px; line-height: 16px; }
+.lin-sibling-list { display: flex; flex-direction: column; gap: 4px; }
+.lin-sibling {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; border: 0; text-align: left;
+  background: var(--lin-card); font-size: var(--fs-body); color: var(--label); cursor: default; min-width: 0;
+}
+.lin-sibling:hover { background: color-mix(in srgb, var(--label) 4%, var(--lin-card)); }
+.lin-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.lin-sib-proto { width: 40px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-caption); color: var(--label-secondary); }
+.lin-sib-dest { min-width: 0; }
+.lin-sib-comm { font-size: var(--fs-caption); color: var(--label-secondary); }
+.lin-sib-time { font-size: var(--fs-caption); color: var(--label-tertiary); }
+.lin-sib-chev { color: var(--label-tertiary); }
+
+.lin-footer { flex-shrink: 0; display: flex; justify-content: flex-end; padding: 12px; border-top: 0.5px solid var(--separator); }
+.lin-empty { flex: 1; }

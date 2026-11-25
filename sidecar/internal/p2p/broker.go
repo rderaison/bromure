@@ -186,7 +186,16 @@ func (b *Broker) ensureChannel(id identity.Identity) *devicechannel.Channel {
 	ch.OnSignal = func(f signal.IncomingFrame) {
 		b.mu.Lock()
 		s := b.sessions[f.ConnectionID]
+		serving, port := b.serving, b.sshPort
 		b.mu.Unlock()
+		// A browser dialer meets us on the bromure.io ws-relay (wsrelay.go).
+		if f.Kind == signal.KindOffer && serving && f.Payload.Note != nil && *f.Payload.Note == WSRelayNote {
+			if id, ok := b.Identity(); ok {
+				if ep, err := controlplane.NewEndpoint(id.APIBase); err == nil {
+					joinWSRelay(ep, id.Bearer, f.ConnectionID, port, b.HTTP)
+				}
+			}
+		}
 		if s != nil {
 			s.receive(f.Payload)
 		}

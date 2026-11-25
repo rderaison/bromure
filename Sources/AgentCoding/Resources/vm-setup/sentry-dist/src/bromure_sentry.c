@@ -75,24 +75,54 @@
  *   SENTRY_ARG(regs, n)       argument n of the probed function, at its entry
  *   SENTRY_USER_ARG(user, n)  syscall argument n in the user's saved registers
  *
- * arm64 expands to exactly what this file used before the x86_64 port (the
- * wrapper names and the register reads), so its object code is unchanged.
+ * The 32-bit entry is a second door into the same syscalls, and every
+ * syscall-wrapper probe needs it covered too (sentry_kprobes[]): a 32-bit
+ * binary, or a 64-bit one executing `int 0x80`, never touches the 64-bit
+ * wrappers. Nothing on the kernel command line closes that door, so the
+ * module watches it rather than assuming it shut.
+ *
+ *   x86_64  `__ia32_sys_*` and `__ia32_compat_sys_*` (CONFIG_IA32_EMULATION),
+ *           arguments in bx, cx, dx, si, di, bp; x32's compat-only entries
+ *           `__x32_compat_sys_*` (CONFIG_X86_X32_ABI), 64-bit registers.
+ *   arm64   AArch32 tasks (CONFIG_COMPAT) reach most syscalls through the
+ *           same `__arm64_sys_*` wrappers, already probed, with the same
+ *           registers; only the compat-specific ones (`__arm64_compat_sys_*`)
+ *           and the 16-bit-uid calls need their own probes.
  */
 #if defined(CONFIG_ARM64)
 #define SENTRY_SYS(name)		"__arm64_sys_" name
 #define SENTRY_ARG(regs, n)		((regs)->regs[n])
 #define SENTRY_USER_ARG(user, n)	((user)->regs[n])
+#define SENTRY_COMPAT_SYS(name)		"__arm64_compat_sys_" name
+#define SENTRY_SYS16(name)		"__arm64_sys_" name "16"
 #elif defined(CONFIG_X86_64)
 #define SENTRY_SYS(name)		"__x64_sys_" name
 /* di, si, dx, cx, r8, r9: the C calling convention of the probed function. */
 #define SENTRY_ARG(regs, n)		regs_get_kernel_argument((regs), (n))
 #define SENTRY_USER_ARG(user, n)	sentry_x64_syscall_arg((user), (n))
-/* The syscall ABI: di, si, dx, r10, r8, r9 (r10, not cx, which `syscall`
- * clobbers). Only the 64-bit entry: 32-bit `int 0x80` / compat syscalls go
- * through `__ia32_sys_*`, which this module does not probe; the image boots
- * with `ia32_emulation=0` so that entry is closed instead. */
+#define SENTRY_IA32_SYS(name)		"__ia32_sys_" name
+#define SENTRY_COMPAT_SYS(name)		"__ia32_compat_sys_" name
+#define SENTRY_X32_COMPAT_SYS(name)	"__x32_compat_sys_" name
+#define SENTRY_SYS16(name)		"__ia32_sys_" name "16"
+/* Which ABI the task entered with decides where its arguments are, whichever
+ * wrapper was probed: TS_COMPAT is set by every 32-bit entry (`int 0x80`,
+ * sysenter, syscall from 32-bit code) and cleared for a 64-bit one.
+ *   64-bit and x32: di, si, dx, r10, r8, r9 (r10, not cx, which `syscall`
+ *                   clobbers)
+ *   ia32:           bx, cx, dx, si, di, bp
+ * Only the low 32 bits of an ia32 register are the argument. */
 static inline unsigned long sentry_x64_syscall_arg(const struct pt_regs *user, int n)
 {
+	if (in_ia32_syscall()) {
+		switch (n) {
+		case 0: return (u32)user->bx;
+		case 1: return (u32)user->cx;
+		case 2: return (u32)user->dx;
+		case 3: return (u32)user->si;
+		case 4: return (u32)user->di;
+		default: return (u32)user->bp;
+		}
+	}
 	switch (n) {
 	case 0: return user->di;
 	case 1: return user->si;
@@ -3032,6 +3062,42 @@ static struct sentry_kprobe sentry_kprobes[] = {
 	{ SENTRY_SYS("unshare"),	sentry_kp_unshare },
 	{ SENTRY_SYS("setns"),		sentry_kp_setns },
 	{ "security_bprm_committed_creds", sentry_kp_exec },
+	/* The 32-bit entry (see SENTRY_SYS): the same handlers, which read the
+	 * arguments from wherever the task's ABI put them. */
+#if defined(CONFIG_X86_64) && defined(CONFIG_IA32_EMULATION)
+	{ SENTRY_IA32_SYS("setuid"),	sentry_kp_setuid },
+	{ SENTRY_IA32_SYS("setreuid"),	sentry_kp_setuid },
+	{ SENTRY_IA32_SYS("setresuid"),	sentry_kp_setuid },
+	{ SENTRY_IA32_SYS("setgid"),	sentry_kp_setgid },
+	{ SENTRY_IA32_SYS("setregid"),	sentry_kp_setgid },
+	{ SENTRY_IA32_SYS("setresgid"),	sentry_kp_setgid },
+	{ SENTRY_IA32_SYS("capset"),	sentry_kp_capset },
+	{ SENTRY_COMPAT_SYS("ptrace"),	sentry_kp_ptrace },
+	{ SENTRY_IA32_SYS("delete_module"), sentry_kp_delete_module },
+	{ SENTRY_IA32_SYS("bpf"),	sentry_kp_bpf },
+	{ SENTRY_COMPAT_SYS("kexec_load"), sentry_kp_kexec },
+	{ SENTRY_IA32_SYS("mount"),	sentry_kp_mount },
+	{ SENTRY_IA32_SYS("unshare"),	sentry_kp_unshare },
+	{ SENTRY_IA32_SYS("setns"),	sentry_kp_setns },
+#endif
+#if defined(CONFIG_X86_64) && defined(CONFIG_X86_X32_ABI)
+	{ SENTRY_X32_COMPAT_SYS("ptrace"), sentry_kp_ptrace },
+	{ SENTRY_X32_COMPAT_SYS("kexec_load"), sentry_kp_kexec },
+#endif
+#if defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
+	{ SENTRY_COMPAT_SYS("ptrace"),	sentry_kp_ptrace },
+	{ SENTRY_COMPAT_SYS("kexec_load"), sentry_kp_kexec },
+#endif
+#if (defined(CONFIG_X86_64) && defined(CONFIG_IA32_EMULATION)) || \
+	(defined(CONFIG_ARM64) && defined(CONFIG_COMPAT))
+	/* 16-bit-uid calls exist only for 32-bit tasks (CONFIG_HAVE_UID16). */
+	{ SENTRY_SYS16("setuid"),	sentry_kp_setuid },
+	{ SENTRY_SYS16("setreuid"),	sentry_kp_setuid },
+	{ SENTRY_SYS16("setresuid"),	sentry_kp_setuid },
+	{ SENTRY_SYS16("setgid"),	sentry_kp_setgid },
+	{ SENTRY_SYS16("setregid"),	sentry_kp_setgid },
+	{ SENTRY_SYS16("setresgid"),	sentry_kp_setgid },
+#endif
 };
 
 /*

@@ -306,7 +306,14 @@ final class P2PBroker: @unchecked Sendable {
     }
 
     private func route(connectionId: String, kind: SignalKind, payload: P2PSignalPayload) {
-        lock.lock(); let s = sessions[connectionId]; lock.unlock()
+        lock.lock(); let s = sessions[connectionId]; let isServing = serving; let port = serveSSHPort; lock.unlock()
+        // A browser / web-client dialer can't take any TCP or TURN path: it asks
+        // us to meet it on the bromure.io ws-relay (WSRelay.swift). The relay
+        // itself checks that we're this grant's server party.
+        if kind == .offer, payload.note == WSRelayNote.value, isServing,
+           let id = currentIdentity(), let ep = try? ControlPlaneEndpoint(base: id.apiBase) {
+            WSRelayListener.join(connectionId: connectionId, endpoint: ep, bearer: id.bearer, sshPort: port)
+        }
         s?.receive(kind: kind, payload: payload)
     }
 

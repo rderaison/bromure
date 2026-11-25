@@ -19,12 +19,29 @@ enum HostProcess {
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
-        let inPipe = Pipe()
-        p.standardInput = stdin == nil ? FileHandle.nullDevice : inPipe
+        let inPipe = stdin == nil ? nil : Pipe()
+        p.standardInput = inPipe ?? FileHandle.nullDevice
+        // Every descriptor is closed here, by hand, before returning. Left to
+        // deallocation they outlive the call by the whole `timeout`: the
+        // scheduled killer below holds the Process (and so its pipes) until
+        // its deadline even once cancelled. At a few tmux calls a second that
+        // kept ~100 descriptors open at rest, a burst away from the 256
+        // limit — past it every dial to an attached server fails (EMFILE).
+        // (stdin's writing end belongs to its writer below once the child
+        // runs: closing it from two threads could close a reused number.)
+        func closeAll(stdinWriter: Bool) {
+            for pipe in [out, err] {
+                try? pipe.fileHandleForReading.close()
+                try? pipe.fileHandleForWriting.close()
+            }
+            try? inPipe?.fileHandleForReading.close()
+            if !stdinWriter { try? inPipe?.fileHandleForWriting.close() }
+        }
         do { try p.run() } catch {
+            closeAll(stdinWriter: false)
             return Result(status: 127, stdout: "", stderr: "\(executable): \(error.localizedDescription)")
         }
-        if let stdin {
+        if let stdin, let inPipe {
             DispatchQueue.global().async {
                 try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
                 try? inPipe.fileHandleForWriting.close()
@@ -52,10 +69,23 @@ enum HostProcess {
         p.waitUntilExit()
         killer.cancel()
         group.wait()
+        closeAll(stdinWriter: true)
         return Result(status: p.terminationStatus,
                       stdout: String(decoding: outData, as: UTF8.self),
                       stderr: String(decoding: errData, as: UTF8.self),
                       timedOut: timedOut)
+    }
+
+    /// Lift the open-file limit from launchd's 256 to the hard limit (capped):
+    /// links, agent streams, the SSH server and every command's pipes share
+    /// it, and running out is not survivable — nothing can be dialed.
+    static func raiseFileLimit() {
+        var lim = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
+        let want = min(lim.rlim_max, rlim_t(OPEN_MAX), 8192)
+        guard lim.rlim_cur < want else { return }
+        lim.rlim_cur = want
+        setrlimit(RLIMIT_NOFILE, &lim)
     }
 }
 

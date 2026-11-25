@@ -1,0 +1,144 @@
+/* Bromure client design tokens — the macOS app's palette and type scale,
+ * rendered identically in the hosted app and Electron.
+ *
+ * Sources: PlatformShims.swift (acCanvas/acSidebar/acTitlebar/acHairline/
+ * acSelection — claude.ai's light "paper"), AppKit system colors (label,
+ * separator, control accent, system* hues) in their light/dark values, and
+ * SwiftUI's macOS text styles (body 13pt, callout 12, subheadline 11,
+ * footnote/caption 10, headline 13 semibold, title3 15, title2 17, title 22,
+ * largeTitle 26). 1 CSS px = 1 macOS point.
+ *
+ * Fonts: the system font on macOS (SF Pro / SF Mono). Elsewhere the bundled
+ * Inter Variable (closest open metrics to SF Pro) and the platform monospace
+ * — so Electron and the hosted app render the same on the same OS.
+ */
+
+@import '@fontsource-variable/inter/index.css';
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter Variable', Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-rounded: ui-rounded, 'SF Pro Rounded', var(--font-ui);
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', 'DejaVu Sans Mono', Consolas, monospace;
+
+  --fs-large-title: 26px; --fs-title: 22px; --fs-title2: 17px; --fs-title3: 15px;
+  --fs-headline: 13px; --fs-body: 13px; --fs-callout: 12px; --fs-subheadline: 11px;
+  --fs-footnote: 10px; --fs-caption: 10px; --fs-caption2: 10px;
+
+  /* Bromure paper (light) */
+  --ac-canvas: #FCFCFB;
+  --ac-sidebar: #FBFBF9;
+  --ac-titlebar: #FFFFFF;
+  --ac-hairline: #E3E3E1;
+  --ac-selection: #EDECE8;
+
+  /* AppKit semantic colors (light) */
+  --label: rgba(0, 0, 0, 0.85);
+  --label-secondary: rgba(0, 0, 0, 0.50);
+  --label-tertiary: rgba(0, 0, 0, 0.26);
+  --label-quaternary: rgba(0, 0, 0, 0.10);
+  --separator: rgba(0, 0, 0, 0.10);
+  --grid: #E6E6E6;
+  --window-bg: #ECECEC;
+  --control-bg: #FFFFFF;
+  --text-bg: #FFFFFF;
+  --under-page: #969696;
+  --control: #FFFFFF;
+  --control-text: rgba(0, 0, 0, 0.85);
+  --placeholder: rgba(0, 0, 0, 0.25);
+  --fill: rgba(0, 0, 0, 0.10);          /* systemFill */
+  --fill-secondary: rgba(0, 0, 0, 0.08);
+  --fill-tertiary: rgba(0, 0, 0, 0.05);
+  --fill-quaternary: rgba(0, 0, 0, 0.03);
+  --grouped-bg: rgba(0, 0, 0, 0.03);    /* Form .grouped section fill */
+  --grouped-border: rgba(0, 0, 0, 0.05);
+  --shadow-window: 0 0 0 0.5px rgba(0,0,0,.18), 0 22px 70px 4px rgba(0,0,0,.28);
+  --shadow-popover: 0 0 0 0.5px rgba(0,0,0,.15), 0 8px 30px rgba(0,0,0,.18);
+
+  --accent: #007AFF;
+  --accent-hover: #0068DA;
+  --accent-fg: #FFFFFF;
+  --link: #0068DA;
+
+  --red: #FF3B30; --orange: #FF9500; --yellow: #FFCC00; --green: #28CD41;
+  --mint: #00C7BE; --teal: #59ADC4; --cyan: #55BEF0; --blue: #007AFF;
+  --indigo: #5856D6; --purple: #AF52DE; --pink: #FF2D55; --brown: #A2845E;
+  --gray: #8E8E93;
+
+  --radius-control: 5px;
+  --radius-card: 10px;
+  color-scheme: light;
+}
+
+/* Dark values — applied by [data-theme=dark] (the app sets it from the
+ * appearance preference / the OS). */
+:root[data-theme="dark"] {
+  /* windowBackgroundColor on macOS 26 dark, measured from the native renders
+     (.reference-dark): canvas, sidebar and titlebar are all the same. */
+  --ac-canvas: #1E1E1E;
+  --ac-sidebar: #1E1E1E;
+  --ac-titlebar: #1E1E1E;
+  --ac-hairline: rgba(255, 255, 255, 0.10);
+  --ac-selection: rgba(10, 132, 255, 0.16);
+
+  --label: rgba(255, 255, 255, 0.85);
+  --label-secondary: rgba(255, 255, 255, 0.55);
+  --label-tertiary: rgba(255, 255, 255, 0.25);
+  --label-quaternary: rgba(255, 255, 255, 0.10);
+  --separator: rgba(255, 255, 255, 0.10);
+  --grid: #1A1A1A;
+  --window-bg: #1E1E1E;
+  --control-bg: #1E1E1E;
+  --text-bg: #1E1E1E;
+  --under-page: #282828;
+  --control: rgba(255, 255, 255, 0.25);
+  --control-text: rgba(255, 255, 255, 0.85);
+  --placeholder: rgba(255, 255, 255, 0.25);
+  --fill: rgba(255, 255, 255, 0.10);
+  --fill-secondary: rgba(255, 255, 255, 0.08);
+  --fill-tertiary: rgba(255, 255, 255, 0.05);
+  --fill-quaternary: rgba(255, 255, 255, 0.03);
+  --grouped-bg: rgba(255, 255, 255, 0.04);
+  --grouped-border: rgba(255, 255, 255, 0.06);
+  --shadow-window: 0 0 0 0.5px rgba(255,255,255,.14), 0 22px 70px 4px rgba(0,0,0,.56);
+  --shadow-popover: 0 0 0 0.5px rgba(255,255,255,.12), 0 8px 30px rgba(0,0,0,.45);
+
+  --accent: #0A84FF;
+  --accent-hover: #3395FF;
+  --link: #419CFF;
+
+  --red: #FF453A; --orange: #FF9F0A; --yellow: #FFD60A; --green: #32D74B;
+  --mint: #66D4CF; --teal: #6AC4DC; --cyan: #5AC8F5; --blue: #0A84FF;
+  --indigo: #5E5CE6; --purple: #BF5AF2; --pink: #FF375F; --brown: #AC8E68;
+  --gray: #98989D;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  line-height: 1.231;          /* 16pt line on 13pt text, as AppKit */
+  color: var(--label);
+  background: var(--ac-canvas);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01';   /* Inter: SF-like single-storey a off, open digits */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+input, textarea, [contenteditable], .selectable { user-select: text; -webkit-user-select: text; }
+button { font: inherit; color: inherit; }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.mono { font-family: var(--font-mono); }
+
+/* Overlay scrollbars, like macOS's */
+::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+*:hover::-webkit-scrollbar-thumb { background-color: rgba(0, 0, 0, 0.32); }
+:root[data-theme="dark"] *:hover::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.32); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+:focus { outline: none; }
+:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: 0; border-radius: 5px; }

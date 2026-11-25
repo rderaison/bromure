@@ -40,6 +40,13 @@ private let scrollBridgeDebug = ProcessInfo.processInfo.environment["BROMURE_DEB
 ///
 /// Callers check ``canSend`` per event and fall back to the legacy VZ wheel
 /// path while neither transport is up, so scrolling always works.
+///
+/// Target-scoped bridges (shared-window sessions: several Mac windows on
+/// one guest) only use transports that address a page by target id:
+/// direct, then the guest input agent with a `targetId` (its shared mode
+/// requires one). The VZ wheel path is no fallback there — the window
+/// shows a GPU scanout, not VZ's display — so if the direct socket died
+/// with nothing behind it, the window could no longer scroll at all.
 @MainActor
 public final class PrecisionScrollBridge {
     public static let vsockPort: UInt32 = 5820
@@ -98,7 +105,7 @@ public final class PrecisionScrollBridge {
         // The uinput path connects regardless: it is the fallback while the
         // CDP agent is still starting (and the whole path when selected).
         if !targetScoped { connect() }
-        if !targetScoped && transport != .uinput { probeCDP() }
+        if transport != .uinput { probeCDP() }
     }
 
     public func stop() {
@@ -112,7 +119,8 @@ public final class PrecisionScrollBridge {
 
     /// True when at least one transport can take the event right now.
     public var canSend: Bool {
-        if targetScoped { return directReady }
+        if !directReady { injector?.ensureRunning() }
+        if targetScoped { return directReady || (cdpReady && activeTargetId?() != nil) }
         return directReady || (transport != .uinput && cdpReady) || isConnected
     }
 
@@ -143,11 +151,14 @@ public final class PrecisionScrollBridge {
                            dx: -dx, dy: -dy, modifiers: mods)
             return
         }
-        if targetScoped { return }
         if transport != .uinput && cdpReady {
-            sendCDP(dx: dx, dy: dy, x: x, y: y, shift: shift, ctrl: ctrl, alt: alt)
+            let targetId = activeTargetId?()
+            // The guest agent needs a target in shared-window mode.
+            if targetScoped && targetId == nil { return }
+            sendCDP(dx: dx, dy: dy, x: x, y: y, shift: shift, ctrl: ctrl, alt: alt, targetId: targetId)
             return
         }
+        if targetScoped { return }
         sendUinput(dx: dx, dy: dy)
     }
 
@@ -169,17 +180,21 @@ public final class PrecisionScrollBridge {
     /// lost and the queue never grows beyond one message.
     private var cdpInFlight = false
     private var pending: (dx: Double, dy: Double, x: Double, y: Double,
-                          shift: Bool, ctrl: Bool, alt: Bool)?
+                          shift: Bool, ctrl: Bool, alt: Bool, targetId: String?)?
 
+    /// `targetId` addresses the page (required by the agent in shared-window
+    /// mode, ignored otherwise).
     private func sendCDP(dx: Double, dy: Double, x: Double, y: Double,
-                         shift: Bool, ctrl: Bool, alt: Bool) {
+                         shift: Bool, ctrl: Bool, alt: Bool, targetId: String? = nil) {
         if cdpInFlight {
-            if var p = pending {
+            if var p = pending, p.targetId == targetId {
                 p.dx += dx; p.dy += dy; p.x = x; p.y = y
                 p.shift = shift; p.ctrl = ctrl; p.alt = alt
                 pending = p
             } else {
-                pending = (dx, dy, x, y, shift, ctrl, alt)
+                // First held event, or the active tab changed mid-flight:
+                // the newest target wins (the old one's remainder is moot).
+                pending = (dx, dy, x, y, shift, ctrl, alt, targetId)
             }
             return
         }
@@ -193,6 +208,7 @@ public final class PrecisionScrollBridge {
         if shift { msg["shift"] = "1" }
         if ctrl { msg["ctrl"] = "1" }
         if alt { msg["alt"] = "1" }
+        if let targetId { msg["targetId"] = targetId }
         guard let device = socketDevice,
               let data = try? JSONSerialization.data(withJSONObject: msg) else { return }
         cdpInFlight = true
@@ -222,11 +238,14 @@ public final class PrecisionScrollBridge {
         }
         if let p = pending, cdpReady {
             pending = nil
-            sendCDP(dx: p.dx, dy: p.dy, x: p.x, y: p.y, shift: p.shift, ctrl: p.ctrl, alt: p.alt)
+            sendCDP(dx: p.dx, dy: p.dy, x: p.x, y: p.y, shift: p.shift, ctrl: p.ctrl, alt: p.alt,
+                    targetId: p.targetId)
         } else if !cdpReady, let p = pending {
-            // Agent gone mid-gesture: hand the remainder to uinput.
+            // Agent gone mid-gesture: hand the remainder to uinput (not in a
+            // shared-window session, whose guest has no single page to give
+            // it to).
             pending = nil
-            sendUinput(dx: p.dx, dy: p.dy)
+            if !targetScoped { sendUinput(dx: p.dx, dy: p.dy) }
         }
     }
 

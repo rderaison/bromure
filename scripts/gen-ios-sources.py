@@ -128,6 +128,7 @@ SHARED = [
     "P2P/DeviceChannel.swift",
     "P2P/DeviceIdentity.swift",
     "P2P/P2PBroker.swift",
+    "P2P/WSRelay.swift",
     "P2P/P2PCandidate.swift",
     "P2P/P2PEnroll.swift",
     "P2P/P2PEnrollmentCoordinator.swift",

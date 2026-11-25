@@ -1,0 +1,148 @@
+/* Terminals: the stage surface, the machine tab strip, the boot dive cue,
+ * the reconnect veil, the scratch drawer. Rooms live in room.css. */
+
+.term-stage { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--ac-canvas); }
+.term-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.term-surface { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; }
+.term-host { flex: 1; min-width: 0; min-height: 0; position: relative; }
+.term-host .xterm { height: 100%; }
+.term-host .xterm-viewport { background: transparent !important; }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { width: 8px !important; }
+.term-host .xterm .scrollbar .slider { border-radius: 4px; }
+
+.term-empty { align-items: center; justify-content: center; gap: 12px; }
+.term-empty-title { font-size: var(--fs-title3); font-weight: 600; }
+
+/* ── tab strip (RoomTab's look) ───────────────────────────────────────── */
+.term-tabs {
+  --tab-accent: var(--accent);
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 6px 12px;
+  overflow-x: auto; scrollbar-width: none;
+  background: color-mix(in srgb, var(--label) 2.5%, var(--ac-canvas));
+  border-bottom: 0.5px solid var(--separator);
+}
+.term-tabs::-webkit-scrollbar { display: none; }
+.term-tab {
+  position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 7px; height: 26px;
+  padding: 0 10px; border-radius: 8px; font-size: 12px; color: var(--label-secondary); max-width: 240px;
+}
+.term-tab:hover { background: var(--fill-tertiary); }
+.term-tab.selected { background: var(--control-bg); color: var(--label); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.10); }
+.term-tab.selected::after {
+  content: ''; position: absolute; left: 10px; right: 10px; bottom: -4px; height: 2px; border-radius: 1px; background: var(--tab-accent);
+}
+.term-tab-glyph { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; }
+.term-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.term-tab-close {
+  width: 16px; height: 16px; margin-right: -4px; border: 0; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; background: transparent; color: var(--label-secondary);
+  visibility: hidden;
+}
+.term-tab:hover .term-tab-close, .term-tab.selected .term-tab-close { visibility: visible; }
+.term-tab-close:hover { background: var(--fill); color: var(--label); }
+.term-tab-new {
+  flex-shrink: 0; width: 26px; height: 26px; border: 0; border-radius: 8px; background: transparent;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--label-secondary);
+}
+.term-tab-new:hover { background: var(--fill-tertiary); color: var(--label); }
+
+/* ── reconnect veil (iOS ReconnectVeil) ───────────────────────────────── */
+.term-veil {
+  position: absolute; inset: 0; display: flex; align-items: flex-end; justify-content: center;
+  background: rgba(0, 0, 0, 0.35); pointer-events: none; z-index: 3;
+}
+.term-veil-pill {
+  margin-bottom: 60px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 999px;
+  color: #fff; font-size: 12px; font-weight: 600;
+  background: rgba(40, 40, 40, 0.55); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+  animation: term-veil-pulse 0.9s ease-in-out infinite alternate;
+}
+.term-veil-pill .progress-spin { filter: invert(1) brightness(2); }
+@keyframes term-veil-pulse { from { transform: scale(0.97); opacity: 0.75; } to { transform: scale(1); opacity: 1; } }
+
+/* ── boot dive cue (BootAnimationView) ────────────────────────────────── */
+.term-boot { position: absolute; inset: 0; z-index: 4; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+.term-boot-glow {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at center, color-mix(in srgb, var(--boot-accent) 10%, transparent) 0, transparent 360px);
+}
+.term-boot-vignette { position: absolute; inset: 0; background: radial-gradient(circle at center, transparent 40px, rgba(0,0,0,0.7) 520px); }
+.term-boot-hud { position: relative; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+.term-boot-name {
+  font: 600 13px/16px var(--font-mono); letter-spacing: 4px; color: rgba(255, 255, 255, 0.9); margin-right: -4px;
+}
+.term-boot-track { position: relative; width: 220px; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--boot-accent) 15%, transparent); overflow: visible; }
+.term-boot-packet {
+  position: absolute; top: 0; left: 0; width: 60px; height: 3px; border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--boot-accent), #fff, var(--boot-accent), transparent);
+  animation: term-boot-sweep 1.963s ease-in-out infinite alternate;
+}
+@keyframes term-boot-sweep { from { transform: translateX(0); } to { transform: translateX(160px); } }
+.term-boot-fill { height: 3px; border-radius: 2px; background: var(--boot-accent); box-shadow: 0 0 4px color-mix(in srgb, var(--boot-accent) 70%, transparent); }
+.term-boot-status {
+  font: 500 10px/13px var(--font-mono); letter-spacing: 2px; white-space: nowrap;
+  color: color-mix(in srgb, var(--boot-accent) 85%, transparent);
+}
+.term-boot-scan {
+  position: absolute; left: 0; right: 0; top: -45px; height: 90px; pointer-events: none; mix-blend-mode: screen;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  animation: term-boot-scan 4s linear infinite;
+}
+@keyframes term-boot-scan { from { transform: translateY(0); } to { transform: translateY(var(--boot-h, 100vh)); } }
+
+/* ── scratch drawer (ScratchTerminalDrawer) ───────────────────────────── */
+.scratch {
+  --scratch-accent: #5C6BF2;
+  margin: 4px 12px 8px; border-radius: 14px; display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--ac-canvas) 82%, transparent);
+  backdrop-filter: blur(30px) saturate(1.6); -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--label) 9%, transparent), 0 4px 16px rgba(0, 0, 0, 0.14);
+  border: 0.5px solid color-mix(in srgb, var(--label) 9%, transparent);
+}
+.scratch-grab { height: 13px; display: flex; align-items: center; justify-content: center; cursor: ns-resize; }
+.scratch-grab span { width: 36px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--label) 16%, transparent); }
+.scratch-grab:hover span, .scratch-grab.dragging span { background: color-mix(in srgb, var(--label) 32%, transparent); }
+.scratch-header { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
+.scratch-icon {
+  width: 22px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--scratch-accent) 88%, #fff), var(--scratch-accent));
+}
+.scratch-title { font-size: 12.5px; font-weight: 600; }
+.scratch-folder {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 999px; min-width: 0; max-width: 50%;
+  color: var(--label-secondary); background: color-mix(in srgb, var(--label) 6%, transparent); font-size: 11px;
+}
+.scratch-folder .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.scratch-keycap {
+  font-size: 11px; font-weight: 500; color: var(--label-secondary); padding: 2px 6px; border-radius: 5px;
+  background: color-mix(in srgb, var(--label) 7%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 10%, transparent);
+}
+.scratch-btn {
+  width: 22px; height: 22px; border: 0; padding: 0; border-radius: 50%; background: transparent; color: var(--label-secondary);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.scratch-btn:hover { background: color-mix(in srgb, var(--label) 10%, transparent); color: var(--label); }
+.scratch-content {
+  margin: 0 8px 8px; border-radius: 9px; overflow: hidden; display: flex;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 8%, transparent);
+}
+
+/* ── Grid stage (GridStageView.swift) ─────────────────────────────────── */
+.grid-stage { position: absolute; inset: 0; background: #000; }
+.grid-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
+.grid-empty-title { font-size: 15px; font-weight: 600; color: rgba(255,255,255,0.55); }
+.grid-empty-sub { font-size: 12px; color: rgba(255,255,255,0.4); max-width: 380px; }
+.grid-cell { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--separator); background: #000; }
+.grid-cell.focused { box-shadow: 0 0 0 1px var(--accent); }
+.grid-cell-header { height: 24px; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: var(--window-bg); font-size: 11px; }
+.grid-cell-header.drop { background: color-mix(in srgb, var(--accent) 25%, var(--window-bg)); }
+.grid-cell-header .grid-handle, .grid-cell-header .grid-hbtn { display: none; }
+.grid-cell-header:hover .grid-handle { display: inline-grid; color: var(--label-tertiary); cursor: grab; width: 10px; }
+.grid-cell-header:hover .grid-hbtn { display: inline-grid; place-items: center; border: none; background: none; padding: 0; color: var(--label-secondary); }
+.grid-dot { width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--label-secondary) 40%, transparent); flex-shrink: 0; }
+.grid-ws { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grid-label { color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grid-cell-body { flex: 1; min-height: 0; position: relative; }
+.grid-cell-body > * { position: absolute; inset: 0; }
+.grid-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 11px; color: var(--label-secondary); background: var(--under-page); }

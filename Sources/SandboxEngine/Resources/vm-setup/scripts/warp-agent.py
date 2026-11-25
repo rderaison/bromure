@@ -116,6 +116,34 @@ def warp_svc_running():
     return rc == 0
 
 
+# warp-svc keeps its own logs and stats files in /var/lib/cloudflare-warp
+# (~2.3 MB an hour in total). Point them at /dev/null before it starts: it
+# writes through the links and keeps them. config-agent.py does the same on
+# its boot-time spawn.
+WARP_LIB = "/var/lib/cloudflare-warp"
+WARP_LOG_FILES = (
+    "cfwarp_service_log.txt",
+    "cfwarp_service_connection_stats.txt",
+    "cfwarp_service_network_health_stats.txt",
+    "cfwarp_route_change_log.txt",
+    "cfwarp_service_dns_stats.txt",
+    "cfwarp_service_dynamic_log.txt",
+    "cfwarp_daemon_dns.txt",
+)
+
+
+def link_warp_logs_to_devnull():
+    os.makedirs(WARP_LIB, exist_ok=True)
+    for name in WARP_LOG_FILES:
+        path = os.path.join(WARP_LIB, name)
+        try:
+            if os.path.lexists(path):
+                os.unlink(path)
+            os.symlink("/dev/null", path)
+        except OSError as e:
+            log(f"warp log link {name}: {e}")
+
+
 def dbus_running():
     """Check whether dbus-daemon is running (required by warp-svc)."""
     rc, _, _ = run("pgrep -x dbus-daemon", quiet=True)
@@ -209,13 +237,13 @@ def ensure_warp_svc():
     if not warp_svc_running():
         run("rm -f /run/cloudflare-warp/warp-svc.sock", quiet=True)
         log("starting warp-svc...")
-        svc_log_path = "/tmp/bromure/warp-svc.log"
-        svc_log = open(svc_log_path, "a")
+        link_warp_logs_to_devnull()
+        # warp-svc logs ~4 MB/hour to stdout; keep it off the disk.
         proc = subprocess.Popen(
             [WARP_SVC],
             env=WARP_ENV,
-            stdout=svc_log,
-            stderr=svc_log)
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
         log(f"warp-svc spawned (pid {proc.pid})")
 
         started = False
@@ -227,17 +255,9 @@ def ensure_warp_svc():
                 break
             ret = proc.poll()
             if ret is not None:
-                svc_log.close()
                 log(f"warp-svc exited immediately with code {ret}")
-                try:
-                    with open(svc_log_path) as f:
-                        tail = f.read()[-500:]
-                    log(f"warp-svc.log tail: {tail}")
-                except OSError:
-                    pass
                 return False, f"warp-svc exited with code {ret}"
 
-        svc_log.close()
         if not started:
             log("warp-svc did not appear after 9s")
             return False, "warp-svc failed to start (timeout)"
