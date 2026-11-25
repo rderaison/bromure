@@ -65,6 +65,7 @@ pipeline {
                         set -eu
                         set -- $ROLLOUT_TARGET
                         kubectl rollout restart "deploy/$2" -n "$1"
+                        kubectl rollout status "deploy/$2" -n "$1" --timeout=5m
                     '''
                 }
             }

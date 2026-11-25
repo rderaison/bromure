@@ -87,7 +87,7 @@ under `/client/` (SPA fallback to index.html, `/client/assets/` immutable,
 `ci/web/security-headers.conf`). The edge routes `path_beg /client` here and
 owns `Referrer-Policy: no-referrer`. Locally:
 ```bash
-docker build -t bwc -f ci/web/Dockerfile . && docker run --rm -p 8080:8080 bwc   # → http://localhost:8080/client/
+docker buildx build --load -t bwc -f ci/web/Dockerfile . && docker run --rm -p 8080:8080 bwc   # → http://localhost:8080/client/
 ```
 
 ## Linux packaging
