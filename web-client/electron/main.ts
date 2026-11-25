@@ -11,6 +11,7 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { setupTunnel, stopTunnel } from './tunnel';
+import { acceptedFlow, type AcceptedFlow } from './acceptedFlow';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -221,7 +222,13 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
   });
 });
 const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(id); return x && x.owner === e.sender.id ? x.s : undefined; };
-ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => { owned(e, id)?.write(data); });
+ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => {
+  const s = owned(e, id);
+  if (!s) return;
+  // An accepted loopback connection writes through its flow control.
+  const f = flowsAccepted.get(id);
+  if (f) f.write(data); else s.write(data);
+});
 ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { s.destroy(); sockets.delete(id); } });
 
 // ── Loopback listener (a model sign-in's OAuth callback) ───────────────────
@@ -241,13 +248,18 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
     if (wc.isDestroyed()) { s.destroy(); return; }
     const id = nextSock++;
     // Held paused (no 'data' listener yet) until the renderer has its stream.
+    // Flow-controlled both ways (acceptedFlow.ts): any local process can
+    // connect, so neither direction may buffer without bound.
     sockets.set(id, { s, owner: wc.id });
-    accepted.set(id, () => {
-      s.setNoDelay(true);
-      s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); });
+    const flow = acceptedFlow(s, ev => {
+      if (wc.isDestroyed()) return;
+      if (ev.kind === 'data') wc.send('tcp:event', id, 'data', ev.data);
+      else wc.send('tcp:event', id, ev.kind);
     });
+    flowsAccepted.set(id, flow);
+    accepted.set(id, () => { s.setNoDelay(true); flow.start(); });
     s.on('error', () => {});
-    s.on('close', () => { sockets.delete(id); accepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    s.on('close', () => { sockets.delete(id); accepted.delete(id); flowsAccepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
     wc.send('tcp:accept', lid, id);
   });
   await new Promise<void>((resolve, reject) => {
@@ -260,12 +272,15 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
   wc.once('destroyed', () => {
     srv.close(); listeners.delete(lid);
     // Its connections too: nothing is left to read them.
-    for (const [id, x] of sockets) if (x.owner === wc.id) { x.s.destroy(); sockets.delete(id); accepted.delete(id); }
+    for (const [id, x] of sockets) if (x.owner === wc.id) { x.s.destroy(); sockets.delete(id); accepted.delete(id); flowsAccepted.delete(id); }
   });
   return lid;
 });
 const accepted = new Map<number, () => void>();
+const flowsAccepted = new Map<number, AcceptedFlow>();
 ipcMain.on('tcp:resume', (e, id: number) => { if (owned(e, id)) { accepted.get(id)?.(); accepted.delete(id); } });
+// The renderer's channel took these bytes of an accepted connection.
+ipcMain.on('tcp:ack', (e, id: number, n: number) => { if (owned(e, id)) flowsAccepted.get(id)?.ack(+n); });
 ipcMain.on('tcp:unlisten', (e, lid: number) => {
   const l = listeners.get(lid);
   if (l && l.owner === e.sender.id) { l.srv.close(); listeners.delete(lid); }

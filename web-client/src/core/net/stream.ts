@@ -60,18 +60,25 @@ export interface ElectronNetBridge {
   tcpOpen(host: string, port: number): Promise<number>;
   tcpWrite(id: number, data: Uint8Array): void;
   tcpClose(id: number): void;
-  onTcpEvent(cb: (id: number, kind: 'data' | 'close' | 'error', data?: Uint8Array, message?: string) => void): void;
+  /** 'pause' / 'resume': an accepted connection's local side is full /
+   *  drained (stop / start feeding it). */
+  onTcpEvent(cb: (id: number, kind: 'data' | 'close' | 'error' | 'pause' | 'resume', data?: Uint8Array, message?: string) => void): void;
   /** Listen on 127.0.0.1:<port> (≥ 1024); connections arrive via onTcpAccept. */
   tcpListen?(port: number): Promise<number>;
   tcpUnlisten?(listenerID: number): void;
   /** Start delivering an accepted socket's data (once its stream is wired). */
   tcpResume?(socketID: number): void;
+  /** An accepted socket's data is consumed: main stops reading it with
+   *  ~1 MB unacked (see electron/acceptedFlow.ts). */
+  tcpAck?(socketID: number, bytes: number): void;
   onTcpAccept?(cb: (listenerID: number, socketID: number) => void): void;
 }
 
 export class ElectronTcpStream implements ByteStream {
   onData: (data: Uint8Array) => void = () => {};
   onClose: (err?: Error) => void = () => {};
+  /** An accepted connection's local side is full (true) or drained (false). */
+  onPause: (paused: boolean) => void = () => {};
   private static streams = new Map<number, ElectronTcpStream>();
   private static wired = false;
   private closed = false;
@@ -87,6 +94,9 @@ export class ElectronTcpStream implements ByteStream {
   }
   /** Begin delivering data once onData/onClose are set. */
   start(): void { this.bridge.tcpResume?.(this.id); }
+  /** An accepted connection: `n` bytes delivered by onData were consumed
+   *  (main reads on only while little is unacked). */
+  ack(n: number): void { if (!this.closed && n > 0) this.bridge.tcpAck?.(this.id, n); }
 
   private static wire(bridge: ElectronNetBridge) {
     if (!ElectronTcpStream.wired) {
@@ -95,6 +105,7 @@ export class ElectronTcpStream implements ByteStream {
         const s = ElectronTcpStream.streams.get(id);
         if (!s) return;
         if (kind === 'data' && data) s.onData(data);
+        else if (kind === 'pause' || kind === 'resume') s.onPause(kind === 'pause');
         else if (kind === 'close') s.finish();
         else if (kind === 'error') s.finish(new Error(message || 'connection error'));
       });

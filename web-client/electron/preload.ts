@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('bromureElectron', {
   tcpListen: (port: number) => ipcRenderer.invoke('tcp:listen', port),
   tcpUnlisten: (id: number) => ipcRenderer.send('tcp:unlisten', id),
   tcpResume: (id: number) => ipcRenderer.send('tcp:resume', id),
+  tcpAck: (id: number, n: number) => ipcRenderer.send('tcp:ack', id, n),
   onTcpAccept: (cb: any) => { acceptListeners.push(cb); },
   http: (url: string, init: any) => ipcRenderer.invoke('http', url, init),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
