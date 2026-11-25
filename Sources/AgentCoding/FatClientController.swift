@@ -3102,16 +3102,41 @@ final class RemoteHostController {
     }
     /// One request, answered on the main actor: (status, json); status nil
     /// when the server couldn't be reached. Refreshes the mirror after.
+    ///
+    /// `retryUnanswered`, for a request that's safe to send twice: one that
+    /// got no answer at all is sent once more. A pooled connection that died
+    /// while idle (the Mac slept, the network changed) is only found out by
+    /// the request that rides it, which fails at once; the pool then dials a
+    /// fresh one, so a resend gets through.
     func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 retryUnanswered: Bool = false,
                  completion: @escaping @MainActor (Int?, [String: Any]) -> Void) {
         let host = self.host
         pollQueue.async { [weak self] in
-            let resp = try? RemoteTransport.client(for: host).request(method, path, body: body)
+            let resp = Self.sendResendingUnanswered(retryUnanswered, label: "\(method) \(path)") {
+                try? RemoteTransport.client(for: host).request(method, path, body: body)
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { completion(resp?.status, resp?.json ?? [:]) }
                 self?.pollOnce()
             }
         }
+    }
+
+    /// How long a `retryUnanswered` request waits before its resend: the
+    /// pool sees the dead connection close first.
+    nonisolated static let unansweredRetryDelay: TimeInterval = 0.5
+
+    /// `send`, and once more if it got no answer (nil) and `resend` says
+    /// it's safe to send twice (tested).
+    nonisolated static func sendResendingUnanswered<T>(_ resend: Bool, label: String,
+                                                       delay: TimeInterval = unansweredRetryDelay,
+                                                       _ send: () -> T?) -> T? {
+        if let answer = send() { return answer }
+        guard resend else { return nil }
+        FatClientLog.log("request \(label): no answer, sending it once more")
+        Thread.sleep(forTimeInterval: delay)
+        return send()
     }
 
     func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
@@ -5326,8 +5351,10 @@ final class RemoteHostWindow: NSWindow {
                     fix: { id, confirmed, done in
                         // Wait for the host: it refuses a flag this mirror
                         // hasn't shown yet, and the hub then asks.
+                        // Safe to resend: a fix already started stays the one.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/fix",
-                                  body: confirmed ? ["confirmed": true] : [:]) { status, json in
+                                  body: confirmed ? ["confirmed": true] : [:],
+                                  retryUnanswered: true) { status, json in
                             done(.fromServer(status: status, json: json))
                         }
                     },
@@ -5345,8 +5372,11 @@ final class RemoteHostWindow: NSWindow {
                         // code review, as on the local window: the
                         // finding's row says it's in progress and opens
                         // the task.
+                        // Safe to resend: the finding's task is queued
+                        // for that session once, whatever the count.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
-                                  body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
+                                  body: ["session": sid.uuidString, "confirmed": confirmed],
+                                  retryUnanswered: true) { status, json in
                             done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",
                                 comment: "finding → session failure")))
