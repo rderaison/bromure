@@ -1,0 +1,307 @@
+// Bromure Agentic Coding E2E — fat client.
+//
+// The same suite as Jenkinsfile.e2e.ac (Tests/ac-e2e.mjs), run through the
+// rich client by Tests/ac-fatclient-e2e.mjs: the app turns on its own SSH
+// front door on 127.0.0.1:2222, mints a throwaway login
+// (POST /remote/test-login, BROMURE_DEBUG_CLAUDE only), and the client signs
+// in with it, enrolls its key and mirrors the app to itself. Every section
+// then rides that tunnel — HTTP/control socket via `__fatclient-proxy`, the
+// CLI via BROMURE_AC_REMOTE_HOST, AppleScript verbs via POST /scripting,
+// session start/stop + the settings editor via the mirror window.
+//
+// Every stage starts with the section-0 bring-up (front door, test login,
+// host-key pin, refused wrong password / owner name / unenrolled key, key
+// enrollment, tunnel, CLI, mirror) and ends with its teardown (remote prefs,
+// known_hosts pins, client key and hosts.json put back); a bring-up failure
+// fails that stage. It costs ~1 min a stage, so the no-VM sections share one.
+pipeline {
+    agent { label 'macosx-builder' }
+
+    triggers {
+        cron('H 7 * * *')  // daily ~7am, after the native AC e2e (5am) is done with the node
+    }
+
+    environment {
+        PATH                   = "/opt/homebrew/bin:${env.PATH}"
+        KEYCHAIN_PASSWORD      = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN         = "${HOME}/build.keychain"
+        BROMURE_DEBUG_CLAUDE   = '1'
+        BROMURE_AC_API_URL     = 'http://127.0.0.1:9223'
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DEVELOPER_ID', variable: 'CODESIGN_IDENTITY'),
+                    file(credentialsId: 'PROVISION_PROFILE_AC', variable: 'PROVISION_PROFILE')
+                ]) {
+                    sh '''
+                        # Without pipefail, `| tee` masks a failed build and the
+                        # pipeline limps on to a confusing empty .app_bundle_path.
+                        set -o pipefail
+                        rm -f bromure-ac.provisionprofile
+                        cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+
+                        # GhosttyKit at the pinned commit. This job never
+                        # provisioned vendor/, so the node's copy went stale
+                        # when tools/ghostty.commit moved (clipboard API
+                        # rework) and the build died on missing symbols.
+                        # Stamp-cached — a no-op when vendor/ is current.
+                        if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                            echo "Metal toolchain missing — installing"
+                            xcodebuild -downloadComponent MetalToolchain
+                        fi
+                        ./tools/build-ghostty.sh
+
+                        if ! ./build.sh bromure-ac 2>&1 | tee build.log; then
+                            # A swift-syntax bump (e.g. mlx-swift-lm 3.31.4) leaves
+                            # stale macro-plugin artifacts in this persistent
+                            # workspace; the compiler then dies with "failed to
+                            # receive result from plugin" (see Package.swift).
+                            # The documented fix is a clean build — retry once.
+                            if grep -q "failed to receive result from plugin" build.log; then
+                                echo "Stale macro-plugin artifacts detected; clean rebuild"
+                                rm -rf .build
+                                ./build.sh bromure-ac 2>&1 | tee build.log
+                            else
+                                exit 1
+                            fi
+                        fi
+                        grep "^App bundle:" build.log | sed 's/App bundle: //' > .app_bundle_path
+                    '''
+                }
+            }
+        }
+
+        // The inference engine is now in-process MLX-Swift: the app binary
+        // re-execs itself as `model _mlx-engine` and build.sh bundles
+        // mlx.metallib. There is no venv to provision, so the old
+        // "Reinstall MLX engine (clean)" stage (which asserted a now-gone
+        // $ENGINE/bin/vllm-mlx) was removed — the bundle IS the engine.
+
+        stage('Init Base Image') {
+            // Needed for sections 6 (Session control) and 8 (VM-side via /exec).
+            // Without it those sections gracefully skip but most of the test
+            // value is gone — fail the build hard rather than silently degrade.
+            steps {
+                sh '''
+                    APP_BUNDLE=$(cat .app_bundle_path)
+                    "$APP_BUNDLE/Contents/MacOS/bromure-ac" init
+                '''
+            }
+        }
+
+        stage('Start App') {
+            steps {
+                sh '''
+                    APP_BUNDLE=$(cat .app_bundle_path)
+                    # The automation server is opt-in (off by default) since
+                    # it exposes a loopback HTTP surface with no auth. Flip
+                    # it on for the CI run via UserDefaults before launch.
+                    defaults write io.bromure.agentic-coding automation.enabled -bool true
+                    # Log into the workspace: archiveArtifacts globs are
+                    # workspace-relative, so an absolute /tmp path never
+                    # matches. Clear the harness relaunch log too (it appends
+                    # across runs) so a stale copy can't get archived.
+                    rm -f bromure-ac.log bromure-ac-e2e.log /tmp/bromure-ac-e2e.log
+                    # A previous run of EITHER pipeline can leave an instance
+                    # behind (e.g. one the harness relaunched, whose pid we never
+                    # recorded) — bromure or bromure-ac holding a VZ VM / port
+                    # 9222/9223 and shadowing this build's app. Kill both.
+                    pkill -x bromure-ac 2>/dev/null || true
+                    pkill -x bromure 2>/dev/null || true
+                    sleep 2
+                    # BROMURE_TRANSCRIPT_HISTORY_BYTES shrinks the beautified
+                    # view's 24 MB history window so section 30.6 can exercise
+                    # "load earlier" on a small transcript (the harness's own
+                    # launcher sets the same value).
+                    BROMURE_DEBUG_CLAUDE=1 BROMURE_TRANSCRIPT_HISTORY_BYTES=20000 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > bromure-ac.log 2>&1 &
+                    echo $! > .bromure_ac_pid
+                    # Wait up to 60s for the HTTP automation server to come up.
+                    for i in $(seq 1 60); do
+                        curl -s http://127.0.0.1:9223/health > /dev/null 2>&1 && break
+                        sleep 2
+                    done
+                    curl -s http://127.0.0.1:9223/health || { echo "AC automation API never came up"; exit 1; }
+                '''
+            }
+        }
+
+        stage('Install Test Deps') {
+            steps {
+                sh '''
+                    # Tests/ac-e2e.mjs (which ac-fatclient-e2e.mjs wraps) uses only Node's standard library
+                    # (child_process, fetch), so socket npm ci is a no-op
+                    # against the existing Tests/package-lock.json. Run it
+                    # anyway so any future dep additions land deterministically.
+                    command -v socket > /dev/null 2>&1 || npm install -g @socketsecurity/cli
+                    cd Tests && socket npm ci
+                '''
+            }
+        }
+
+        stage('No-VM sections over the tunnel') {
+            // App state, profiles, editor (mirror window), HTTP API, settings,
+            // supply chain + prompt-injection plumbing, CLI, model, routing,
+            // remote access, auth modes, fusion, traces, naming. No VM.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^(1|2|3|4|5|7|9|11|12|13|14|16|17|19|20|21|22|23)\\."'
+                }
+            }
+        }
+
+        stage('6. Session control') {
+            // Boots VMs: needs the base image from Init; self-skips (SKIP) without it.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^6\\."'
+                }
+            }
+        }
+
+        stage('8. VM-side via /exec') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^8\\."'
+                }
+            }
+        }
+
+        stage('10. Supply Chain Security (VM-side)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^10\\."'
+                }
+            }
+        }
+
+        stage('15. CLI VM lifecycle') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^15\\."'
+                }
+            }
+        }
+
+        stage('24. Worktrees (VM-side)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^24\\."'
+                }
+            }
+        }
+
+        stage('25. Rich client (self-mirror)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^25\\."'
+                }
+            }
+        }
+
+        stage('26. Kanban boards') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^26\\."'
+                }
+            }
+        }
+
+        stage('27. Egress firewall (VM-side)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^27\\."'
+                }
+            }
+        }
+
+        stage('28. Browser VM (browser MCP / VM↔VM CDP)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^28\\."'
+                }
+            }
+        }
+
+        stage('29. Agent sessions (sessions-first home)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^29\\."'
+                }
+            }
+        }
+
+        stage('30. Beautified session view') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^30\\."'
+                }
+            }
+        }
+
+        stage('31. Inter-agent delegation + requests') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^31\\."'
+                }
+            }
+        }
+
+        stage('32. Launch race (two sessions at once)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^32\\."'
+                }
+            }
+        }
+
+        stage('33. Sign-in capture + OAuth callback relay (stress)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^33\\."'
+                }
+            }
+        }
+
+        stage('34. OpenShell sandbox (filesystem + strict)') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-fatclient-e2e.mjs --filter "^34\\."'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                if [ -f .bromure_ac_pid ]; then
+                    kill "$(cat .bromure_ac_pid)" 2>/dev/null || true
+                    rm -f .bromure_ac_pid
+                fi
+                # Also reap any instance the harness relaunched mid-run
+                # (its pid was never recorded in .bromure_ac_pid).
+                pkill -x bromure-ac 2>/dev/null || true
+                security default-keychain -s login.keychain-db || true
+                # If a stage's harness preflight relaunched a dead app, its
+                # output went to /tmp — pull it into the workspace so it's
+                # archived alongside the Start App log.
+                cp /tmp/bromure-ac-e2e.log bromure-ac-e2e.log 2>/dev/null || true
+                cp /tmp/bromure-ac-e2e-fatclient-proxy.log bromure-ac-e2e-fatclient-proxy.log 2>/dev/null || true
+            '''
+            archiveArtifacts artifacts: 'bromure-ac.log, bromure-ac-e2e.log, bromure-ac-e2e-fatclient-proxy.log', allowEmptyArchive: true
+        }
+    }
+}
