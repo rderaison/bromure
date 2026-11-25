@@ -10,6 +10,11 @@ fail() { echo "SMOKE FAILED: $*" >&2; exit 1; }
 
 [ -u /opt/bromure-client/chrome-sandbox ] || fail "chrome-sandbox isn't setuid"
 [ "$(readlink -f /usr/bin/bromure-client)" = /opt/bromure-client/bromure-client ] || fail "/usr/bin/bromure-client"
+# The network tunnel: its program runs here (the helper needs systemd and a
+# TUN: not in this container), its units are installed.
+v=$(/opt/bromure-client/resources/bromure-client-tunnel version) || fail "the tunnel program doesn't run"
+echo "tunnel program: $v"
+[ -f /usr/lib/systemd/system/bromure-client-tunnel.socket ] && [ -f '/usr/lib/systemd/system/bromure-client-tunnel@.service' ] || fail "tunnel units missing"
 h=$(xdg-mime query default x-scheme-handler/bromure-client || true)
 [ "$h" = io.bromure.client.desktop ] || fail "bromure-client:// handler is '$h'"
 echo "scheme handler: $h"

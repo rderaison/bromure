@@ -31,6 +31,8 @@ const DEPENDS = [
   'libexpat1', 'libgbm1', 'libglib2.0-0t64 | libglib2.0-0', 'libgtk-3-0t64 | libgtk-3-0', 'libnspr4', 'libnss3',
   'libpango-1.0-0', 'libx11-6', 'libxcb1', 'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3',
   'libxkbcommon0', 'libxrandr2', 'xdg-utils',
+  // The network tunnel's helper (ip, tc).
+  'iproute2',
 ].join(', ');
 
 const pkgJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -66,6 +68,11 @@ profile ${PKG} ${PREFIX}/${PKG} flags=(unconfined) {
 }
 `;
 
+// The network tunnel (web-client/tunnel): its program in resources/, its
+// root helper started per connection by a systemd socket.
+const TUNNEL_BIN = `${PREFIX}/resources/bromure-client-tunnel`;
+const SYSTEMD = '/usr/lib/systemd/system';
+
 const POSTINST = `#!/bin/sh
 set -e
 # Setuid sandbox helper: the fallback when user namespaces are unavailable.
@@ -79,6 +86,20 @@ if [ -f /etc/apparmor.d/abi/4.0 ] && command -v apparmor_parser >/dev/null 2>&1;
 fi
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+# The network tunnel's helper socket (not in containers without systemd).
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  systemctl enable --now bromure-client-tunnel.socket || true
+fi
+exit 0
+`;
+// Removal (not upgrade): stop the helper socket and any tunnel it holds.
+const PRERM = `#!/bin/sh
+set -e
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+  systemctl disable --now bromure-client-tunnel.socket || true
+  systemctl stop 'bromure-client-tunnel@*.service' || true
+fi
 exit 0
 `;
 const POSTRM = `#!/bin/sh
@@ -90,9 +111,31 @@ if [ "$1" = remove ] || [ "$1" = purge ]; then
   fi
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
   command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+  [ -d /run/systemd/system ] && systemctl daemon-reload || true
 fi
 exit 0
 `;
+
+/** The tunnel program for `arch`: prebuilt in BROMURE_TUNNEL_PREBUILT/<goarch>/
+ *  (the CI image's Go stage), else built here (Go toolchain, stdlib only). */
+function tunnelBinaryFor(arch) {
+  const goarch = { x64: 'amd64', arm64: 'arm64' }[arch];
+  if (!goarch) throw new Error(`no tunnel build for ${arch}`);
+  const pre = process.env.BROMURE_TUNNEL_PREBUILT;
+  if (pre) {
+    const f = path.join(pre, goarch, 'bromure-client-tunnel');
+    if (!fs.existsSync(f)) throw new Error(`BROMURE_TUNNEL_PREBUILT: no ${f}`);
+    return f;
+  }
+  const outFile = path.resolve('out', `.tunnel-${goarch}`, 'bromure-client-tunnel');
+  try {
+    execFileSync('go', ['build', '-trimpath', '-ldflags', `-s -w -X main.version=${VERSION}`, '-o', outFile, '.'],
+      { cwd: 'tunnel', stdio: 'inherit', env: { ...process.env, CGO_ENABLED: '0', GOOS: 'linux', GOARCH: goarch } });
+  } catch (e) {
+    throw new Error(`building the tunnel program (web-client/tunnel) needs Go on PATH: ${e.message}`);
+  }
+  return outFile;
+}
 
 const README = `Bromure Client for Linux
 ========================
@@ -112,6 +155,12 @@ namespace Chromium's sandbox needs. Make the sandbox helper setuid root once:
 
 (or install the .deb). Running with --no-sandbox also works but turns off the
 renderer sandbox; don't make it a habit.
+
+Network tunnel
+--------------
+The toolbar's tunnel toggle (direct access to the remote's VMs from any
+local program) needs the system helper the .deb installs; in this tarball
+it stays disabled.
 
 Wayland / X11
 -------------
@@ -155,6 +204,8 @@ function normalizeModes(dir) {
 
 export function packageLinux(appDir, arch) {
   const out = path.dirname(appDir);
+  fs.copyFileSync(tunnelBinaryFor(arch), path.join(appDir, 'resources', 'bromure-client-tunnel'));
+  fs.chmodSync(path.join(appDir, 'resources', 'bromure-client-tunnel'), 0o755);
   normalizeModes(appDir);
   fs.writeFileSync(path.join(appDir, 'resources', 'apparmor-profile'), APPARMOR);
 
@@ -185,6 +236,11 @@ export function packageLinux(appDir, arch) {
   const icons = path.join(data, 'usr/share/icons/hicolor/512x512/apps');
   fs.mkdirSync(icons, { recursive: true });
   fs.copyFileSync('build/icon.png', path.join(icons, `${ID}.png`));
+  fs.mkdirSync(path.join(data, SYSTEMD.slice(1)), { recursive: true });
+  for (const unit of ['bromure-client-tunnel.socket', 'bromure-client-tunnel@.service']) {
+    const text = fs.readFileSync(path.join('tunnel', 'systemd', unit), 'utf8').replaceAll('@BIN@', TUNNEL_BIN);
+    fs.writeFileSync(path.join(data, SYSTEMD.slice(1), unit), text);
+  }
   fs.mkdirSync(path.join(data, `usr/share/doc/${PKG}`), { recursive: true });
   fs.copyFileSync(path.join(appDir, 'LICENSE'), path.join(data, `usr/share/doc/${PKG}/copyright`));
   normalizeModes(path.join(data, 'usr'));
@@ -200,10 +256,11 @@ export function packageLinux(appDir, arch) {
     ' Mirror a remote Bromure Agentic Coding server — its workspaces, sessions,',
     ' terminals and automations — over SSH, directly or through bromure.io.', ''].join('\n'));
   fs.writeFileSync(path.join(ctl, 'postinst'), POSTINST, { mode: 0o755 });
+  fs.writeFileSync(path.join(ctl, 'prerm'), PRERM, { mode: 0o755 });
   fs.writeFileSync(path.join(ctl, 'postrm'), POSTRM, { mode: 0o755 });
-  fs.chmodSync(path.join(ctl, 'postinst'), 0o755); fs.chmodSync(path.join(ctl, 'postrm'), 0o755);
+  for (const f of ['postinst', 'prerm', 'postrm']) fs.chmodSync(path.join(ctl, f), 0o755);
 
-  tarGz(path.join(stage, 'control.tar.gz'), ctl, ['./control', './postinst', './postrm'], { root: true });
+  tarGz(path.join(stage, 'control.tar.gz'), ctl, ['./control', './postinst', './prerm', './postrm'], { root: true });
   tarGz(path.join(stage, 'data.tar.gz'), data, ['./opt', './usr'], { root: true });
   const deb = path.join(out, `${PKG}_${VERSION}_${debArch}.deb`);
   writeAr(deb, [
