@@ -24,8 +24,11 @@ RES=$(node scripts/shot.mjs "$OUT" --web --url http://127.0.0.1:5190/client/inde
   sessionStorage.setItem('bromure.enroll.state', JSON.stringify({state:'S2', api:'http://127.0.0.1:5190/api'}));
   await A.complete('#enroll?code=TESTCODE&state=S2');
   console.error('E2E enrolled=' + !!A.get().record);
-  console.error('E2E token-not-readable=' + (A.get().record?.deviceToken === '' && !document.cookie.includes('bromure_device=')));
+  console.error('E2E token-not-readable=' + (A.get().record?.deviceToken === '' && !document.cookie.includes('bromure_device')));
   await new Promise(r => setTimeout(r, 3000));
+  // As after a reload: the CSRF token is gone from memory and the Path=/api
+  // cookie can't be read — the dial's POST must re-learn it (heartbeat) first.
+  window.__bromure.forgetCsrf();
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   // The server menu's items, clicked as a user would (menus act on mouseup).
   const pick = async label => {
@@ -47,5 +50,6 @@ echo "$RES" | grep -o 'E2E [a-z-]*=[a-z]*'
 grep -q 'relay paired' "$LOG" && echo "E2E relay-paired=true" || echo "E2E relay-paired=false"
 grep -q 'cookie delivery' "$LOG" && echo "E2E cookie-delivery=true" || echo "E2E cookie-delivery=false"
 grep -q 'CSRF rejected' "$LOG" && echo "E2E csrf-ok=false" || echo "E2E csrf-ok=true"
+grep -q 'csrf fetched' "$LOG" && echo "E2E csrf-refetched=true" || echo "E2E csrf-refetched=false"
 echo "$RES" | grep -q 'mirrored=true' && grep -q 'menu-connect-another=true' <<<"$RES" && grep -q 'menu-disconnect=true' <<<"$RES" && grep -q 'refused=true' <<<"$RES" && grep -q 'token-not-readable=true' <<<"$RES" \
-  && grep -q 'relay paired' "$LOG" && grep -q 'cookie delivery' "$LOG" && ! grep -q 'CSRF rejected' "$LOG"
+  && grep -q 'relay paired' "$LOG" && grep -q 'cookie delivery' "$LOG" && grep -q 'csrf fetched' "$LOG" && ! grep -q 'CSRF rejected' "$LOG"

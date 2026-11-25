@@ -48,13 +48,25 @@ export function normalizeApiBase(raw: string): string {
 export class ControlPlane {
   constructor(readonly apiBase: string, private http: HttpFn = defaultHttp) {}
 
-  private async call<T>(method: string, path: string, body?: unknown, bearer?: string): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, bearer?: string, retried = false): Promise<T> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (bearer) headers.Authorization = `Bearer ${bearer}`;
     // Cookie identity (hosted): the cookie rides by itself; mutating calls
-    // carry the CSRF token (double-submit: also the readable csrf cookie).
-    else if (method !== 'GET') { const t = csrfToken(); if (t) headers['X-CSRF-Token'] = t; }
+    // carry the CSRF token. When it isn't known (after a reload: the csrf
+    // cookie is Path=/api, unreadable from /client), GET /v1/devices/csrf
+    // fetches it first.
+    const csrfGuarded = !bearer && method !== 'GET';
+    if (bearer) headers.Authorization = `Bearer ${bearer}`;
+    else if (csrfGuarded) {
+      if (!csrfToken()) await this.refreshCsrf();
+      const t = csrfToken(); if (t) headers['X-CSRF-Token'] = t;
+    }
     const r = await this.http(this.apiBase + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (r.status === 403 && csrfGuarded && !retried) {
+      // A stale token (rotated server-side): learn the current one, retry once.
+      setCsrfToken(null);
+      await this.refreshCsrf();
+      if (csrfToken()) return this.call<T>(method, path, body, bearer, true);
+    }
     if (r.status === 401) throw Object.assign(new Error('Signed out of bromure.io'), { status: 401 });
     if (r.status < 200 || r.status >= 300) throw Object.assign(new Error(r.json?.error ?? r.json?.message ?? `HTTP ${r.status}`), { status: r.status });
     return r.json as T;
@@ -95,9 +107,23 @@ export class ControlPlane {
   removeSSHKey(bearer: string) { return this.call('DELETE', '/v1/devices/ssh-key', undefined, bearer); }
   selfRevoke(bearer: string) { return this.call('POST', '/v1/devices/self-revoke', {}, bearer); }
   /** Cookie identity: extends the 24h sliding idle TTL (send while visible). */
-  heartbeat() { return this.call('POST', '/v1/devices/heartbeat', {}); }
+  /** Cookie identity: (re)learn the CSRF token (a safe GET, no token needed). */
+  async refreshCsrf() {
+    const r = await this.call<{ csrfToken?: string }>('GET', '/v1/devices/csrf').catch(() => undefined);
+    if (r?.csrfToken) setCsrfToken(r.csrfToken);
+  }
+  /** …and echoes the current CSRF token: kept in memory only. */
+  async heartbeat() {
+    const r = await this.call<{ ok?: boolean; csrfToken?: string } | undefined>('POST', '/v1/devices/heartbeat', {});
+    if (r?.csrfToken) setCsrfToken(r.csrfToken);
+    return r;
+  }
   /** Cookie identity: revoke the device and clear its cookies. */
-  webLogout() { return this.call('POST', '/v1/devices/web/logout', {}); }
+  async webLogout() {
+    const r = await this.call('POST', '/v1/devices/web/logout', {});
+    setCsrfToken(null);
+    return r;
+  }
 
   wsBase() { return this.apiBase.replace(/^http/, 'ws'); }
 
@@ -120,8 +146,11 @@ export class ControlPlane {
 }
 
 // ── CSRF token (cookie identity) ─────────────────────────────────────────
-// Kept in memory after enrollment; after a reload it's read back from the
-// readable `bromure_device_csrf` cookie (double-submit pattern).
+// Memory only: from the enrollment response, GET /v1/devices/csrf (after a
+// reload) and every heartbeat response — the device cookies are Path=/api, so
+// a /client page can't read them. The cookie read below only serves a server
+// that still sets the csrf cookie at Path=/ (no /csrf endpoint) — drop it
+// once bromure.io runs the Path=/api cookies everywhere.
 let csrfMem: string | null = null;
 export function setCsrfToken(t: string | undefined | null) { csrfMem = t ?? null; }
 export function csrfToken(): string | null {

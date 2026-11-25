@@ -11,7 +11,7 @@
 // so the user's servers authorize it without a password.
 
 import {
-  ControlPlane, normalizeApiBase, loadDeviceRecord, saveDeviceRecord, clearDeviceRecord,
+  ControlPlane, normalizeApiBase, loadDeviceRecord, saveDeviceRecord, clearDeviceRecord, setCsrfToken,
   type DeviceInfo, type DeviceRecord,
 } from '../../core/cloud/controlPlane';
 import { idbGet, idbPut, idbDelete } from '../../core/ssh/keys';
@@ -241,6 +241,7 @@ if (typeof window !== 'undefined') {
   setInterval(beat, 5 * 60 * 1000);
   // Dev/test runs only (a dev relay is configured): drive sign-in from scripts.
   if (new URLSearchParams(location.search).has('devRelay') || import.meta.env?.DEV) {
-    (window as any).__bromure = { ...(window as any).__bromure, account };
+    // forgetCsrf: what a reload does to the in-memory CSRF token.
+    (window as any).__bromure = { ...(window as any).__bromure, account, forgetCsrf: () => setCsrfToken(null) };
   }
 }

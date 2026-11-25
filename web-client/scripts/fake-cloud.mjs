@@ -87,23 +87,32 @@ const server = http.createServer((req, res) => {
       if (j.delivery === 'cookie') {
         const csrfToken = crypto.randomBytes(16).toString('hex');
         csrfOf.set(deviceToken, csrfToken);
-        res.setHeader('Set-Cookie', [`bromure_device=${deviceToken}; HttpOnly; SameSite=Strict; Path=/`, `bromure_device_csrf=${csrfToken}; SameSite=Strict; Path=/`]);
+        res.setHeader('Set-Cookie', [`bromure_device=${deviceToken}; HttpOnly; SameSite=Strict; Path=/api`, `bromure_device_csrf=${csrfToken}; SameSite=Strict; Path=/api`]);
         return json(res, 201, { deviceId, capability: 'client', orgKind: 'individual', userId: 'u1', orgSlug: 'personal', delivery: 'cookie', csrfToken });
       }
       return json(res, 201, { deviceId, deviceToken, capability: 'client', orgKind: 'individual', userId: 'u1', orgSlug: 'personal' });
     }
     const dev = authed(req);
     if (!dev) return json(res, 401, { error: 'unauthorized' });
+    // A /client page can't read the Path=/api csrf cookie: after a reload it
+    // fetches the token here (a safe GET; cookie sessions only).
+    if (req.method === 'GET' && url.pathname === '/v1/devices/csrf') {
+      if (req.headers.authorization) return json(res, 400, { error: 'cookie sessions only' });
+      log('csrf fetched'); return json(res, 200, { csrfToken: csrfOf.get(bearer(req)) });
+    }
     // Cookie-authed mutations need the CSRF header (double-submit).
     const viaCookie = !req.headers.authorization;
     if (viaCookie && req.method !== 'GET' && req.headers['x-csrf-token'] !== csrfOf.get(bearer(req))) {
       log('CSRF rejected', req.method, url.pathname);
       return json(res, 403, { error: 'csrf' });
     }
-    if (req.method === 'POST' && url.pathname === '/v1/devices/heartbeat') { log('heartbeat'); return json(res, 200, { ok: true }); }
+    if (req.method === 'POST' && url.pathname === '/v1/devices/heartbeat') {
+      log('heartbeat');
+      return json(res, 200, { ok: true, csrfToken: req.headers.authorization ? undefined : csrfOf.get(bearer(req)) });
+    }
     if (req.method === 'POST' && url.pathname === '/v1/devices/web/logout') {
       tokens.delete(bearer(req));
-      res.setHeader('Set-Cookie', ['bromure_device=; Max-Age=0; Path=/', 'bromure_device_csrf=; Max-Age=0; Path=/']);
+      res.setHeader('Set-Cookie', ['bromure_device=; Max-Age=0; Path=/api', 'bromure_device_csrf=; Max-Age=0; Path=/api']);
       log('web logout'); return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/v1/devices') return json(res, 200, { devices: [SERVER, { id: dev, name: 'This device', capability: 'client' }] });
