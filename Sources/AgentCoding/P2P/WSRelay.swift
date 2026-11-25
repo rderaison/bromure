@@ -1,6 +1,11 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 // MARK: - ws-relay listener (browser / web-client dialers)
@@ -170,13 +175,9 @@ final class WSRelayListener: NSObject, URLSessionWebSocketDelegate, @unchecked S
         let s = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard s >= 0 else { return nil }
         var one: Int32 = 1
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
-        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(port).bigEndian)
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        setsockopt(s, Int32(IPPROTO_TCP), TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
+        noSigPipe(s)
+        var addr = loopbackAddress(port: port)
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -186,7 +187,35 @@ final class WSRelayListener: NSObject, URLSessionWebSocketDelegate, @unchecked S
         return s
     }
 
+    /// A write to this socket once its peer is gone fails instead of raising
+    /// SIGPIPE. Darwin sets that per socket; Linux has no such option, and its
+    /// daemon ignores SIGPIPE for the whole process.
+    private static func noSigPipe(_ s: Int32) {
+        #if canImport(Darwin)
+        var one: Int32 = 1
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        #endif
+    }
+
+    /// 127.0.0.1:`port`. (Darwin's sockaddr carries its own length; Linux's
+    /// has no such field.)
+    private static func loopbackAddress(port: Int) -> sockaddr_in {
+        var addr = sockaddr_in()
+        #if canImport(Darwin)
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        return addr
+    }
+
     // URLSessionWebSocketDelegate
+    /// Nothing to do once the relay accepts the join: both pumps already run.
+    /// (Here because Linux's Foundation requires every delegate method.)
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didOpenWithProtocol protocol: String?) {}
+
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         finish()
