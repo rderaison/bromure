@@ -40,3 +40,27 @@ export async function writeStreamChunked(
     reader.releaseLock();
   }
 }
+
+/** A guest file-service call (`POST /vms/<id>/file`). */
+export type GuestFileOp = (op: Record<string, unknown>, timeoutSec?: number) => Promise<unknown>;
+
+/** Copy `stream` into the guest file `path` (writeStreamChunked). If the copy
+ *  fails part-way — the source became unreadable, a write was refused — the
+ *  partial file it created is removed before the error propagates: a dropped
+ *  folder's half-written /tmp archive or a truncated file never stays behind.
+ *  A copy that failed before its first write touched nothing, so nothing is
+ *  removed (a file already there stays). */
+export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
+                                     fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                                     progress?: (sent: number) => void): Promise<number> {
+  let created = false;
+  try {
+    return await writeStreamChunked(stream, chunk, async (bytes, append) => {
+      await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
+      created = true;
+    }, progress);
+  } catch (e) {
+    if (created) await fileOp({ op: 'remove', path }).catch(() => {});
+    throw e;
+  }
+}

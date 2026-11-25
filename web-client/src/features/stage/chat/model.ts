@@ -24,7 +24,7 @@ import {
 } from '../transcript/guestCommands';
 import { builtInCommands, discoveryCommand, parseDiscovery, type SlashCommand } from './slash';
 import { toolDisplayName } from '../sessionState';
-import { writeStreamChunked } from '../../../core/remote/chunkedWrite';
+import { writeGuestFile } from '../../../core/remote/chunkedWrite';
 
 export interface HeldMessage {
   id: string; text: string; failure?: string; awaitingAnswer?: boolean; sending?: boolean;
@@ -382,8 +382,8 @@ export class ChatModel {
       const path = `${DROP_DIR}/${n}_${dropSafeName(stamp + '_' + f.name)}`;
       let ok = true;
       try {
-        await writeStreamChunked(f.stream(), 6 * 1024 * 1024,
-          (bytes, append) => this.host.guestFileOp(this.workspaceID, { op: 'write', path, data: b64(bytes), append }, 60));
+        await writeGuestFile(f.stream(), path, 6 * 1024 * 1024,
+          (op, t) => this.host.guestFileOp(this.workspaceID, op, t), b64);
       } catch { ok = false; }
       if (ok) {
         paths.push(path);

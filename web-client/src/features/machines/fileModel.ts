@@ -8,7 +8,7 @@ import type { RemoteHost } from '../../core/remote/host';
 import { saveFile } from '../../platform';
 import { RepoGitPrograms, shellQuote as q, b64ToBytes, bytesToB64, decodeUTF8, joinPath, safeRelativePath, dirname, lastPathComponent, fileBytes } from './util';
 import { tarGzStream, type TarEntry } from './tar';
-import { writeStreamChunked } from '../../core/remote/chunkedWrite';
+import { writeGuestFile } from '../../core/remote/chunkedWrite';
 
 export type GitStatus = 'modified' | 'added' | 'untracked' | 'deleted' | 'renamed' | 'conflicted';
 export const STATUS_TINT: Record<GitStatus, string> = {
@@ -346,9 +346,10 @@ export class FileExplorerModel {
   }
 
   /** Stream into a guest file, one CHUNK in memory at a time. */
+  /** Stream into a guest file, one CHUNK in memory at a time; a copy that
+   *  fails part-way leaves no partial file (writeGuestFile). */
   private async writeStream(stream: ReadableStream<Uint8Array>, guestPath: string, label: string) {
-    await writeStreamChunked(stream, CHUNK,
-      (bytes, append) => this.fileOp({ op: 'write', path: guestPath, data: bytesToB64(bytes), append }, 60),
+    await writeGuestFile(stream, guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
       sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
   }
   private async uploadFile(file: File, guestPath: string, label: string) {
