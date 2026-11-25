@@ -545,22 +545,34 @@ func (w *window) setSizeLocked(cols, rows int) {
 }
 
 // recomputeSize applies tmux 3.4's window-size "latest": the non-passive
-// client with the latest activity sizes the window. Passive clients never
-// do; with none, the window keeps its size.
+// client with the latest activity sizes the window. A passive client
+// (ignore-size) doesn't — unless every client is passive: tmux then ignores
+// the flag (resize.c, ignore_client_size) and so does this, or a window
+// shown only by fat-client views, which all attach passive, would never
+// take any of their sizes. With no client, the window keeps its size.
 func (w *window) recomputeSize() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.manual {
 		return
 	}
-	var best *client
+	var best, bestPassive *client
 	for _, c := range w.clients {
+		if c.cols <= 0 || c.rows <= 0 {
+			continue
+		}
 		if c.passive {
+			if bestPassive == nil || !c.activity.Before(bestPassive.activity) {
+				bestPassive = c
+			}
 			continue
 		}
 		if best == nil || !c.activity.Before(best.activity) {
 			best = c
 		}
+	}
+	if best == nil {
+		best = bestPassive
 	}
 	if best != nil {
 		w.setSizeLocked(best.cols, best.rows)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/rderaison/bromure/sidecar/internal/logx"
@@ -178,13 +179,36 @@ func attachWindow(body map[string]any, cols, rows int, connect func() (panes.Cli
 		}
 	}
 	passive, _ := body["sizePassive"].(bool)
-	a, err := c.Attach(idx, cols, rows, passive)
+	// The client stands for its grouped session: the app finds it with
+	// `list-clients -t view-<name>` to grant it the window's size. Attached
+	// nameless, no view was ever found and none could size its window.
+	view, _ := body["view"].(string)
+	a, err := c.AttachWith(panes.AttachRequest{Index: idx, Cols: cols, Rows: rows,
+		Passive: passive, Session: viewSession(view)})
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
 	logx.Printf("exec: terminal attached to window %d (passive=%v)", idx, passive)
 	return &attachTerm{a: a, c: c}, nil
+}
+
+// viewSession is the grouped session of a view ("view-<name>", the name cut
+// down as bromure-agentd's _view_attach_command does), or "" without one.
+func viewSession(view string) string {
+	var b strings.Builder
+	for _, r := range view {
+		if b.Len() >= 32 {
+			break
+		}
+		if r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "view-" + b.String()
 }
 
 type attachTerm struct {
