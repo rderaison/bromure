@@ -21,11 +21,14 @@ const PKG = 'bromure-client';
 const PREFIX = `/opt/${PKG}`;
 const DEB_ARCH = { x64: 'amd64', arm64: 'arm64', armv7l: 'armhf' };
 // Runtime libraries of Electron's Chromium (as Chrome's/VS Code's .deb list
-// them); "a | a-t64" covers Debian 12 / Ubuntu 22.04 and Ubuntu 24.04+.
+// them); "a-t64 | a" covers Ubuntu 24.04+ and Debian 12 / Ubuntu 22.04. The
+// t64 name goes FIRST: on 24.04 the old name is only virtual, and apt would
+// satisfy "libasound2" with liboss4-salsa-asound2 (an OSS shim missing ALSA
+// symbols — the app dies on snd_device_name_get_hint).
 const DEPENDS = [
-  'libasound2 | libasound2t64', 'libatk-bridge2.0-0 | libatk-bridge2.0-0t64', 'libatk1.0-0 | libatk1.0-0t64',
-  'libatspi2.0-0 | libatspi2.0-0t64', 'libc6', 'libcairo2', 'libcups2 | libcups2t64', 'libdbus-1-3', 'libdrm2',
-  'libexpat1', 'libgbm1', 'libglib2.0-0 | libglib2.0-0t64', 'libgtk-3-0 | libgtk-3-0t64', 'libnspr4', 'libnss3',
+  'libasound2t64 | libasound2', 'libatk-bridge2.0-0t64 | libatk-bridge2.0-0', 'libatk1.0-0t64 | libatk1.0-0',
+  'libatspi2.0-0t64 | libatspi2.0-0', 'libc6', 'libcairo2', 'libcups2t64 | libcups2', 'libdbus-1-3', 'libdrm2',
+  'libexpat1', 'libgbm1', 'libglib2.0-0t64 | libglib2.0-0', 'libgtk-3-0t64 | libgtk-3-0', 'libnspr4', 'libnss3',
   'libpango-1.0-0', 'libx11-6', 'libxcb1', 'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3',
   'libxkbcommon0', 'libxrandr2', 'xdg-utils',
 ].join(', ');
