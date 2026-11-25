@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /*
- * apt-publish.mjs — publish bromure-ac .deb packages to the APT repository
+ * apt-publish.mjs — publish Bromure .deb packages (bromure-ac, bromure-client, …) to the APT repository
  * served from DigitalOcean Spaces (https://dl.bromure.io/apt), and check it.
  *
  * The repository is static files, in the layout apt expects:
  *
  *   apt/bromure-archive-keyring.gpg          the signing key (binary, for signed-by)
  *   apt/bromure-archive-keyring.asc          the same, armored
- *   apt/pool/main/b/bromure-ac/bromure-ac_<version>_<arch>.deb
+ *   apt/pool/main/b/<package>/<package>_<version>_<arch>.deb
  *   apt/dists/<suite>/InRelease              Release, clearsigned
  *   apt/dists/<suite>/Release                + Release.gpg (detached)
  *   apt/dists/<suite>/main/binary-<arch>/Packages, Packages.gz
@@ -29,9 +29,13 @@
  *
  * Needs dpkg-deb and gpg (and apt-get for --verify).
  *
- * Usage:
- *   node tools/apt-publish.mjs publish --suite stable|beta [--dry-run] [--local DIR] [--out DIR] <deb>...
- *   node tools/apt-publish.mjs verify  --url https://dl.bromure.io/apt --suite stable \
+ * Several packages share the repository: a publish rewrites the suite's
+ * indexes from what the bucket has (every package) plus this run's debs, so
+ * two publishes to the same suite must not run at the same time.
+ *
+ * Usage (--package defaults to bromure-ac):
+ *   node tools/apt-publish.mjs publish --suite stable|beta [--package NAME] [--dry-run] [--local DIR] [--out DIR] <deb>...
+ *   node tools/apt-publish.mjs verify  --url https://dl.bromure.io/apt --suite stable [--package NAME] \
  *        [--expect <version> [--arches amd64,arm64]] [--keyring FILE]
  *
  * Env for publish:
@@ -54,7 +58,6 @@ import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 
 const PREFIX = "apt";
-const PACKAGE = "bromure-ac";
 const COMPONENT = "main";
 const ARCHES = ["amd64", "arm64"];
 const SUITES = ["stable", "beta"];
@@ -72,6 +75,7 @@ const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     suite: { type: "string" },
+    package: { type: "string", default: "bromure-ac" },
     "dry-run": { type: "boolean", default: false },
     local: { type: "string" },
     out: { type: "string" },
@@ -83,6 +87,9 @@ const { values: opts, positionals } = parseArgs({
 });
 if (!SUITES.includes(opts.suite)) die(`--suite must be one of ${SUITES.join(", ")}`);
 const SUITE = opts.suite;
+// The one package this run publishes or verifies.
+const PACKAGE = opts.package;
+if (!/^[a-z0-9][a-z0-9.+-]+$/.test(PACKAGE)) die(`bad --package ${PACKAGE}`);
 const OTHER_SUITES = SUITES.filter((s) => s !== SUITE);
 
 // ---------------------------------------------------------------------------
@@ -197,7 +204,7 @@ function releaseFile(suite, files) {
     `Architectures: ${ARCHES.join(" ")}`,
     `Components: ${COMPONENT}`,
     "Acquire-By-Hash: yes",
-    `Description: Bromure Agentic Coding for Linux servers (${suite})`,
+    `Description: Bromure for Linux (${suite})`,
   ];
   for (const [title, fn] of [["MD5Sum", md5], ["SHA1", sha1], ["SHA256", sha256]]) {
     lines.push(`${title}:`);
@@ -321,7 +328,7 @@ async function publish() {
     const id = `${pkg} ${version} ${arch}`;
     const mine = index[`${SUITE}/${arch}`];
     if (mine.some((s) => idOf(s) === id)) {
-      die(`${pkg} ${version} (${arch}) is already in ${SUITE}: bump LinuxAppVersion.short for a new release`);
+      die(`${pkg} ${version} (${arch}) is already in ${SUITE}: bump the package version for a new release`);
     }
     const elsewhere = OTHER_SUITES.map((s) => index[`${s}/${arch}`].find((x) => idOf(x) === id)).find(Boolean);
     if (elsewhere) {
