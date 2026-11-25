@@ -102,6 +102,13 @@ func TestAdmit(t *testing.T) {
 	if c, err := admit("SETUP 192.168.64.0/24", routes); err != nil || c != "192.168.64.0/24" {
 		t.Fatalf("admit: %q %v", c, err)
 	}
+	// Inside the /24 counts too: a host route, a smaller subnet.
+	inside := append(routes, route{Dst: "192.168.70.9", Dev: "eth1"}, route{Dst: "192.168.71.128/25", Dev: "eth2"})
+	for _, l := range []string{"SETUP 192.168.70.0/24", "SETUP 192.168.71.0/24"} {
+		if _, err := admit(l, inside); err == nil {
+			t.Errorf("%s: a subnet with a route inside was admitted", l)
+		}
+	}
 	for _, l := range []string{"SETUP 192.168.1.0/24", "SETUP 10.9.9.0/24"} {
 		if _, err := admit(l, routes); err == nil {
 			t.Errorf("%s: a covered subnet was admitted", l)
