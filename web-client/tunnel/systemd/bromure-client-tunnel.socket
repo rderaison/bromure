@@ -1,0 +1,16 @@
+# Bromure Client — the network tunnel's root helper, started per connection.
+# The socket is world-connectable on purpose: the helper itself decides who is
+# served (SO_PEERCRED: root or the user at the machine, running the installed
+# client) and scopes every tunnel to the caller's uid. See
+# web-client/tunnel/daemon_linux.go.
+[Unit]
+Description=Bromure Client network tunnel helper socket
+
+[Socket]
+ListenStream=/run/bromure-client-tunnel.sock
+SocketMode=0666
+Accept=yes
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target
