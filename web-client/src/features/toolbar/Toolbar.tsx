@@ -19,7 +19,9 @@ import React, { useMemo } from 'react';
 import { shell, electron, isMac } from '../../platform';
 import { Lights } from '../../app/windows';
 import { useHostCtx } from '../../app/hostContext';
-import { useRemote } from '../../app/store';
+import { useRemote, useHost, closeConnection } from '../../app/store';
+import { account } from '../connect/account';
+import { MenuBar } from '../menubar/MenuBar';
 import { useMenu, cx, type MenuItem } from '../../ui/kit';
 import { SF } from '../../ui/icons';
 import { useListModel } from '../sidebar/Sidebar';
@@ -36,9 +38,43 @@ export function Toolbar() {
       {shell === 'electron'
         ? <div className="tb-lights"><Lights onClose={() => electron!.windowControl('close')} onMinimize={() => electron!.windowControl('minimize')} onZoom={() => electron!.windowControl('maximize')} /></div>
         : <div style={{ width: 78 }} />}
+      <MenuBar />
+      <ServerMenu />
       <div className="tb-flex" />
       <ToolbarBar />
     </div>
+  );
+}
+
+/** Which server this window mirrors, and the way out of it: connect to
+ *  another server, disconnect, sign out of bromure.io. (On the Mac these live
+ *  in the menu bar — Workspaces › Connect to Remote Bromure… — which a web
+ *  window doesn't have.) */
+function ServerMenu() {
+  const { host } = useHostCtx();
+  useHost(host);
+  const menu = useMenu();
+  const signedIn = !!account.get().record;
+  const sc = isMac ? '⇧⌘K' : 'Ctrl+Shift+K';
+  const live = host.status === 'connected';
+  const open = (e: React.MouseEvent) => {
+    const items: MenuItem[] = [
+      { header: host.target.name },
+      { label: 'Connect to Another Server…', icon: 'network', shortcut: sc, action: () => openSurface('connect') },
+      { label: 'Disconnect', icon: 'xmark.circle', action: () => { closeConnection(host.target.id); location.hash = '#/'; } },
+    ];
+    if (signedIn) items.push({ separator: true }, {
+      label: 'Sign Out of bromure.io', icon: 'rectangle.portrait.and.arrow.right', destructive: true,
+      action: async () => { closeConnection(host.target.id); await account.signOut(); location.hash = '#/'; },
+    });
+    menu((e.currentTarget as HTMLElement).getBoundingClientRect(), items, 240);
+  };
+  return (
+    <button className="tb-server" onClick={open} title="Connected server: connect to another, disconnect or sign out">
+      <span className="tb-server-dot" style={{ background: live ? 'var(--green)' : host.status === 'failed' ? 'var(--red)' : 'var(--orange)' }} />
+      <span className="tb-server-name">{host.target.name}</span>
+      <SF name="chevron.down" size={9} weight={700} />
+    </button>
   );
 }
 

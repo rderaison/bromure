@@ -10,6 +10,7 @@ import { useHost } from './store';
 import { Toolbar } from '../features/toolbar/Toolbar';
 import { Sidebar } from '../features/sidebar/Sidebar';
 import { Stage } from '../features/stage/Stage';
+import { ErrorBoundary } from './ErrorBoundary';
 import { ReconnectingVeil } from '../features/connect/ReconnectingVeil';
 import { TerminalDevHarness } from '../features/terminal/DevHarness';   // dev-only (?term= / ?room=)
 import { EditorEventBridge } from '../features/editor';
@@ -35,7 +36,7 @@ export function HostWindow({ host }: { host: RemoteHost }) {
 const SIDEBAR_MIN = 220, SIDEBAR_MAX = 420, SIDEBAR_DEFAULT = 259, SIDEBAR_RAIL = 44, SIDEBAR_COLLAPSE_AT = 160;
 
 function HostWindowBody() {
-  const { host, sidebarCollapsed, setSidebarCollapsed } = useHostCtx();
+  const { host, sidebarCollapsed, setSidebarCollapsed, selection, select } = useHostCtx();
   const [width, setWidth] = usePersisted('bromure.sidebarWidth', SIDEBAR_DEFAULT);
   const [drag, setDrag] = useState(false);
   const startResize = (e: React.MouseEvent) => {
@@ -57,11 +58,11 @@ function HostWindowBody() {
       <div className="hw-main">
         {(
           <aside className="hw-sidebar" style={{ width: sidebarCollapsed ? SIDEBAR_RAIL : width }}>
-            <Sidebar />
+            <ErrorBoundary name="sidebar"><Sidebar /></ErrorBoundary>
             <div className={'hw-divider' + (drag ? ' dragging' : '')} onMouseDown={startResize} />
           </aside>
         )}
-        <main className="hw-stage"><Stage /><TerminalDevHarness /></main>
+        <main className="hw-stage"><ErrorBoundary name="stage" resetKey={JSON.stringify(selection)} onReset={() => select({ kind: 'home' })}><Stage /></ErrorBoundary><TerminalDevHarness /></main>
         <FilePane />
       </div>
       <EditorEventBridge />

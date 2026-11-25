@@ -1,0 +1,7 @@
+/* The native menu bar, drawn in the window's titlebar strip. Same metrics as
+   the macOS menu bar's titles (13pt, 24pt high hit targets). */
+.mb { display: flex; align-items: center; gap: 0; margin-left: 10px; -webkit-app-region: no-drag; }
+.mb-title { all: unset; box-sizing: border-box; height: 24px; padding: 0 9px; border-radius: 5px; font-size: 13px; color: var(--label); cursor: default; white-space: nowrap; }
+.mb-title.app { font-weight: 600; }
+.mb-title:hover, .mb-title.open { background: rgba(0,0,0,0.08); }
+:root[data-theme="dark"] .mb-title:hover, :root[data-theme="dark"] .mb-title.open { background: rgba(255,255,255,0.10); }

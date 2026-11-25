@@ -25,3 +25,11 @@
 .tb-machine-dot { width: 9px; height: 9px; border-radius: 2.5px; flex-shrink: 0; }
 .tb-machine-name { font-size: 12px; font-weight: 500; color: var(--label); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tb-machine-chev { color: var(--label-secondary); }
+
+/* The mirrored server + its menu (connect elsewhere / disconnect / sign out). */
+.tb-server { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; margin-left: 6px;
+  border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--label-secondary); cursor: default; -webkit-app-region: no-drag; }
+.tb-server:hover { background: rgba(0,0,0,0.08); color: var(--label); }
+:root[data-theme="dark"] .tb-server:hover { background: rgba(255,255,255,0.10); }
+.tb-server-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.tb-server-name { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

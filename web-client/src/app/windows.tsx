@@ -6,6 +6,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { cx } from '../ui/kit';
 import { isMod } from '../platform';
+import { ErrorBoundary } from './ErrorBoundary';
 
 export interface WindowSpec {
   id: string;                 // one window per id (re-open focuses it)
@@ -116,7 +117,7 @@ function FloatingWindow({ w, isKey, onFocus, onMove, onResize, onClose, setTitle
           {w.title && <span className="win-title">{w.title}</span>}
         </div>
       )}
-      <div className="win-body">{w.render(ctx)}</div>
+      <div className="win-body"><ErrorBoundary name={'window:' + w.id}>{w.render(ctx)}</ErrorBoundary></div>
       <div className="win-resize" onMouseDown={startResize} />
     </div>
   );

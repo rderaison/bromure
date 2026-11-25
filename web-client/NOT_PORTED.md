@@ -156,12 +156,20 @@ could not be carried over, or that works differently, and why.
   (`return_to=/client/`) and completes from `#enroll?…` on return; Electron
   opens the system browser and completes on the `bromure://enroll` deep link.
   Both check the `state` nonce (kept in sessionStorage across the round trip).
-- **Menu bar commands** have no menu bar to live in: their key equivalents are
-  global shortcuts in the mirror window (⌘N, ⌘K, ⌘,, ⇧⌘K, ⇧⌘N, ⇧⌘A, ⇧⌘T,
-  ⇧⌘I, ⇧⌘G, ⌃⌘S, ⌃⌘E — Ctrl / Ctrl+Alt off macOS) and searchable rows in the
-  ⌘K palette (typed queries only, so the empty palette matches the Mac's).
-  No "≡" menu: the Mac window has no toolbar menu to mirror. Off macOS a
-  terminal keeps its own Ctrl chords (Ctrl+K, Ctrl+N…) unless Shift/Alt is
+- **The menu bar is drawn in the window.** A web page / frameless Electron
+  window has no system menu bar, so the native one (Bromure · Workspaces · Edit
+  · View · Window · Help) sits in the titlebar strip after the window controls,
+  with the items the Mac's fat-client window answers, in the same order, with
+  the same key equivalents (⌘ → Ctrl, ⌃⌘ → Ctrl+Alt off macOS) and the same
+  context enabling (machine / tab / worktree on stage). Next to it, the
+  server pill: Connect to Another Server… / Disconnect / Sign Out of
+  bromure.io. Left out because they act on the LOCAL Mac only: Rebuild Base
+  Image…, Base Image…, Install Command-Line Tool…, Hide/Hide Others/Show All,
+  Messaging Connector…, Quick Task…, Open ext4 file…, Copy Pane History,
+  Toggle Sandbox Drawer, Inference Metrics…, Credential Approvals…, Inference
+  Engine Log…, New Workspace from configs. The hosted app's Edit › Paste is
+  disabled (a page can't read the clipboard from a menu click; the shortcut
+  works). Off macOS a terminal keeps its own Ctrl chords unless Shift/Alt is
   held; in the hosted app the browser reserves Ctrl/⌘+N/T/W.
 - **Palette "In conversations" (transcript search)** isn't offered — the Mac
   fat client doesn't index a mirror's transcripts either.
