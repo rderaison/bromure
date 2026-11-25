@@ -45,5 +45,6 @@
     "vitest": "^5.1.2",
     "ws": "^8.23.0"
   },
-  "productName": "Bromure Client"
+  "productName": "Bromure Client",
+  "desktopName": "io.bromure.client.desktop"
 }

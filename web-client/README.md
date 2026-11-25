@@ -29,7 +29,7 @@ how the port is organised and verified is in [PORTING.md](PORTING.md).
 npm ci        # through Socket: SOCKET_CLI_VIEW_ALL_RISKS=1 npx @socketsecurity/cli npm ci
 npm run build             # → dist/ (the hosted bundle; relative asset URLs)
 npm run build:hosted      # → bromure-client-web.tgz for bromure.io/client/
-npm run package:linux     # → out/Bromure-linux-{x64,arm64}(.tar.gz)
+npm run package:linux     # → out/bromure-client_<ver>_{amd64,arm64}.deb + out/bromure-client-<ver>-linux-{x64,arm64}.tar.gz
 npm run package:win       # → out/Bromure-win32-{x64,arm64}(.zip)
 npm run electron          # run Electron locally
 ```
@@ -64,5 +64,24 @@ Electron smoke test on a real Linux/Windows box (shot mode, unattended; a
 one-time code from `bromure-ac admin code <user>` pairs and enrolls the key):
 ```bash
 BROMURE_SHOT=/tmp/x.png BROMURE_TEST_HOST=<host> BROMURE_TEST_PORT=2222 \
-BROMURE_TEST_USER=<user> BROMURE_TEST_PASSWORD=<code> xvfb-run -a ./bromure --no-sandbox
+BROMURE_TEST_USER=<user> BROMURE_TEST_PASSWORD=<code> xvfb-run -a ./bromure-client --no-sandbox
 ```
+
+## Linux packaging
+
+`npm run package:linux` (scripts/package-linux.mjs; no dpkg needed, also runs on macOS):
+
+- **.deb** — `/opt/bromure-client`, `/usr/bin/bromure-client`, the
+  `io.bromure.client.desktop` entry (`MimeType=x-scheme-handler/bromure-client;`)
+  and its icon. postinst makes `chrome-sandbox` setuid root and, on AppArmor 4
+  (Ubuntu 24.04+, which restricts unprivileged user namespaces), installs a
+  `userns` profile for the app — either one alone lets the sandbox start.
+  Maintainer field: `BROMURE_DEB_MAINTAINER` (default `Bromure <support@bromure.io>`).
+- **tarball** — `bromure-client-<ver>-linux-<arch>/` (no space in the folder:
+  xdg-open's generic fallback can't run an Exec path containing one) with a
+  README-linux.txt. On first launch the app writes its own .desktop entry + icon
+  into `~/.local/share` and becomes the `bromure-client://` handler
+  (`registerLinuxDesktopEntry` in electron/main.ts); a .deb install owns it instead.
+- The desktop id `io.bromure.client` (package.json `desktopName`) is also the
+  Wayland app_id / X11 WM_CLASS, so the window matches its launcher icon.
+  Electron runs natively on Wayland in a Wayland session, X11 otherwise.

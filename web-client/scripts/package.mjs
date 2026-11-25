@@ -1,11 +1,13 @@
 // Package the Electron app for Linux / Windows with @electron/packager
-// (x64 + arm64). Output: out/Bromure-<platform>-<arch>/ (+ a .zip / .tar.gz).
+// (x64 + arm64). Output: out/Bromure Client-<platform>-<arch>/ (+ a .zip on
+// Windows; on Linux a .tar.gz and a .deb, see package-linux.mjs).
 // Only dist/, dist-electron/ and package.json go in the app — no node_modules
 // (the main process bundles everything with esbuild).
 import { packager } from '@electron/packager';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { packageLinux } from './package-linux.mjs';
 
 const platform = process.argv[2] ?? 'linux';
 const arch = (process.argv[3] ?? 'x64,arm64').split(',');
@@ -30,7 +32,7 @@ for (const p of paths) {
     fs.rmSync(path.join('out', `${base}.zip`), { force: true });
     execFileSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe'), ['-a', '-cf', `${base}.zip`, base], { cwd: 'out' });
   } else if (platform === 'win32') execFileSync('zip', ['-qryX', `${base}.zip`, base, '-x', '*/.DS_Store', '*/._*'], { cwd: 'out' });
-  // No AppleDouble files / macOS xattrs in a Linux tarball (GNU tar warns on each).
-  else execFileSync('tar', ['--no-xattrs', '-czf', `${base}.tar.gz`, base], { cwd: 'out', env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  // Linux: a tarball (space-free folder name) + a .deb — scripts/package-linux.mjs.
+  else packageLinux(p, base.slice(base.lastIndexOf('-') + 1));
   console.log('packaged', p);
 }

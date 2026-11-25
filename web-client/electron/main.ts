@@ -9,6 +9,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { execFile } from 'node:child_process';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -57,10 +58,65 @@ function stampStartMenuShortcut() {
 // Its own URL scheme: `bromure://` belongs to the macOS app / Bromure and must
 // never be taken over on a machine that has them.
 const SCHEME = 'bromure-client';
+// Linux: the app's identity is its .desktop file — Wayland app_id / X11
+// WM_CLASS (taskbar icon + grouping), the portals' app id, and the handler
+// xdg-open looks up for bromure-client:// links. Same reverse-DNS id as
+// APP_ID (package.json "desktopName" says the same; this covers `electron .`).
+const DESKTOP_ID = 'io.bromure.client';
+if (process.platform === 'linux') app.setDesktopName(DESKTOP_ID + '.desktop');
 if (!SHOT && PRIMARY) {
+  if (process.platform === 'linux') registerLinuxDesktopEntry();
   // A dev run (`electron .`) registers the Electron binary WITH the app path.
-  if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [path.resolve(process.argv[1])]);
+  else if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient(SCHEME, process.execPath, [path.resolve(process.argv[1])]);
   else app.setAsDefaultProtocolClient(SCHEME);
+}
+
+// Linux: xdg-open hands bromure-client:// to whichever .desktop file claims
+// `x-scheme-handler/bromure-client`. The .deb installs one system-wide; a copy
+// run from the tarball / an AppImage writes its own into ~/.local/share (with
+// the icon) on launch, pointing at wherever it lives now, and makes itself the
+// scheme's default. A dev run (`electron .`) registers nothing.
+function registerLinuxDesktopEntry() {
+  if (!app.isPackaged) return;
+  const file = DESKTOP_ID + '.desktop';
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  const userEntry = path.join(dataHome, 'applications', file);
+  const exe = process.env.APPIMAGE || process.execPath;
+  const marker = 'X-Bromure-Generated=true';
+  try {
+    const dataDirs = (process.env.XDG_DATA_DIRS || '/usr/local/share:/usr/share').split(':').filter(Boolean);
+    const system = dataDirs.map(d => path.join(d, 'applications', file)).find(f => fs.existsSync(f));
+    const read = (f: string) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+    if (system && read(system).includes(exe)) {
+      // This IS the packaged install: its entry wins — drop one a tarball
+      // copy left behind (ours only), which would shadow it.
+      if (read(userEntry).includes(marker)) fs.rmSync(userEntry, { force: true });
+      return;
+    }
+    const iconDir = path.join(dataHome, 'icons', 'hicolor', '512x512', 'apps');
+    const icon = path.join(iconDir, DESKTOP_ID + '.png');
+    const iconSrc = path.join(__dirname, '..', 'build', 'icon.png');
+    if (!fs.existsSync(icon)) { fs.mkdirSync(iconDir, { recursive: true }); fs.writeFileSync(icon, fs.readFileSync(iconSrc)); }
+    // Desktop Entry Exec quoting: "…" with \ " ` $ escaped (then the string
+    // escape doubles the backslashes), and %% for a literal %.
+    // A plain path stays unquoted: xdg-open's generic fallback (no desktop
+    // environment detected) splits Exec on spaces and ignores quoting.
+    const q = (s: string) => /^[\w/.+,:@-]+$/.test(s) ? s : '"' + s.replace(/[\\"`$]/g, m => (m === '\\' ? '\\\\\\' : '\\\\') + m).replace(/%/g, '%%') + '"';
+    const entry = linuxDesktopEntry(q(exe) + ' %U', DESKTOP_ID) + marker + '\n';
+    if (read(userEntry) !== entry) {
+      fs.mkdirSync(path.dirname(userEntry), { recursive: true });
+      fs.writeFileSync(userEntry, entry);
+      execFile('update-desktop-database', [path.dirname(userEntry)], () => {});
+    }
+  } catch (e) { log('desktop entry:', e); }
+  // xdg-mime default <desktopName> x-scheme-handler/bromure-client
+  app.setAsDefaultProtocolClient(SCHEME);
+}
+function linuxDesktopEntry(exec: string, icon: string) {
+  return ['[Desktop Entry]', 'Type=Application', 'Name=Bromure Client',
+    'GenericName=Remote Bromure Client', 'Comment=Mirror a remote Bromure Agentic Coding server',
+    `Exec=${exec}`, `Icon=${icon}`, 'Terminal=false', 'Categories=Development;',
+    `StartupWMClass=${DESKTOP_ID}`, 'StartupNotify=true', 'MimeType=x-scheme-handler/bromure-client;', ''].join('\n');
 }
 // Screenshot runs are concurrent (several at once): each gets a throwaway
 // profile, or they fight over the IndexedDB lock and lose the device key.
