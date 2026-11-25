@@ -1416,8 +1416,20 @@ struct ProfileEditorView: View {
                 }
             },
             health: { provider in subscriptionHealth?(provider) },
-            // Fat client: the custom server is tested by the remote.
-            probeServer: (localModelsRemoteAny as? RemoteModelBackend)?.probeServer)
+            // Fat client: the custom server is tested by the remote, with
+            // the key of the configuration this pane edits.
+            probeServer: (localModelsRemoteAny as? RemoteModelBackend).map { remote in
+                let scope = modelsProbeScope
+                return { base, key in try await remote.probeServer(base, key, scope) }
+            })
+    }
+
+    /// The configuration the Models pane edits, for a custom-server probe.
+    private var modelsProbeScope: EngineProbeScope {
+        switch resolvedModelsPane {
+        case .globalStore, .remoteGlobal: return .global
+        case .workspace: return .workspace(draft.id)
+        }
     }
     #endif
 
@@ -1453,10 +1465,11 @@ struct ProfileEditorView: View {
         #if os(macOS)
         guard let base = draft.localEngineBaseURL else { return }
         let key = draft.localEngineAPIKey
+        let id = draft.id
         let remote = localModelsRemoteAny as? RemoteModelBackend
         Task {
             let probed: [String]?
-            if let remote { probed = try? await remote.probeServer(base.absoluteString, key) }
+            if let remote { probed = try? await remote.probeServer(base.absoluteString, key, .workspace(id)) }
             else { probed = try? await ExternalEngine.listModels(base: base, apiKey: key) }
             if let models = probed,
                !models.isEmpty {
@@ -5591,7 +5604,9 @@ struct RemoteModelBackend {
     /// SERVER probes it — the machine whose launches use it, from its own
     /// address — and returns the model ids or throws its error. The client
     /// never contacts that server itself.
-    var probeServer: (_ baseURL: String, _ apiKey: String?) async throws -> [String]
+    /// `scope`: the configuration being tested, whose stored key a redacted
+    /// one stands for.
+    var probeServer: (_ baseURL: String, _ apiKey: String?, _ scope: EngineProbeScope) async throws -> [String]
 }
 
 /// A custom-server probe that failed on the remote (its reason, verbatim).
@@ -5613,6 +5628,8 @@ struct LocalModelsSettingsView: View {
     /// Non-nil on the fat client: manage the REMOTE server's models instead of
     /// this machine's (RAM gate, downloads, installed state all go remote).
     var remote: RemoteModelBackend? = nil
+    /// The workspace whose engine this is (a remote probe uses its stored key).
+    var profileID: UUID? = nil
 
     private var hostGB: Int { remote?.unifiedMemGB() ?? HostMemory.unifiedMemoryGB() }
     // The curated catalog is a static list, identical on host and client, so
@@ -5724,7 +5741,7 @@ struct LocalModelsSettingsView: View {
             do {
                 // Fat client: the server tests it (its network, its address).
                 let models: [String]
-                if let remote { models = try await remote.probeServer(base.absoluteString, key) }
+                if let remote { models = try await remote.probeServer(base.absoluteString, key, .workspace(profileID)) }
                 else { models = try await ExternalEngine.listModels(base: base, apiKey: key) }
                 await MainActor.run { engineModels = models; engineProbe = .ok(models.count) }
             } catch {

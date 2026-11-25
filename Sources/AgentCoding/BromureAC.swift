@@ -5955,8 +5955,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
         server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
-        server.onProbeEngine = { [weak self] base, key in
-            await self?.automationProbeEngine(base: base, apiKey: key) ?? ["ok": false, "error": "unavailable"]
+        server.onProbeEngine = { [weak self] base, key, scope in
+            await self?.automationProbeEngine(base: base, apiKey: key, scope: scope) ?? ["ok": false, "error": "unavailable"]
         }
         server.onUpdateModelSettings = { [weak self] doc in
             self?.automationUpdateModelSettings(doc) ?? ["ok": false, "error": "unavailable"]
@@ -12261,16 +12261,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// A fat client's "Test Connection" for a custom inference server, run
     /// from this host. The client's copy of a stored key is redacted, so a
-    /// blank or redacted key means "the key stored for this server" — looked
-    /// up only for that exact server (global settings, the template, any
-    /// workspace), so a client can't send a stored key anywhere else.
+    /// blank or redacted key means "the key stored for this server" in the
+    /// configuration being edited (`scope`), and only for that exact server,
+    /// so a client can't send a stored key anywhere else.
     @MainActor
-    func automationProbeEngine(base raw: String, apiKey: String?) async -> [String: Any] {
+    func automationProbeEngine(base raw: String, apiKey: String?,
+                               scope: EngineProbeScope = .unspecified) async -> [String: Any] {
         guard let base = Profile.normalizedEngineBase(raw),
               ["http", "https"].contains(base.scheme?.lowercased() ?? "") else {
             return ["ok": false, "error": NSLocalizedString("That isn't a valid server URL.", comment: "engine probe")]
         }
-        let key = ModelSettings.isRedactedSecret(apiKey) ? storedEngineKey(for: base) : apiKey
+        let key = ModelSettings.isRedactedSecret(apiKey) ? storedEngineKey(for: base, scope: scope) : apiKey
         do {
             let models = try await ExternalEngine.listModels(base: base, apiKey: key)
             return ["ok": true, "models": models]
@@ -12279,17 +12280,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// The API key stored for the custom server at `base`, wherever it's
-    /// configured (normalized URLs compared), or nil.
+    /// The API key stored for the custom server at `base` in `scope`'s
+    /// configuration (normalized URLs compared), or nil.
     @MainActor
-    private func storedEngineKey(for base: URL) -> String? {
-        var candidates: [(url: String?, key: String?)] = []
-        if let ls = ModelSettingsStore.shared.settings.localServer { candidates.append((ls.baseURL, ls.apiKey)) }
-        for p in profiles + [store.loadTemplate()] {
-            if let ls = p.modelOverride?.settings.localServer { candidates.append((ls.baseURL, ls.apiKey)) }
-            candidates.append((p.localEngineURL, p.localEngineAPIKey))
-        }
+    private func storedEngineKey(for base: URL, scope: EngineProbeScope) -> String? {
+        let candidates = Self.engineKeyCandidates(scope: scope,
+                                                  global: ModelSettingsStore.shared.settings.localServer,
+                                                  profiles: profiles, template: store.loadTemplate())
         return Self.engineKey(for: base, among: candidates)
+    }
+
+    /// Where a probe's redacted key is looked up, in order (tested):
+    /// - global settings: the global custom server only;
+    /// - a workspace: its own custom server (its Models override, then its
+    ///   Local Models engine), then the global one if it inherits it (no
+    ///   override, or a layered one that doesn't exclude it). A workspace not
+    ///   saved yet is the template's copy.
+    /// - unspecified (a client older than the scope): every configuration,
+    ///   global first, as before.
+    /// Two configurations on one server with different keys (tenant keys)
+    /// each test their own.
+    nonisolated static func engineKeyCandidates(scope: EngineProbeScope, global: LocalServer?,
+                                                profiles: [Profile], template: Profile) -> [(url: String?, key: String?)] {
+        func own(_ p: Profile) -> [(url: String?, key: String?)] {
+            var c: [(url: String?, key: String?)] = []
+            if let ls = p.modelOverride?.settings.localServer { c.append((ls.baseURL, ls.apiKey)) }
+            c.append((p.localEngineURL, p.localEngineAPIKey))
+            return c
+        }
+        let inherited: [(url: String?, key: String?)] = global.map { [($0.baseURL, $0.apiKey)] } ?? []
+        switch scope {
+        case .global:
+            return inherited
+        case .workspace(let id):
+            let p = id.flatMap { id in profiles.first { $0.id == id } } ?? template
+            let inherits = p.modelOverride.map { $0.inheritsGlobal && !$0.excludedProviders.contains(.custom) } ?? true
+            return own(p) + (inherits ? inherited : [])
+        case .unspecified:
+            return inherited + (profiles + [template]).flatMap(own)
+        }
     }
 
     /// Pure lookup (tested): the first non-blank key whose server URL

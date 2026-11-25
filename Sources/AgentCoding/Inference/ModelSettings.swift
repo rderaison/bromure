@@ -289,6 +289,40 @@ public struct LocalServer: Codable, Equatable, Sendable {
     }
 }
 
+/// Which configuration a fat client's custom-server "Test Connection" is for
+/// (POST /models/probe-server): the host resolves a redacted key from that
+/// configuration only, so one server URL configured with different keys in
+/// global settings and a workspace tests the right one.
+enum EngineProbeScope: Equatable, Sendable {
+    /// The global model settings.
+    case global
+    /// A workspace (nil, or an id the host doesn't have: one not saved yet,
+    /// a copy of the template).
+    case workspace(UUID?)
+    /// A client older than the scope.
+    case unspecified
+
+    /// From the request body: `"scope": "global" | "workspace"`, plus
+    /// `"profileId"` for a workspace.
+    init(wire body: [String: Any]) {
+        switch body["scope"] as? String {
+        case "global": self = .global
+        case "workspace": self = .workspace((body["profileId"] as? String).flatMap(UUID.init(uuidString:)))
+        default: self = .unspecified
+        }
+    }
+
+    /// The request body's fields for this scope.
+    var wire: [String: String] {
+        switch self {
+        case .global: return ["scope": "global"]
+        case .workspace(let id?): return ["scope": "workspace", "profileId": id.uuidString]
+        case .workspace(nil): return ["scope": "workspace"]
+        case .unspecified: return [:]
+        }
+    }
+}
+
 /// A model's capabilities. Every field is fetched from the serving endpoint
 /// (`/v1/models`, Ollama `/api/show`) when available and is user-overridable;
 /// `nil` means "unknown / not yet probed", never "no".

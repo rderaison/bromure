@@ -23,6 +23,18 @@ describe('probeCustomServer', () => {
     expect(h.calls[0].body).toEqual({ baseURL: 'http://x' });
   });
 
+  it('names the configuration being tested', async () => {
+    const h = fakeHost({ ok: true, models: [] });
+    await probeCustomServer(h.request, 'http://x', '••••••••', { kind: 'workspace', id: 'A1B2' });
+    await probeCustomServer(h.request, 'http://x', '••••••••', { kind: 'global' });
+    await probeCustomServer(h.request, 'http://x', '••••••••', { kind: 'workspace' });
+    expect(h.calls.map(c => c.body)).toEqual([
+      { baseURL: 'http://x', apiKey: '••••••••', scope: 'workspace', profileId: 'A1B2' },
+      { baseURL: 'http://x', apiKey: '••••••••', scope: 'global' },
+      { baseURL: 'http://x', apiKey: '••••••••', scope: 'workspace' },
+    ]);
+  });
+
   it("throws the host's reason", async () => {
     const h = fakeHost({ ok: false, error: 'Could not connect to the server.' });
     await expect(probeCustomServer(h.request, 'http://x')).rejects.toThrow('Could not connect to the server.');

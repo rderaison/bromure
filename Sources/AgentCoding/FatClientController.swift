@@ -443,16 +443,18 @@ final class RemoteHostController {
             installedRepos: { [weak self] in Array(self?.serverInstalledModels ?? []) },
             removeRepo: { [weak self] repo in self?.removeServerModel(repo: repo) },
             installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] },
-            probeServer: { [host] base, key in try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key) })
+            probeServer: { [host] base, key, scope in
+                try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key, scope: scope) })
     }
 
     /// "Test Connection" for a custom inference server, run BY THE REMOTE
     /// (`POST /models/probe-server`): the server's network and source address
     /// are what its launches use, and the client never contacts the engine.
     /// A redacted/blank key makes the remote use the key it stores for that
-    /// server. Throws the remote's reason on failure.
-    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?) async throws -> [String] {
-        var body: [String: Any] = ["baseURL": baseURL]
+    /// server in `scope`'s configuration. Throws the remote's reason on failure.
+    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?,
+                                              scope: EngineProbeScope) async throws -> [String] {
+        var body: [String: Any] = scope.wire.merging(["baseURL": baseURL]) { _, new in new }
         if let apiKey, !apiKey.isEmpty { body["apiKey"] = apiKey }
         let payload = body
         let resp = try await Task.detached(priority: .userInitiated) {
