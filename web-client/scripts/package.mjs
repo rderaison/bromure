@@ -5,6 +5,7 @@
 import { packager } from '@electron/packager';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 
 const platform = process.argv[2] ?? 'linux';
 const arch = (process.argv[3] ?? 'x64,arm64').split(',');
@@ -21,7 +22,13 @@ const paths = await packager({
 });
 for (const p of paths) {
   const base = path.basename(p);
-  if (platform === 'win32') execFileSync('zip', ['-qryX', `${base}.zip`, base, '-x', '*/.DS_Store', '*/._*'], { cwd: 'out' });
+  // Packaging ON Windows: there is no `zip`, but the bsdtar that ships with
+  // Windows 10+ writes one (`-a` picks the format from the extension). Its full
+  // path, so a GNU tar earlier on PATH (Git Bash) isn't picked up instead.
+  if (platform === 'win32' && process.platform === 'win32') {
+    fs.rmSync(path.join('out', `${base}.zip`), { force: true });
+    execFileSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe'), ['-a', '-cf', `${base}.zip`, base], { cwd: 'out' });
+  } else if (platform === 'win32') execFileSync('zip', ['-qryX', `${base}.zip`, base, '-x', '*/.DS_Store', '*/._*'], { cwd: 'out' });
   // No AppleDouble files / macOS xattrs in a Linux tarball (GNU tar warns on each).
   else execFileSync('tar', ['--no-xattrs', '-czf', `${base}.tar.gz`, base], { cwd: 'out', env: { ...process.env, COPYFILE_DISABLE: '1' } });
   console.log('packaged', p);
