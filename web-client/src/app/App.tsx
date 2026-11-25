@@ -24,6 +24,8 @@ function useRoute() {
   return hash;
 }
 
+let devAutoConnected = false;
+
 export function navigate(hash: string) { location.hash = hash; }
 
 export function App() {
@@ -58,15 +60,18 @@ export function App() {
   // Electron smoke tests (shot mode only): connect to BROMURE_TEST_HOST.
   useEffect(() => {
     const t = window.bromureElectron?.shotTest;
-    if (!t || hostID) return;
+    if (!t || hostID || devAutoConnected) return;
+    devAutoConnected = true;
     savedHosts.upsert({ id: 'shot-test', name: t.host, address: t.host, port: t.port, user: t.user });
     navigate('#/host/shot-test');
   }, [hostID]);
 
-  // Dev: `?dev=demo` → connect to the demo server through the dev relay.
+  // Dev: `?dev=demo` → connect to the demo server through the dev relay —
+  // once per launch, so "Connect to Another Server…" isn't bounced back to it.
   useEffect(() => {
     const p = new URLSearchParams(location.search);
-    if (p.get('dev') !== 'demo' || !devRelay || hostID) return;
+    if (p.get('dev') !== 'demo' || !devRelay || hostID || devAutoConnected) return;
+    devAutoConnected = true;
     (async () => {
       const base = devRelay.replace(/^ws/, 'http');
       const who = await (await fetch(base + '/whoami')).json();

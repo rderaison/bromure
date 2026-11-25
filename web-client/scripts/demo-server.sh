@@ -38,7 +38,10 @@ start)
   [ -x "$BIN" ] || { echo "build first: ./build.sh bromure-ac" >&2; exit 1; }
   [ -n "$(pids)" ] && { echo "demo server already running"; exit 0; }
   [ -f "$PREFS" ] && [ ! -f "$STATE/prefs-backup.plist" ] && cp "$PREFS" "$STATE/prefs-backup.plist"
-  rm -rf "$H"; mkdir -p "$SUP"
+  # Keep the SSH host key across restarts (clients pinned it on first connect).
+  [ -f "$SUP/remote/hostkey_ed25519" ] && cp "$SUP/remote/hostkey_ed25519" "$SUP/remote/hostkey_ed25519.pub" "$STATE/" 2>/dev/null
+  rm -rf "$H"; mkdir -p "$SUP/remote"
+  [ -f "$STATE/hostkey_ed25519" ] && cp "$STATE/hostkey_ed25519" "$STATE/hostkey_ed25519.pub" "$SUP/remote/" 2>/dev/null
   for f in base.version image-state.json alpine-vmlinuz alpine-initramfs alpine-initramfs-shimmed catalog.json img-catalog.json; do
     [ -e "$REAL/$f" ] && cp "$REAL/$f" "$SUP/$f"
   done
