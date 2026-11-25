@@ -169,6 +169,10 @@ export function ConnectScreen() {
           : direct
             ? `Couldn't reach ${how.label}.\n\nMake sure the remote Bromure is running with remote access enabled (Preferences → Remote Access, or \`bromure-ac remote enable\`), and that the address and port are correct.`
             : (e?.message ?? 'Direct connections need the desktop app.') });
+      } else if (how.peerName && code === 'nobanner') {
+        // The relay opened but the server never joined it: its Bromure
+        // predates connections from the web and desktop clients (ws-relay).
+        finishWith({ k: 'unreachable', msg: `bromure.io accepted the connection, but ${how.peerName} never answered it.\n\n${how.peerName} may be running a Bromure version that can't take connections from this app yet. Update Bromure on it, make sure Remote Access is enabled, then try again.` });
       } else {
         finishWith({ k: 'unreachable', msg: how.peerName
           ? `Reached ${how.peerName} over bromure.io, but its SSH front door didn't answer. Make sure Remote Access is still enabled on it.`

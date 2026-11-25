@@ -22,6 +22,7 @@ const MSG = {
 } as const;
 
 const CLIENT_VERSION = 'SSH-2.0-BromureClient_1.0';
+const BANNER_TIMEOUT_MS = 25_000;
 const KEX_ALGS = ['curve25519-sha256', 'curve25519-sha256@libssh.org'];
 const HOSTKEY_ALGS = ['ssh-ed25519'];
 const CIPHERS = ['aes128-gcm@openssh.com', 'aes256-gcm@openssh.com'];
@@ -32,7 +33,7 @@ const MAX_PACKET = 32768;
 const subtle = globalThis.crypto.subtle;
 
 export class SSHError extends Error {
-  constructor(message: string, readonly code: 'auth' | 'hostkey' | 'protocol' | 'closed' | 'channel' = 'protocol') { super(message); }
+  constructor(message: string, readonly code: 'auth' | 'hostkey' | 'protocol' | 'closed' | 'channel' | 'nobanner' = 'protocol') { super(message); }
 }
 
 /** The client's identity: an Ed25519 key pair held as WebCrypto keys. */
@@ -249,7 +250,12 @@ export class SSHConnection {
   private versionResolve: (() => void) | null = null;
   private waitVersion(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.versionResolve = resolve;
+      // A transport that opens but never carries the server's banner (a relay
+      // whose other end never joins) would otherwise hang the connect forever.
+      const timer = setTimeout(() => {
+        if (!this.versionDone) this.fail(new SSHError(`no SSH banner from the server after ${BANNER_TIMEOUT_MS / 1000} s`, 'nobanner'));
+      }, BANNER_TIMEOUT_MS);
+      this.versionResolve = () => { clearTimeout(timer); resolve(); };
       this.waiters.push({ resolve: () => {}, reject, types: [-1] });
       this.tryVersion();
     });
