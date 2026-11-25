@@ -39,6 +39,9 @@ pipeline {
                         set -eu
                         mkdir -p "$WORKSPACE/.docker"
                         cp "$DOCKER_CONFIG_FILE" "$WORKSPACE/.docker/config.json"
+                        # A per-run DOCKER_CONFIG hides plugins under ~/.docker: bring
+                        # buildx along when that is where the agent has it.
+                        [ -d "$HOME/.docker/cli-plugins" ] && cp -R "$HOME/.docker/cli-plugins" "$WORKSPACE/.docker/"
                         export DOCKER_CONFIG="$WORKSPACE/.docker"
                         image="$REGISTRY/bromure-web-client"
                         sha=$(git rev-parse --short=12 HEAD)
