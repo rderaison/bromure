@@ -18,7 +18,7 @@ import (
 // Streams are opened through the app (appdial.go), which carries them over its
 // SSH connection with the device's key.
 
-const tunMSS = 1460 // TUN MTU 1500 − IPv4 − TCP headers
+const tunMSS = tunMTU - 40 // IPv4 + TCP headers
 
 type forwarder struct {
 	tun     io.ReadWriter
@@ -32,12 +32,13 @@ type forwarder struct {
 	flows map[flowKey]*tcpFlow
 	umu   sync.Mutex
 	udp   map[uint32]*udpChannel
+	frags *reassembler // used by the packet loop only
 }
 
 func newForwarder(tun io.ReadWriter, network, mask uint32,
 	dialTCP func(string, int) (upstream, error), dialUDP func(string) (upstream, error)) *forwarder {
 	return &forwarder{tun: tun, network: network, mask: mask, dialTCP: dialTCP, dialUDP: dialUDP,
-		flows: map[flowKey]*tcpFlow{}, udp: map[uint32]*udpChannel{}}
+		flows: map[flowKey]*tcpFlow{}, udp: map[uint32]*udpChannel{}, frags: newReassembler()}
 }
 
 // run reads packets until the TUN fails; it returns that error.
@@ -60,6 +61,11 @@ func (fw *forwarder) handlePacket(p []byte) {
 	if u32(p, 16)&fw.mask != fw.network {
 		return // only traffic into the routed subnet
 	}
+	// A datagram bigger than the TUN's MTU arrives in fragments: only the
+	// whole one holds the UDP (or ICMP) message.
+	if p = fw.frags.add(p); p == nil {
+		return
+	}
 	switch p[9] {
 	case protoTCP:
 		if seg, ok := parseTCP(p); ok {
@@ -76,11 +82,16 @@ func (fw *forwarder) handlePacket(p []byte) {
 	}
 }
 
+// write sends a packet to the kernel, in fragments if it's bigger than the
+// TUN's MTU (a large UDP reply or echo reply).
 func (fw *forwarder) write(pkt []byte) {
 	fw.wmu.Lock()
 	defer fw.wmu.Unlock()
-	if _, err := fw.tun.Write(pkt); err != nil {
-		log.Printf("tun write: %v", err)
+	for _, f := range fragmentIPv4(pkt, tunMTU) {
+		if _, err := fw.tun.Write(f); err != nil {
+			log.Printf("tun write: %v", err)
+			return
+		}
 	}
 }
 
