@@ -77,10 +77,11 @@ BROMURE_TEST_USER=<user> BROMURE_TEST_PASSWORD=<code> xvfb-run -a ./bromure-clie
 
 ## Hosted image (bromure.io/client/)
 
-`Jenkinsfile.client-web` (repo root) builds `web-client/ci/web/Dockerfile` and
-pushes `registry.digitalocean.com/seclio-cr/bromure-web-client:{latest,<sha>}`,
-then restarts `deploy/web-client` (namespace `bromure`; manifests live in
-bromure_web). The image is nginx-unprivileged on **:8080** serving the bundle
+`Jenkinsfile.client-web` (repo root) builds `web-client/ci/web/Dockerfile`,
+pushes `<registry>/bromure-web-client:{latest,<sha>}` and restarts the
+deployment — the registry, its credentials and the cluster objects are Jenkins
+credentials (listed in the Jenkinsfile), never committed. The image is
+nginx-unprivileged on **:8080** serving the bundle
 under `/client/` (SPA fallback to index.html, `/client/assets/` immutable,
 `/healthz`), and sets CSP, COOP and nosniff itself (`ci/web/nginx.conf`,
 `ci/web/security-headers.conf`). The edge routes `path_beg /client` here and
