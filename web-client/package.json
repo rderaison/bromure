@@ -15,6 +15,7 @@
     "electron": "npm run build && npm run build:electron && electron .",
     "package:linux": "npm run build && npm run build:electron && node scripts/package.mjs linux",
     "package:win": "npm run build && npm run build:electron && node scripts/package.mjs win32",
+    "installer:win": "node scripts/installer-win.mjs",
     "make:icon": "electron scripts/make-icon.cjs",
     "test": "vitest run",
     "check:icons": "node scripts/check-icons.mjs"
