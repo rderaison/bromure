@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
+import { setupTunnel, stopTunnel } from './tunnel';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -296,4 +297,7 @@ app.whenReady().then(() => {
   mainWindow = createWindow(process.env.BROMURE_HASH || '');
   mainWindow.on('closed', () => { mainWindow = null; });
 });
+// Linux network tunnel (electron/tunnel.ts): torn down with the app.
+if (PRIMARY && !SHOT) setupTunnel(() => mainWindow);
+app.on('will-quit', () => stopTunnel());
 app.on('window-all-closed', () => app.quit());
