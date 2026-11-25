@@ -4802,6 +4802,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // The fat-client E2E's app-generated login, by name only (its
             // password is only ever in POST /remote/test-login's reply).
             "testLoginUser": RemoteTestLogin.shared.current?.user ?? "",
+            "testLoginKeys": RemoteTestLogin.shared.keyFingerprints,
         ]
     }
 

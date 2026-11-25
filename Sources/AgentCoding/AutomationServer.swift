@@ -604,7 +604,15 @@ final class ACAutomationServer {
         }
         let start = bodyStart!
 
-        let headerBlock = String(decoding: data[0..<start], as: UTF8.self)
+        var headerBlock = String(decoding: data[0..<start], as: UTF8.self)
+        // The SSH front door's mark on a test-login connection (see
+        // RemoteTestLogin.bridgeMarker): the line before the request line.
+        var testLoginUser: String?
+        if headerBlock.hasPrefix(RemoteTestLogin.bridgeMarker), let eol = headerBlock.range(of: "\r\n") {
+            testLoginUser = String(headerBlock[headerBlock.index(headerBlock.startIndex,
+                offsetBy: RemoteTestLogin.bridgeMarker.count)..<eol.lowerBound])
+            headerBlock = String(headerBlock[eol.upperBound...])
+        }
         var contentLength = 0
         if let clRange = headerBlock.lowercased().range(of: "content-length:") {
             contentLength = Int(headerBlock.lowercased()[clRange.upperBound...]
@@ -674,13 +682,14 @@ final class ACAutomationServer {
         // older one (no header) the whole state each time, as before. Only a
         // flag here: the route's owner-only guard decides who gets a feed.
         let stateDelta = headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil
-        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta)
+        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta,
+              testLoginUser: testLoginUser)
     }
 
     // MARK: - Routing
 
     private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool,
-                       stateDelta: Bool = false) {
+                       stateDelta: Bool = false, testLoginUser: String? = nil) {
         // Local shadow so every `sendResponse` in this switch honors the client's
         // gzip capability without threading a flag through ~50 call sites. The
         // real 4-arg method is reached via `self.sendResponse`.
@@ -1190,6 +1199,16 @@ final class ACAutomationServer {
                 return
             }
             let key = (bodyJSON["key"] as? String) ?? ""
+            // Over the E2E test login, the key is the test login's: in
+            // memory, under its name only, gone with it (RemoteTestLogin).
+            if let testLoginUser {
+                guard let fp = RemoteTestLogin.shared.addKey(key, user: testLoginUser) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "Not a key for the current test login"])
+                    return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true, "fingerprint": fp, "testLogin": true])
+                return
+            }
             let r = DispatchQueue.main.sync { self.onRemoteAddKey?(key) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 

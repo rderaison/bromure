@@ -801,17 +801,23 @@ async function fatClientBringUp() {
     assertEq(r.probe, "authFailed", `unenrolled key not refused:\n${r.out}`);
   }))) return false;
 
-  if (!(await step("0.7 the password login enrolls the client key; the key then signs in alone", async () => {
+  if (!(await step("0.7 the password login enrolls the client key for the test login only; the key then signs in alone", async () => {
     const r = fatAuth(login.user, login.password);
     assertEq(r.password, "ok", `password login failed:\n${r.out}`);
     const fp = sshFingerprint(fatState.clientKey);
-    let enrolled = false;
+    let st = null, enrolled = false;
     for (let i = 0; i < 20 && !enrolled; i++) {
-      const st = await localCtl("GET", "/remote");
-      enrolled = (st.authorizedKeys || []).some((k) => k.fingerprint === fp);
+      st = await localCtl("GET", "/remote");
+      enrolled = (st.testLoginKeys || []).includes(fp);
       if (!enrolled) await sleep(250);
     }
-    assert(enrolled, "the password login didn't enroll the client key on the server");
+    assert(enrolled, "the password login didn't enroll the client key for the test login");
+    // The test login's key is its own: never in authorized_keys, never the
+    // owner's (it would outlive the test login).
+    assert(!(st.authorizedKeys || []).some((k) => k.fingerprint === fp),
+           "the test login's key landed in authorized_keys");
+    const asOwner = fatAuth(os.userInfo().username);
+    assertEq(asOwner.probe, "authFailed", `the test login's key signs in as the owner:\n${asOwner.out}`);
     const again = fatAuth(login.user);
     assertEq(again.probe, "ok", `enrolled key refused:\n${again.out}`);
   }))) return false;
