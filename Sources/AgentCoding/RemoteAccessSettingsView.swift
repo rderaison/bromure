@@ -84,7 +84,12 @@ struct RemoteAccessSettingsView: View {
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     if !account.isEnterprise || demoAccount != nil {
-                        Button("Sign Out") { account.signOut() }.buttonStyle(.link)
+                        // Revokes on bromure.io first; a failure keeps the
+                        // user signed in and shows account.error below.
+                        if account.busy && !demoRender { ProgressView().controlSize(.small) }
+                        Button("Sign Out") { Task { await account.signOutRevoking() } }
+                            .buttonStyle(.link)
+                            .disabled(account.busy)
                     }
                 }
                 Text("Your other devices — signed into the same account — can mirror this Mac peer-to-peer, even when it's behind NAT.")
