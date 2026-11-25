@@ -22,6 +22,24 @@ contextBridge.exposeInMainWorld('bromureElectron', {
   onWindowState: (cb: any) => ipcRenderer.on('win:state', (_e, s) => cb(s)),
   saveFile: (name: string, data: Uint8Array) => ipcRenderer.invoke('save-file', name, data),
   setTitle: (t: string) => ipcRenderer.send('set-title', t),
+  // The network tunnel: Linux only (the helper and forwarder are Linux
+  // programs); the renderer hides the toggle when this is absent.
+  tunnel: process.platform === 'linux' ? {
+    available: () => ipcRenderer.invoke('tunnel:available'),
+    start: (cidr: string) => ipcRenderer.invoke('tunnel:start', cidr),
+    stop: () => ipcRenderer.send('tunnel:stop'),
+    onExit: (cb: (why: string) => void) => { ipcRenderer.on('tunnel:exit', (_e, why) => cb(why)); },
+    onFlow: (cb: any) => { ipcRenderer.on('tunnel:flow', (_e, id, verb) => cb(id, verb)); },
+    flowOpened: (id: number, ok: boolean, error?: string) => ipcRenderer.send('tunnel:flow-opened', id, ok, error),
+    onFlowData: (cb: any) => { ipcRenderer.on('tunnel:flow-data', (_e, id, data) => cb(id, data)); },
+    flowAck: (id: number, n: number) => ipcRenderer.send('tunnel:flow-ack', id, n),
+    flowData: (id: number, data: Uint8Array) => ipcRenderer.send('tunnel:flow-recv', id, data),
+    onFlowPause: (cb: any) => { ipcRenderer.on('tunnel:flow-pause', (_e, id, p) => cb(id, p)); },
+    onFlowEnd: (cb: any) => { ipcRenderer.on('tunnel:flow-end', (_e, id) => cb(id)); },
+    flowEnd: (id: number) => ipcRenderer.send('tunnel:flow-eof', id),
+    onFlowClose: (cb: any) => { ipcRenderer.on('tunnel:flow-close', (_e, id) => cb(id)); },
+    flowClose: (id: number) => ipcRenderer.send('tunnel:flow-destroy', id),
+  } : undefined,
   // Screenshot/smoke-test runs only (BROMURE_SHOT set): connect to this host
   // unattended — trust its key, answer one password prompt (e.g. a one-time
   // code), which enrolls this run's key. Never present in a normal launch.

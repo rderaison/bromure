@@ -4,7 +4,7 @@
 // UI calls. Everything rides one SSH connection; every request is its own
 // exec channel.
 
-import { SSHConnection, type ConnectOptions, type HostKeyInfo, type ClientKey } from '../ssh/client';
+import { SSHConnection, type SSHChannel, type ConnectOptions, type HostKeyInfo, type ClientKey } from '../ssh/client';
 export type { HostKeyInfo } from '../ssh/client';
 import type { ByteStream } from '../net/stream';
 import { controlRequest, controlOpenStream, inflateRaw, ControlError, type RequestOptions } from '../control/http';
@@ -85,7 +85,49 @@ export class RemoteHost {
     this.streamGen++;
     this.conn?.close();
     this.conn = null;
+    this.fwdConn?.close();
+    this.fwdConn = null;
     this.setStatus('closed');
+  }
+
+  // ── guest forwards (the Linux desktop app's network tunnel) ────────────
+
+  private fwdConn: SSHConnection | null = null;
+  private fwdConnecting: Promise<SSHConnection> | null = null;
+
+  /** A raw stream to a guest on the remote's workspace subnet — the server's
+   *  `bromure-fatclient/1 forward <ip> <port>` (TCP) or `forward-udp <ip>`
+   *  (framed datagrams). On its own SSH connection, as the Mac's "fwd" lane:
+   *  bulk flows never stall the mirror's control connection, nor the reverse.
+   *  The channel comes back paused: set its handlers, then `resume()`. */
+  async openForward(verb: string): Promise<SSHChannel> {
+    if (!/^forward (\d{1,3}\.){3}\d{1,3} \d{1,5}$|^forward-udp (\d{1,3}\.){3}\d{1,3}$/.test(verb)) {
+      throw new Error('bad forward: ' + verb);
+    }
+    const conn = await this.ensureForwardConnection();
+    return conn.exec('bromure-fatclient/1 ' + verb);
+  }
+
+  private async ensureForwardConnection(): Promise<SSHConnection> {
+    if (this.fwdConn?.isOpen) return this.fwdConn;
+    if (this.fwdConnecting) return this.fwdConnecting;
+    if (this.stopped) throw new Error('disconnected');
+    this.fwdConnecting = (async () => {
+      // The main connection has pinned the host key and enrolled this
+      // device's key: this one only checks the pin (no prompts, no password).
+      await this.ensureConnection();
+      const pin = this.target.pinnedFingerprint;
+      const conn = await SSHConnection.connect(await this.target.dial(), {
+        username: this.target.username,
+        key: await this.cb.clientKey(),
+        verifyHostKey: async info => !!pin && info.fingerprint === pin,
+      });
+      if (this.stopped) { conn.close(); throw new Error('disconnected'); }
+      this.fwdConn = conn;
+      conn.onClose = () => { if (this.fwdConn === conn) this.fwdConn = null; };
+      return conn;
+    })();
+    try { return await this.fwdConnecting; } finally { this.fwdConnecting = null; }
   }
 
   private async ensureConnection(): Promise<SSHConnection> {

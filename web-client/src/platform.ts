@@ -23,8 +23,38 @@ export interface ElectronAPI extends ElectronNetBridge {
   saveFile(name: string, data: Uint8Array): Promise<boolean>;
   setTitle(t: string): void;
   appVersion: string;
+  /** The system-wide network tunnel (Linux desktop app only; absent on
+   *  Windows and in the hosted app): the remote's workspace subnet routed
+   *  from this machine, each flow carried over the window's SSH. */
+  tunnel?: TunnelBridge;
   /** Smoke-test hook, only in Electron screenshot runs (see preload.ts). */
   shotTest?: { host: string; port: number; user: string; password: string };
+}
+
+/** Main process ⇄ renderer for the tunnel (electron/main.ts). The forwarder
+ *  (bromure-client-tunnel) opens one local stream per flow; main hands each
+ *  to the renderer as `onFlow(id, verb)`, the renderer opens the SSH channel
+ *  and answers `flowOpened`. Bytes: local → remote via `onFlowData` (acked
+ *  with `flowAck` once the channel took them), remote → local via
+ *  `flowData` (main says `onFlowPause` while the local side is full). */
+export interface TunnelBridge {
+  /** Whether the tunnel can run here, and if not, why (one line). */
+  available(): Promise<{ ok: boolean; reason?: string }>;
+  start(cidr: string): Promise<{ ok: boolean; ifname?: string; error?: string }>;
+  stop(): void;
+  /** The forwarder stopped on its own (the helper went away, a crash). */
+  onExit(cb: (why: string) => void): void;
+  onFlow(cb: (id: number, verb: string) => void): void;
+  flowOpened(id: number, ok: boolean, error?: string): void;
+  onFlowData(cb: (id: number, data: Uint8Array) => void): void;
+  flowAck(id: number, bytes: number): void;
+  flowData(id: number, data: Uint8Array): void;
+  onFlowPause(cb: (id: number, paused: boolean) => void): void;
+  /** The local side finished sending (half-close) / the remote side did. */
+  onFlowEnd(cb: (id: number) => void): void;
+  flowEnd(id: number): void;
+  onFlowClose(cb: (id: number) => void): void;
+  flowClose(id: number): void;
 }
 
 declare global { interface Window { bromureElectron?: ElectronAPI } }

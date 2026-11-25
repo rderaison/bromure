@@ -98,6 +98,9 @@ export class SSHChannel {
   private delivering = false;
   /** Set when the receiver isn't ready yet; data queues meanwhile. */
   paused = false;
+  /** Called when everything written has gone out (the peer's window took
+   *  it): a producer that stopped on `queuedBytes` resumes. */
+  onDrain: () => void = () => {};
 
   constructor(readonly conn: SSHConnection, readonly localId: number) {}
 
@@ -106,8 +109,19 @@ export class SSHChannel {
     this.outQueue.push(data);
     this.flush();
   }
+  /** Bytes written but not yet sent (waiting for the peer's window). */
+  get queuedBytes(): number {
+    let n = 0;
+    for (const c of this.outQueue) n += c.length;
+    return n;
+  }
   /** @internal */
   flush() {
+    const had = this.outQueue.length > 0;
+    this.flushQueue();
+    if (had && !this.outQueue.length && !this.closed) this.onDrain();
+  }
+  private flushQueue() {
     while (this.outQueue.length && this.remoteWindow > 0 && !this.closed) {
       let chunk = this.outQueue[0];
       const n = Math.min(chunk.length, this.remoteWindow, this.remoteMaxPacket - 64);
