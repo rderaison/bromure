@@ -11,7 +11,8 @@
 //      scripts/package.mjs for every arch in ARCHES — both from one container
 //      on either host arch (packaging only swaps Electron's prebuilt binary).
 //      ci/linux/build.sh checks each .deb (arch, setuid chrome-sandbox,
-//      desktop entry + bromure-client:// handler, Electron's ELF arch) and
+//      desktop entry + bromure-client:// handler, Electron's ELF arch, the
+//      network tunnel's program and its helper's systemd units) and
 //      tarball, and writes SHA256SUMS.
 //   2. Smoke, each arch natively: the .deb apt-installed on clean
 //      SMOKE_BASES images (its Depends must resolve), the install checked,

@@ -2,7 +2,7 @@
   "name": "bromure-client-web",
   "private": true,
   "version": "0.1.0",
-  "description": "Bromure Agentic Coding client — web (hosted on bromure.io) and Electron (Linux/Windows)",
+  "description": "Bromure Agentic Coding client \u2014 web (hosted on bromure.io) and Electron (Linux/Windows)",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -19,6 +19,7 @@
     "installer:win": "node scripts/installer-win.mjs",
     "make:icon": "electron scripts/make-icon.cjs",
     "test": "vitest run",
+    "test:tunnel": "cd tunnel && go test ./...",
     "check:icons": "node scripts/check-icons.mjs"
   },
   "dependencies": {
