@@ -14,7 +14,7 @@
 pipeline {
     agent any
     environment {
-        DOCKER_API_VERSION = '1.43'
+        DOCKER_API_VERSION = '1.44'   // buildx/BuildKit on the agents needs ≥ 1.44
     }
     options {
         timeout(time: 30, unit: 'MINUTES')
