@@ -2,7 +2,7 @@
   "name": "bromure-client-web",
   "private": true,
   "version": "0.1.0",
-  "description": "Bromure Agentic Coding client \u2014 web (hosted on bromure.io) and Electron (Linux/Windows)",
+  "description": "Bromure Agentic Coding client — web (hosted on bromure.io) and Electron (Linux/Windows)",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "build:electron": "node electron/build.mjs",
-    "build:hosted": "npm run build && COPYFILE_DISABLE=1 tar --no-xattrs --exclude=*.map -czf bromure-client-web.tgz -C dist .",
+    "build:web": "tsc -p tsconfig.json --noEmit && vite build --base=/client/ --outDir dist-web",
+    "build:hosted": "npm run build:web && COPYFILE_DISABLE=1 tar --no-xattrs --exclude=*.map -czf bromure-client-web.tgz -C dist-web .",
     "electron": "npm run build && npm run build:electron && electron .",
     "package:linux": "npm run build && npm run build:electron && node scripts/package.mjs linux",
     "package:win": "npm run build && npm run build:electron && node scripts/package.mjs win32",

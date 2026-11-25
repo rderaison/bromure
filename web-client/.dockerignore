@@ -1,8 +1,9 @@
-# Build context for ci/linux/Dockerfile: sources only (the image runs npm ci
+# Build context for ci/linux/Dockerfile and ci/web/Dockerfile: sources only (the image runs npm ci
 # and builds everything itself).
 node_modules
 dist
 dist-electron
+dist-web
 out
 .reference*
 .build-*

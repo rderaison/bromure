@@ -1,0 +1,59 @@
+// Jenkinsfile.client-web — build the hosted Bromure Client (web-client/, served
+// at https://bromure.io/client/) and push its image:
+//   registry.digitalocean.com/seclio-cr/bromure-web-client:{latest,<git sha>}
+// web-client/ci/web/Dockerfile: socket.dev-wrapped npm ci, unit tests, vite
+// build with base /client/, then nginx-unprivileged on :8080 (CSP/COOP/nosniff
+// in ci/web/nginx.conf; Referrer-Policy and the /client route are the edge's).
+// Same registry credential and rollout as bromure_web's Jenkinsfile; the
+// k8s Deployment/Service `web-client` (namespace bromure) lives in bromure_web.
+pipeline {
+    agent any
+    environment {
+        DOCKER_API_VERSION = '1.43'
+        IMAGE = 'registry.digitalocean.com/seclio-cr/bromure-web-client'
+    }
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+    parameters {
+        booleanParam(name: 'ROLLOUT', defaultValue: true,
+            description: 'Restart deploy/web-client in namespace bromure after the push.')
+    }
+
+    stages {
+        stage('Build & Push') {
+            steps {
+                withCredentials([file(credentialsId: 'DOCKER_DO_REGISTRY', variable: 'DOCKER_CONFIG_FILE')]) {
+                    sh '''
+                        set -eu
+                        mkdir -p "$WORKSPACE/.docker"
+                        cp "$DOCKER_CONFIG_FILE" "$WORKSPACE/.docker/config.json"
+                        export DOCKER_CONFIG="$WORKSPACE/.docker"
+                        sha=$(git rev-parse --short=12 HEAD)
+                        docker buildx build --platform linux/amd64 \
+                            -f web-client/ci/web/Dockerfile \
+                            -t "$IMAGE:latest" -t "$IMAGE:$sha" \
+                            --push web-client
+                    '''
+                }
+            }
+        }
+
+        stage('Rollout Restart') {
+            when { expression { params.ROLLOUT == null || params.ROLLOUT } }
+            steps {
+                withCredentials([file(credentialsId: 'DIGITAL_OCEAN_KUBECONFIG', variable: 'KUBECONFIG')]) {
+                    sh 'kubectl rollout restart deploy/web-client -n bromure'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'rm -rf "$WORKSPACE/.docker"'
+        }
+    }
+}

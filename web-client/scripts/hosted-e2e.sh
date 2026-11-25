@@ -9,7 +9,7 @@ set -u
 cd "$(dirname "$0")/.."
 OUT=${1:-/tmp/bromure-hosted-e2e.png}
 LOG=$(mktemp)
-npx vite build --outDir .build-qa >/dev/null 2>&1 && node electron/build.mjs >/dev/null || exit 1
+npx vite build --base=/client/ --outDir .build-qa >/dev/null 2>&1 && node electron/build.mjs >/dev/null || exit 1
 pkill -f "scripts/fake-cloud.mjs" 2>/dev/null; sleep 0.5
 FAKE_CLOUD_STATIC="$(pwd)/.build-qa" node scripts/fake-cloud.mjs >"$LOG" 2>&1 & FAKE=$!
 trap 'kill $FAKE 2>/dev/null; rm -f "$LOG"' EXIT

@@ -32,8 +32,9 @@ how the port is organised and verified is in [PORTING.md](PORTING.md).
 
 ```bash
 npm ci        # through Socket: SOCKET_CLI_VIEW_ALL_RISKS=1 npx @socketsecurity/cli npm ci
-npm run build             # → dist/ (the hosted bundle; relative asset URLs)
-npm run build:hosted      # → bromure-client-web.tgz for bromure.io/client/
+npm run build             # → dist/ (relative asset URLs: what Electron loads)
+npm run build:web         # → dist-web/ (absolute /client/ asset URLs: the hosted app)
+npm run build:hosted      # → bromure-client-web.tgz of dist-web/
 npm run package:linux     # → out/bromure-client_<ver>_{amd64,arm64}.deb + out/bromure-client-<ver>-linux-{x64,arm64}.tar.gz
 npm run package:win       # → out/Bromure Client-win32-{x64,arm64}(.zip) — also runs on Windows
 npm run installer:win     # → out/BromureClient-<version>-{x64,arm64}-setup.exe (needs makensis: NSIS 3.08+)
@@ -72,6 +73,20 @@ one-time code from `bromure-ac admin code <user>` pairs and enrolls the key):
 ```bash
 BROMURE_SHOT=/tmp/x.png BROMURE_TEST_HOST=<host> BROMURE_TEST_PORT=2222 \
 BROMURE_TEST_USER=<user> BROMURE_TEST_PASSWORD=<code> xvfb-run -a ./bromure-client --no-sandbox
+```
+
+## Hosted image (bromure.io/client/)
+
+`Jenkinsfile.client-web` (repo root) builds `web-client/ci/web/Dockerfile` and
+pushes `registry.digitalocean.com/seclio-cr/bromure-web-client:{latest,<sha>}`,
+then restarts `deploy/web-client` (namespace `bromure`; manifests live in
+bromure_web). The image is nginx-unprivileged on **:8080** serving the bundle
+under `/client/` (SPA fallback to index.html, `/client/assets/` immutable,
+`/healthz`), and sets CSP, COOP and nosniff itself (`ci/web/nginx.conf`,
+`ci/web/security-headers.conf`). The edge routes `path_beg /client` here and
+owns `Referrer-Policy: no-referrer`. Locally:
+```bash
+docker build -t bwc -f ci/web/Dockerfile . && docker run --rm -p 8080:8080 bwc   # → http://localhost:8080/client/
 ```
 
 ## Linux packaging
