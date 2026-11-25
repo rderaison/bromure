@@ -17,8 +17,14 @@
 //      the app rendered headless under Xvfb (ci/linux/smoke-host.sh). arm64
 //      on kube-builder-a; amd64 on linux-kvm-amd64 (inputs and outputs by
 //      stash), where a busy or failing agent only marks the run UNSTABLE.
-//   3. Archive: out/*.deb, out/*.tar.gz, SHA256SUMS and the smoke renders.
-// Nothing is published.
+//   3. PUSH_RELEASE (and only when everything above passed): publish the
+//      .debs to the APT repository on DigitalOcean Spaces — the same one as
+//      bromure-ac (Jenkinsfile.linux), https://dl.bromure.io/apt, suite
+//      RELEASE_CHANNEL, signed with the same APT_SIGNING_KEY — with
+//      tools/apt-publish.mjs --package bromure-client in a node container;
+//      then apt itself reads the repository back through dl.bromure.io.
+//      A version already in the suite is refused: bump web-client/package.json.
+//   4. Archive: out/*.deb, out/*.tar.gz, SHA256SUMS and the smoke renders.
 pipeline {
     agent { label 'kube-builder-a' }
 
@@ -40,6 +46,21 @@ pipeline {
             description: 'Distro images the .deb is installed and launched on (space-separated).')
         booleanParam(name: 'SMOKE_AMD64', defaultValue: true,
             description: 'Also smoke-test the amd64 .deb natively on linux-kvm-amd64.')
+        booleanParam(name: 'PUSH_RELEASE', defaultValue: false,
+            description: 'Publish the .debs to the APT repository on DigitalOcean Spaces (https://dl.bromure.io/apt). Skipped unless the build and every smoke passed.')
+        choice(name: 'RELEASE_CHANNEL', choices: ['stable', 'beta'],
+            description: 'The APT suite they go to. Only used when PUSH_RELEASE is checked. A version already in the other suite is promoted: this suite gets that package, not this build\'s.')
+    }
+
+    environment {
+        // Non-secret Spaces config, as Jenkinsfile.linux (bromure-ac): the
+        // same repository. The secrets are Jenkins credentials: DO_SPACES_KEY,
+        // DO_SPACES_SECRET, and APT_SIGNING_KEY (a secret file: the armored
+        // OpenPGP secret key, without a passphrase, that signs the repository).
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
     }
 
     stages {
@@ -149,6 +170,71 @@ pipeline {
                             }
                         }
                     }
+                }
+            }
+        }
+        stage('Publish (APT)') {
+            // Never a package whose smoke failed (an UNSTABLE amd64 side included).
+            when { expression { params.PUSH_RELEASE == true && currentBuild.currentResult == 'SUCCESS' } }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',    variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET', variable: 'DO_SPACES_SECRET'),
+                    file(credentialsId:   'APT_SIGNING_KEY',  variable: 'APT_KEY_FILE')
+                ]) {
+                    sh '''
+                        set -eu
+                        export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                        suite="${RELEASE_CHANNEL:-stable}"
+                        ls client-linux/bromure-client_*.deb >/dev/null 2>&1 || { echo "no .deb to publish"; exit 1; }
+                        # The publisher image (as Jenkinsfile.linux): node, the release
+                        # tools (socket.dev-wrapped install), gpg, dpkg-deb and apt
+                        # (Debian's), and this run's packages.
+                        rm -rf client-linux/pub && mkdir -p client-linux/pub/tools client-linux/pub/debs
+                        cp tools/package.json tools/package-lock.json tools/apt-publish.mjs client-linux/pub/tools/
+                        cp client-linux/bromure-client_*.deb client-linux/pub/debs/
+                        printf '%s\\n' \\
+                            'FROM node:22-bookworm-slim' \\
+                            'RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends gnupg curl ca-certificates && rm -rf /var/lib/apt/lists/*' \\
+                            'WORKDIR /work' \\
+                            'COPY tools/package.json tools/package-lock.json tools/' \\
+                            'RUN cd tools && (npx --yes @socketsecurity/cli npm ci --silent || npx --yes @socketsecurity/cli npm install --silent)' \\
+                            'COPY . .' > client-linux/pub/Dockerfile
+                        img="bromure-client-apt-publisher:$BUILD_NUMBER"
+                        docker build -q -t "$img" client-linux/pub
+                        # The key goes in as an environment variable (no bind mounts here).
+                        APT_SIGNING_KEY=$(cat "$APT_KEY_FILE")
+                        export APT_SIGNING_KEY
+                        docker run --rm \\
+                            -e DO_SPACES_KEY -e DO_SPACES_SECRET -e APT_SIGNING_KEY \\
+                            -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET -e DO_SPACES_PUBLIC_BASE \\
+                            "$img" \\
+                            sh -c 'node tools/apt-publish.mjs publish --package bromure-client --suite "$0" debs/*.deb' "$suite"
+                        unset APT_SIGNING_KEY
+
+                        # Read back as a desktop would, through dl.bromure.io: the
+                        # version this run built, for the architectures it built.
+                        version=$(ls client-linux/bromure-client_*.deb | head -1 | sed 's#.*/bromure-client_##; s#_[^_]*[.]deb$##')
+                        arches=$(ls client-linux/bromure-client_*.deb | sed 's#.*_##; s#[.]deb$##' | sort -u | paste -sd, -)
+                        ok=0
+                        for attempt in 1 2 3 4 5 6 7 8; do
+                            if docker run --rm "$img" \\
+                                node tools/apt-publish.mjs verify --package bromure-client --url "$DO_SPACES_PUBLIC_BASE/apt" \\
+                                    --suite "$suite" --expect "$version" --arches "$arches"; then
+                                ok=1; break
+                            fi
+                            echo "not visible yet (attempt $attempt); retrying in 15 s"
+                            sleep 15
+                        done
+                        docker rmi "$img" >/dev/null || true
+                        [ "$ok" = 1 ] || { echo "the published repository doesn't read back as $version ($arches) in $suite"; exit 1; }
+                        echo
+                        echo "bromure-client $version is in $suite. On a desktop:"
+                        echo "  sudo install -d -m 755 /etc/apt/keyrings"
+                        echo "  curl -fsSL $DO_SPACES_PUBLIC_BASE/apt/bromure-archive-keyring.gpg | sudo tee /etc/apt/keyrings/bromure.gpg >/dev/null"
+                        echo "  echo 'deb [signed-by=/etc/apt/keyrings/bromure.gpg] $DO_SPACES_PUBLIC_BASE/apt $suite main' | sudo tee /etc/apt/sources.list.d/bromure.list"
+                        echo "  sudo apt update && sudo apt install bromure-client"
+                    '''
                 }
             }
         }

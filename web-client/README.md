@@ -114,7 +114,19 @@ CI: `Jenkinsfile.client-linux` (repo root) builds in Docker on kube-builder-a
 packages for x64 + arm64 from one container, checks each .deb/tarball), then
 apt-installs each .deb on clean `ubuntu:24.04` / `debian:12` containers and
 renders it under Xvfb (`ci/linux/smoke-host.sh`), arm64 there and amd64 on
-linux-kvm-amd64. Locally, the same as Jenkins:
+linux-kvm-amd64. With `PUSH_RELEASE` (and only when the build and every smoke
+passed) it publishes the .debs to the same signed APT repository as the
+bromure-ac server packages — `https://dl.bromure.io/apt`, suite
+`RELEASE_CHANNEL` (stable/beta) — via `tools/apt-publish.mjs --package
+bromure-client`, then reads it back with apt. A version already in the suite is
+refused, so bump `package.json`'s version per release. On a desktop:
+```bash
+sudo install -d -m 755 /etc/apt/keyrings
+curl -fsSL https://dl.bromure.io/apt/bromure-archive-keyring.gpg | sudo tee /etc/apt/keyrings/bromure.gpg >/dev/null
+echo 'deb [signed-by=/etc/apt/keyrings/bromure.gpg] https://dl.bromure.io/apt stable main' | sudo tee /etc/apt/sources.list.d/bromure.list
+sudo apt update && sudo apt install bromure-client
+```
+Locally, the same as Jenkins:
 ```bash
 docker build -t bcl-builder -f ci/linux/Dockerfile . && docker run --name bcl bcl-builder
 docker cp bcl:/home/node/artifacts ./ci-out && docker rm bcl
