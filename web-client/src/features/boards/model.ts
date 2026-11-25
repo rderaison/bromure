@@ -435,3 +435,20 @@ export function chainCycles(id: string, all: Automation[]) {
 
 export const workspaceOf = (st: RemoteState | null | undefined, id?: string) => st?.workspaces?.find(w => w.id === id);
 export const accentOf = (st: RemoteState | null | undefined, id?: string) => workspaceOf(st, id)?.accentHex ?? '#888888';
+
+/** Who a task can be queued for (the task editor's and "Who picks this up?"'s list). */
+export interface Choices {
+  sessions: { id: string; label: string; workspace: string; busy: boolean; profileID?: string }[];
+  rooms: { id: string; name: string }[];
+}
+
+export function assigneeChoices(st: RemoteState): Choices {
+  const byName = (a: string, b: string) => a.replace(/^@/, '').localeCompare(b.replace(/^@/, ''), undefined, { numeric: true, sensitivity: 'base' });
+  const sessions = (st.agentSessions ?? [])
+    // Every session: a list cut to the first 40 left the others unassignable.
+    .filter(s => !s.archivedAt && !(s as any).deletedAt && (s as any).role !== 'switchboard')
+    .map(s => ({ id: s.id, label: s.nickname ? '@' + s.nickname : s.title, workspace: workspaceOf(st, s.profileID)?.name ?? '', busy: false, profileID: s.profileID }))
+    .sort((a, b) => byName(a.label, b.label) || a.workspace.localeCompare(b.workspace));
+  const rooms = (st.agentRooms ?? []).filter(r => !(r as any).archivedAt).map(r => ({ id: r.id, name: r.name })).sort((a, b) => byName(a.name, b.name));
+  return { sessions, rooms };
+}
