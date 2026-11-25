@@ -64,3 +64,29 @@ export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: s
     throw e;
   }
 }
+
+/** The guest agent's answer when it predates an op (bromure-agentd.py). */
+const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.message ?? e));
+
+/** Copy a dropped file OVER `dest` without ever leaving it half-written: the
+ *  bytes go to a hidden temp file beside it, which replaces `dest` in one
+ *  atomic step (`rename`) only once the whole source was read and written. A
+ *  copy that fails part-way — the source became unreadable, a write was
+ *  refused — leaves `dest` exactly as it was and removes the temp file.
+ *  A guest too old for `rename` gets the direct write it always had
+ *  (`open` is called again for that: a File can be read twice). */
+export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
+                                       fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                                       progress?: (sent: number) => void): Promise<number> {
+  const cut = dest.lastIndexOf('/');
+  const tmp = `${dest.slice(0, cut + 1)}.${dest.slice(cut + 1)}.bromure-${crypto.randomUUID()}.part`;
+  const sent = await writeGuestFile(open(), tmp, chunk, fileOp, encode, progress);
+  try {
+    await fileOp({ op: 'rename', path: tmp, dest });
+    return sent;
+  } catch (e) {
+    await fileOp({ op: 'remove', path: tmp }).catch(() => {});
+    if (!unknownOp(e)) throw e;
+  }
+  return writeGuestFile(open(), dest, chunk, fileOp, encode, progress);
+}

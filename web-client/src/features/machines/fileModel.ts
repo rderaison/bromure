@@ -8,7 +8,7 @@ import type { RemoteHost } from '../../core/remote/host';
 import { saveFile } from '../../platform';
 import { RepoGitPrograms, shellQuote as q, b64ToBytes, bytesToB64, decodeUTF8, joinPath, safeRelativePath, dirname, lastPathComponent, fileBytes } from './util';
 import { tarGzStream, type TarEntry } from './tar';
-import { writeGuestFile } from '../../core/remote/chunkedWrite';
+import { writeGuestFile, replaceGuestFile } from '../../core/remote/chunkedWrite';
 
 export type GitStatus = 'modified' | 'added' | 'untracked' | 'deleted' | 'renamed' | 'conflicted';
 export const STATUS_TINT: Record<GitStatus, string> = {
@@ -352,8 +352,11 @@ export class FileExplorerModel {
     await writeGuestFile(stream, guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
       sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
   }
+  /** A dropped file lands on its destination only once complete: a copy
+   *  that fails part-way leaves a file already there untouched. */
   private async uploadFile(file: File, guestPath: string, label: string) {
-    await this.writeStream(file.stream(), guestPath, label);
+    await replaceGuestFile(() => file.stream(), guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
+      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
   }
   private async uploadFolder(name: string, entries: TarEntry[], guestDir: string): Promise<string | null> {
     this.transferText = `Packing ${name}…`; this.emit();

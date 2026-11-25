@@ -1664,6 +1664,24 @@ def _file_op(spec):
                     os.unlink(archive)
                 except OSError:
                     pass
+        if op == "rename":
+            # An upload's last step: a complete temp file replaces `dest` in
+            # one atomic step, so a copy that fails part-way never leaves the
+            # destination truncated. An existing file keeps its permissions;
+            # a symlinked destination is written through (like a plain write).
+            dest = spec.get("dest", "")
+            if not dest.startswith("/"):
+                return {"error": "dest must be absolute", "exit_code": 1}
+            if os.path.islink(dest):
+                dest = os.path.realpath(dest)
+            if os.path.isdir(dest):
+                return {"error": "%s is a folder" % dest, "exit_code": 1}
+            try:
+                shutil.copymode(dest, path)
+            except OSError:
+                pass
+            os.replace(path, dest)
+            return {"exit_code": 0}
         if op == "remove":
             if os.path.isdir(path) and not os.path.islink(path):
                 shutil.rmtree(path)

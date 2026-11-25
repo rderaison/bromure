@@ -81,9 +81,36 @@ enum FolderUpload {
         }.value
     }
 
-    /// One file, chunked: a truncating first write, then appends.
+    /// One file onto `guestPath`, never left half-written: the bytes go to a
+    /// hidden temp file beside it, which replaces `guestPath` in one atomic
+    /// step (the guest's `rename`) only once all of it was read and written.
+    /// A copy that fails part-way leaves a file already there untouched and
+    /// removes the temp file. A guest agent too old for `rename` gets the
+    /// direct write it always had.
     static func write(_ src: URL, to guestPath: String, label: String, op: FileOp,
                       progress: ((String) -> Void)?) async throws {
+        let dir = (guestPath as NSString).deletingLastPathComponent
+        let name = (guestPath as NSString).lastPathComponent
+        let tmp = (dir as NSString).appendingPathComponent(".\(name).bromure-\(UUID().uuidString).part")
+        do {
+            try await writeChunks(src, to: tmp, label: label, op: op, progress: progress)
+        } catch {
+            _ = try? await op(["op": "remove", "path": tmp])
+            throw error
+        }
+        do {
+            _ = try await op(["op": "rename", "path": tmp, "dest": guestPath])
+            return
+        } catch {
+            _ = try? await op(["op": "remove", "path": tmp])
+            guard ("\(error) " + error.localizedDescription).localizedCaseInsensitiveContains("unknown file op") else { throw error }
+        }
+        try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
+    }
+
+    /// One file, chunked: a truncating first write, then appends.
+    private static func writeChunks(_ src: URL, to guestPath: String, label: String, op: FileOp,
+                                    progress: ((String) -> Void)?) async throws {
         guard let handle = try? FileHandle(forReadingFrom: src) else { return }
         defer { try? handle.close() }
         var first = true

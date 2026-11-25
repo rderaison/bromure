@@ -747,23 +747,16 @@ final class FileExplorerModel {
         try await uploadFile(at: src, to: guestPath, label: src.lastPathComponent)
     }
 
+    /// One file, atomically onto `guestPath` (FolderUpload.write: a temp
+    /// file renamed over it once complete — a failed copy leaves a file
+    /// already there untouched).
     private func uploadFile(at src: URL, to guestPath: String, label: String) async throws {
-        guard let handle = try? FileHandle(forReadingFrom: src) else { return }
-        defer { try? handle.close() }
-        var first = true
-        var sent: Int64 = 0
-        while true {
-            let data = handle.readData(ofLength: Self.chunkBytes)
-            if data.isEmpty && !first { break }
-            _ = try await fileOp(["op": "write", "path": guestPath,
-                                  "data": data.base64EncodedString(), "append": !first])
-            sent += Int64(data.count)
-            transferText = String(format: NSLocalizedString("Copying %@ in… %@", comment: ""),
-                                  label,
-                                  ByteCountFormatter.string(fromByteCount: sent, countStyle: .file))
-            first = false
-            if data.count < Self.chunkBytes { break }
-        }
+        try await FolderUpload.write(src, to: guestPath, label: label,
+                                     op: { [weak self] op in
+                                         guard let self else { throw CancellationError() }
+                                         return try await self.fileOp(op)
+                                     },
+                                     progress: { [weak self] text in self?.transferText = text })
     }
 
 #if os(macOS)

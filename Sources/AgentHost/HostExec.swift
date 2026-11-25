@@ -119,6 +119,26 @@ enum HostExec {
                 let r = HostProcess.run(executable: "/usr/bin/tar", args: ["-xf", archive, "-C", path],
                                         env: ["PATH": "/usr/bin:/bin"], timeout: 120)
                 return r.status == 0 ? ["exit_code": 0] : ["error": r.stderr, "exit_code": 1]
+            case "rename":
+                // An upload's last step (bromure-agentd.py's `rename`): the
+                // complete temp file replaces `dest` atomically; an existing
+                // file keeps its permissions, a symlink is written through.
+                var dest = mapHome(spec["dest"] as? String ?? "")
+                guard dest.hasPrefix("/") else { return ["error": "dest must be absolute", "exit_code": 1] }
+                if (try? fm.destinationOfSymbolicLink(atPath: dest)) != nil {
+                    dest = URL(fileURLWithPath: dest).resolvingSymlinksInPath().path
+                }
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: dest, isDirectory: &isDir), isDir.boolValue {
+                    return ["error": "\(dest) is a folder", "exit_code": 1]
+                }
+                if let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] {
+                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
+                }
+                guard Foundation.rename(path, dest) == 0 else {
+                    return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                }
+                return ["exit_code": 0]
             case "remove":
                 try fm.removeItem(atPath: path)
                 return ["exit_code": 0]
