@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"time"
 )
 
 // The userspace stack behind the TUN — a port of the macOS fat client's
@@ -33,12 +34,13 @@ type forwarder struct {
 	umu   sync.Mutex
 	udp   map[uint32]*udpChannel
 	frags *reassembler // used by the packet loop only
+	now   func() time.Time
 }
 
 func newForwarder(tun io.ReadWriter, network, mask uint32,
 	dialTCP func(string, int) (upstream, error), dialUDP func(string) (upstream, error)) *forwarder {
 	return &forwarder{tun: tun, network: network, mask: mask, dialTCP: dialTCP, dialUDP: dialUDP,
-		flows: map[flowKey]*tcpFlow{}, udp: map[uint32]*udpChannel{}, frags: newReassembler()}
+		flows: map[flowKey]*tcpFlow{}, udp: map[uint32]*udpChannel{}, frags: newReassembler(), now: time.Now}
 }
 
 // run reads packets until the TUN fails; it returns that error.
@@ -142,7 +144,7 @@ func (fw *forwarder) udpChannel(guest uint32) *udpChannel {
 	if c := fw.udp[guest]; c != nil {
 		return c
 	}
-	c := &udpChannel{guest: guest, fw: fw}
+	c := &udpChannel{guest: guest, fw: fw, sent: map[udpTuple]time.Time{}}
 	fw.udp[guest] = c
 	return c
 }
@@ -161,6 +163,14 @@ func (fw *forwarder) dropUDP(c *udpChannel) {
 //
 // The remote relay keeps a socket per (srcIP, srcPort, dstPort) and frames the
 // replies back the same way (srcIP/srcPort: the local process's).
+//
+// A reply frame names the local destination, so it's only trusted for a
+// flow the local side started: every datagram sent records its (srcIP,
+// srcPort, dstPort), and a reply goes to the TUN only for a tuple sent within
+// udpFlowTimeout (refreshed by the local side only: the remote can't extend
+// it). Anything else — another local address or port, a guest port nothing
+// was sent to — is dropped: a relay can't aim datagrams at arbitrary local
+// listeners (another user's included) from a guest address.
 type udpChannel struct {
 	guest uint32
 	fw    *forwarder
@@ -170,10 +180,52 @@ type udpChannel struct {
 	connecting bool
 	closed     bool
 	queued     [][]byte
-	wmu        sync.Mutex // serializes frame writes
+	sent       map[udpTuple]time.Time // last datagram sent per local flow
+	wmu        sync.Mutex             // serializes frame writes
 }
 
-const maxQueuedUDP = 256
+type udpTuple struct {
+	srcIP            uint32 // the local process's address and port
+	srcPort, dstPort uint16 // dstPort: the guest's
+}
+
+const (
+	maxQueuedUDP   = 256
+	maxUDPFlows    = 1024 // per guest
+	udpFlowTimeout = 2 * time.Minute
+)
+
+// noteSent records an outbound datagram's flow (c.mu held).
+func (c *udpChannel) noteSent(t udpTuple) {
+	now := c.fw.now()
+	if _, ok := c.sent[t]; !ok && len(c.sent) >= maxUDPFlows {
+		var oldest udpTuple
+		var at time.Time
+		for k, v := range c.sent {
+			if now.Sub(v) > udpFlowTimeout {
+				delete(c.sent, k)
+			} else if at.IsZero() || v.Before(at) {
+				oldest, at = k, v
+			}
+		}
+		if len(c.sent) >= maxUDPFlows {
+			delete(c.sent, oldest)
+		}
+	}
+	c.sent[t] = now
+}
+
+// replyAllowed: a reply for a flow the local side started, not expired.
+func (c *udpChannel) replyAllowed(t udpTuple) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	at, ok := c.sent[t]
+	if ok && c.fw.now().Sub(at) > udpFlowTimeout {
+		delete(c.sent, t)
+		return false
+	}
+	return ok
+}
 
 func (c *udpChannel) send(srcIP uint32, srcPort, dstPort uint16, payload []byte) {
 	if len(payload) > 65535-8 {
@@ -185,6 +237,7 @@ func (c *udpChannel) send(srcIP uint32, srcPort, dstPort uint16, payload []byte)
 		c.mu.Unlock()
 		return
 	}
+	c.noteSent(udpTuple{srcIP: srcIP, srcPort: srcPort, dstPort: dstPort})
 	if up := c.up; up != nil {
 		c.mu.Unlock()
 		c.writeFrame(up, f)
@@ -242,8 +295,9 @@ func (c *udpChannel) readLoop(up upstream) {
 				break
 			}
 			body := acc[2 : 2+bodyLen]
-			if bodyLen >= 8 {
-				// guest → process: src = (guest, dstPort), dst = (process, srcPort).
+			// guest → process: src = (guest, dstPort), dst = (process, srcPort);
+			// only for a flow the local side started.
+			if bodyLen >= 8 && c.replyAllowed(udpTuple{srcIP: u32(body, 0), srcPort: u16(body, 4), dstPort: u16(body, 6)}) {
 				c.fw.write(buildUDP(udpDatagram{srcIP: c.guest, dstIP: u32(body, 0),
 					srcPort: u16(body, 6), dstPort: u16(body, 4), payload: body[8:]}))
 			}
