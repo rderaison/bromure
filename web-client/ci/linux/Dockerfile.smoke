@@ -1,0 +1,19 @@
+# Bromure Client — install-and-launch check (Jenkinsfile.client-linux).
+# Context: a folder with the .deb for THIS platform's arch + smoke.sh.
+# Installs the .deb the way a user would (apt resolves its Depends on a clean
+# distro), then smoke.sh launches it under Xvfb and renders a screenshot.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+ENV DEBIAN_FRONTEND=noninteractive
+COPY *.deb /tmp/
+# desktop-file-utils first, so the package's postinst indexes its scheme
+# handler (every desktop install has it).
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends xvfb xauth desktop-file-utils ca-certificates \
+ && apt-get install -y -qq --no-install-recommends /tmp/*.deb \
+ && rm -rf /var/lib/apt/lists/* /tmp/*.deb \
+ && useradd -m tester
+COPY smoke.sh /usr/local/bin/bromure-smoke
+USER tester
+WORKDIR /home/tester
+CMD ["sh", "/usr/local/bin/bromure-smoke"]

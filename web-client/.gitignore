@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-electron
+dist-web
+out
+.reference*
+.build-*
+out
+*.tgz

@@ -1,0 +1,99 @@
+/* "Connect to Remote Bromure" window + trust prompts — FatClientConnect.swift. */
+
+.cx-screen {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--ac-canvas); overflow: auto; -webkit-app-region: drag;
+}
+.cx-window {
+  width: 480px; max-width: 100%; background: var(--window-bg); border-radius: 10px;
+  box-shadow: var(--shadow-window); overflow: hidden; -webkit-app-region: no-drag; margin: auto;
+}
+.cx-titlebar {
+  height: 28px; display: flex; align-items: center; padding: 0 8px; gap: 8px; -webkit-app-region: drag;
+}
+.cx-titlebar .lights { -webkit-app-region: no-drag; }
+.cx-lights-spacer { width: 52px; flex-shrink: 0; }
+.cx-titlebar-title { flex: 1; text-align: center; font-size: 13px; font-weight: 600; color: var(--label-secondary); }
+.cx-content { padding: 4px 20px 20px; display: flex; flex-direction: column; gap: 16px; }
+.cx-title { font-size: 15px; font-weight: 700; line-height: 19px; color: var(--label); }
+.cx-sheet { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+.cx-step, .cx-picker { display: flex; flex-direction: column; gap: 12px; }
+.cx-picker { gap: 10px; }
+.cx-callout { font-size: 12px; line-height: 15px; }
+.cx-caption { font-size: 10px; line-height: 13px; }
+.cx-headline { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.cx-mono-caption { font-family: var(--font-mono); font-size: 10px; word-break: break-all; }
+.cx-pre { white-space: pre-line; }
+.cx-center { text-align: center; }
+.cx-secondary { color: var(--label-secondary); }
+.cx-tertiary { color: var(--label-tertiary); }
+.cx-red { color: var(--red); }
+.cx-green { color: var(--green); }
+.cx-spacer { flex: 1; }
+.cx-hstack { display: flex; gap: 8px; }
+.cx-hstack > .cx-field { flex: 1; }
+.cx-buttons { display: flex; align-items: center; gap: 10px; }
+.cx-buttons .btn { white-space: nowrap; }
+.cx-fingerprint {
+  font-family: var(--font-mono); font-size: 12px; padding: 8px; border-radius: 6px;
+  background: var(--text-bg); color: var(--label); word-break: break-all; user-select: text; -webkit-user-select: text;
+}
+.cx-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cx-field-label { font-size: 10px; color: var(--label-secondary); }
+.cx-field .field { width: 100%; }
+
+.cx-working { display: flex; flex-direction: column; gap: 16px; padding: 12px 0; }
+.cx-working-row { display: flex; align-items: center; gap: 12px; }
+
+/* the server list (List .inset, alternating rows) */
+.cx-list {
+  height: 190px; overflow-y: auto; border-radius: 6px; background: var(--control-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 14%, transparent); padding: 4px 0;
+}
+.cx-list-section { font-size: 11px; font-weight: 700; color: var(--label-secondary); padding: 6px 14px 3px; }
+.cx-row {
+  display: flex; align-items: center; gap: 10px; margin: 0 5px; padding: 5px 9px; border-radius: 5px; min-height: 36px;
+}
+.cx-row.alt { background: color-mix(in srgb, var(--label) 4%, transparent); }
+.cx-row.on { background: var(--accent); color: #fff; }
+.cx-row.on .cx-row-sub, .cx-row.on .cx-row-state, .cx-row.on .cx-row-icon { color: rgba(255, 255, 255, 0.85); }
+.cx-row.on .cx-dot.on { background: #fff; }
+.cx-row.offline { opacity: 0.45; }
+.cx-row-icon { color: var(--label-secondary); }
+.cx-row.offline .cx-row-icon { color: var(--label-tertiary); }
+.cx-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cx-row-title { font-size: 12px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cx-row-sub { font-size: 10px; line-height: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cx-row-state { font-size: 10px; white-space: nowrap; }
+.cx-dot { width: 8px; height: 8px; border-radius: 50%; background: color-mix(in srgb, var(--label-secondary) 40%, transparent); flex-shrink: 0; }
+.cx-dot.on { background: var(--green); }
+.cx-empty {
+  height: 190px; border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: 0 24px; background: color-mix(in srgb, var(--label) 3%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--label) 14%, transparent);
+}
+
+.cx-account { display: flex; align-items: center; gap: 8px; font-size: 12px; min-height: 22px; }
+.cx-pm {
+  display: inline-flex; align-items: center; width: 70px; height: 22px; border-radius: 5px; flex-shrink: 0;
+  background: var(--control); box-shadow: 0 0 0 0.5px rgba(0,0,0,.12), 0 0.5px 1.5px rgba(0,0,0,.12);
+}
+:root[data-theme="dark"] .cx-pm { box-shadow: inset 0 0.5px 0 rgba(255,255,255,.08); }
+.cx-pm button { flex: 1; height: 100%; border: 0; background: transparent; display: grid; place-items: center; color: var(--label); padding: 0; }
+.cx-pm button:disabled { color: var(--label-tertiary); }
+.cx-pm-sep { width: 0.5px; height: 14px; background: var(--separator); }
+
+/* password shake (Shake: 8pt travel, 3 shakes) */
+.cx-shake.go { animation: cx-shake 0.35s linear; }
+@keyframes cx-shake {
+  0%, 100% { transform: translateX(0); }
+  16.6% { transform: translateX(8px); } 33.3% { transform: translateX(0); }
+  50% { transform: translateX(-8px); } 66.6% { transform: translateX(0); }
+  83.3% { transform: translateX(8px); }
+}
+
+.cx-alert { padding: 20px 20px 4px; display: flex; flex-direction: column; gap: 8px; }
+.cx-alert-title { font-size: 13px; font-weight: 600; }
+.cx-alert-text { font-size: 11px; }
+.cx-alert-code { font-family: var(--font-mono); font-size: 11px; padding: 8px; border-radius: 6px; background: var(--text-bg); word-break: break-all; user-select: text; -webkit-user-select: text; }

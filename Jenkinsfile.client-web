@@ -1,0 +1,80 @@
+// Jenkinsfile.client-web — build the hosted Bromure Client (web-client/, served
+// at https://bromure.io/client/) and push its image `bromure-web-client`.
+// web-client/ci/web/Dockerfile: socket.dev-wrapped npm ci, unit tests, vite
+// build with base /client/, then nginx-unprivileged on :8080 (CSP/COOP/nosniff
+// in ci/web/nginx.conf; Referrer-Policy and the /client route are the edge's).
+//
+// This repo is public: the registry, its credentials and the cluster objects
+// come from Jenkins credentials, never from this file.
+//   WEB_CLIENT_REGISTRY        (secret text)  registry prefix, e.g. <host>/<namespace>
+//   DOCKER_DO_REGISTRY         (secret file)  docker config.json with push auth
+//   WEB_CLIENT_ROLLOUT         (secret text)  "<namespace> <deployment>" to restart after
+//                                             the push; ROLLOUT=false skips it
+//   DIGITAL_OCEAN_KUBECONFIG   (secret file)  kubeconfig for that restart
+pipeline {
+    agent any
+    environment {
+        DOCKER_API_VERSION = '1.44'   // buildx/BuildKit on the agents needs ≥ 1.44
+    }
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+    parameters {
+        string(name: 'TAG', defaultValue: 'latest',
+            description: 'Image tag pushed besides the git sha.')
+        booleanParam(name: 'ROLLOUT', defaultValue: true,
+            description: 'Restart the deployment named by WEB_CLIENT_ROLLOUT after the push.')
+    }
+
+    stages {
+        stage('Build & Push') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'WEB_CLIENT_REGISTRY', variable: 'REGISTRY'),
+                    file(credentialsId: 'DOCKER_DO_REGISTRY', variable: 'DOCKER_CONFIG_FILE')
+                ]) {
+                    sh '''
+                        set -eu
+                        mkdir -p "$WORKSPACE/.docker"
+                        cp "$DOCKER_CONFIG_FILE" "$WORKSPACE/.docker/config.json"
+                        # A per-run DOCKER_CONFIG hides plugins under ~/.docker: bring
+                        # buildx along when that is where the agent has it.
+                        [ -d "$HOME/.docker/cli-plugins" ] && cp -R "$HOME/.docker/cli-plugins" "$WORKSPACE/.docker/"
+                        export DOCKER_CONFIG="$WORKSPACE/.docker"
+                        image="$REGISTRY/bromure-web-client"
+                        sha=$(git rev-parse --short=12 HEAD)
+                        docker buildx build --platform linux/amd64 \
+                            -f web-client/ci/web/Dockerfile \
+                            -t "$image:${TAG:-latest}" -t "$image:$sha" \
+                            --push web-client
+                    '''
+                }
+            }
+        }
+
+        stage('Rollout Restart') {
+            when { expression { params.ROLLOUT == null || params.ROLLOUT } }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'WEB_CLIENT_ROLLOUT', variable: 'ROLLOUT_TARGET'),
+                    file(credentialsId: 'DIGITAL_OCEAN_KUBECONFIG', variable: 'KUBECONFIG')
+                ]) {
+                    sh '''
+                        set -eu
+                        set -- $ROLLOUT_TARGET
+                        kubectl rollout restart "deploy/$2" -n "$1"
+                        kubectl rollout status "deploy/$2" -n "$1" --timeout=5m
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'rm -rf "$WORKSPACE/.docker"'
+        }
+    }
+}

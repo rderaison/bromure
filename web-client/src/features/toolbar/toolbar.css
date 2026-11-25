@@ -1,0 +1,35 @@
+/* Unified titlebar strip + UnifiedToolbarBar / RemoteToolbarBar. */
+.tb { height: 52px; flex-shrink: 0; display: flex; align-items: center; background: var(--ac-titlebar); -webkit-app-region: drag; position: relative; z-index: 2; }
+.tb-lights { padding-left: 12px; -webkit-app-region: no-drag; }
+.tb-flex { flex: 1; }
+.tb-bar { display: flex; align-items: center; gap: 6px; padding-right: 8px; height: 28px; }
+.tb-bar button { -webkit-app-region: no-drag; }
+
+.tb-icon { all: unset; box-sizing: border-box; width: 26px; height: 24px; border-radius: 6px; display: grid; place-items: center; color: var(--label-secondary); cursor: default; }
+.tb-icon:hover:not(:disabled) { background: rgba(0,0,0,0.10); }
+:root[data-theme="dark"] .tb-icon:hover:not(:disabled) { background: rgba(255,255,255,0.10); }
+.tb-icon.active { color: var(--accent); }
+.tb-icon:disabled { opacity: 0.45; }
+
+.tb-pill { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 6px;
+  color: var(--label-secondary); font-size: 12px; font-weight: 500; cursor: default; white-space: nowrap; }
+.tb-pill:hover:not(:disabled) { background: rgba(0,0,0,0.10); }
+:root[data-theme="dark"] .tb-pill:hover:not(:disabled) { background: rgba(255,255,255,0.10); }
+.tb-pill:disabled { opacity: 0.45; }
+
+.tb-machine { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px; cursor: default;
+  background: rgba(0,0,0,0.06); box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.08); }
+.tb-machine:hover { background: rgba(0,0,0,0.11); }
+:root[data-theme="dark"] .tb-machine { background: rgba(255,255,255,0.06); box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.08); }
+:root[data-theme="dark"] .tb-machine:hover { background: rgba(255,255,255,0.11); }
+.tb-machine-dot { width: 9px; height: 9px; border-radius: 2.5px; flex-shrink: 0; }
+.tb-machine-name { font-size: 12px; font-weight: 500; color: var(--label); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-machine-chev { color: var(--label-secondary); }
+
+/* The mirrored server + its menu (connect elsewhere / disconnect / sign out). */
+.tb-server { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; margin-left: 6px;
+  border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--label-secondary); cursor: default; -webkit-app-region: no-drag; }
+.tb-server:hover { background: rgba(0,0,0,0.08); color: var(--label); }
+:root[data-theme="dark"] .tb-server:hover { background: rgba(255,255,255,0.10); }
+.tb-server-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.tb-server-name { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

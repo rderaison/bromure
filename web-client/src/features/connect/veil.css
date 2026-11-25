@@ -1,0 +1,20 @@
+/* RemoteReconnectingView / RemoteConnectionStatusView */
+.veil-reconnect { position: fixed; inset: 52px 0 0 0; z-index: 50; pointer-events: none; display: flex; justify-content: center; align-items: flex-start; }
+.veil-dim { position: absolute; inset: 0; background: color-mix(in srgb, var(--window-bg) 25%, transparent); }
+.veil-banner { position: relative; margin-top: 18px; max-width: 420px; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px;
+  background: color-mix(in srgb, var(--control-bg) 80%, transparent); -webkit-backdrop-filter: blur(20px) saturate(1.8); backdrop-filter: blur(20px) saturate(1.8);
+  box-shadow: inset 0 0 0 1px var(--fill-secondary), 0 3px 10px rgba(0,0,0,0.12); }
+.veil-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.veil-banner-title { font-size: 13px; font-weight: 600; }
+.veil-banner-sub { font-size: 11px; color: var(--label-secondary); }
+.veil-banner-readout { font-size: 10px; font-variant-numeric: tabular-nums; color: var(--label-tertiary); }
+
+.veil-status { position: fixed; inset: 52px 0 0 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  background: var(--window-bg); padding: 20px; text-align: center; }
+.veil-status-title { font-size: 13px; font-weight: 600; }
+.veil-status-text { font-size: 13px; color: var(--label-secondary); max-width: 460px; line-height: 1.35; }
+.veil-keyhint { display: flex; flex-direction: column; gap: 10px; max-width: 460px; padding-top: 4px; text-align: left; }
+.veil-keyrow { display: flex; align-items: center; gap: 8px; }
+.veil-cmd { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; padding: 8px; border-radius: 6px; background: var(--text-bg);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; word-break: break-all; }
+.veil-caption { font-size: 10px; color: var(--label-tertiary); }
