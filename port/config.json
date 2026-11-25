@@ -222,6 +222,7 @@
     "Sources/AgentCoding/P2P/TurnRelayTransport.swift",
     "Sources/AgentCoding/P2P/TurnTCP.swift",
     "Sources/AgentCoding/P2P/TurnUDP.swift",
+    "Sources/AgentCoding/P2P/WSRelay.swift",
     "Sources/AgentCoding/PendingPromptBroker.swift",
     "Sources/AgentCoding/PlanStreamHub.swift",
     "Sources/AgentCoding/PlanStreamProtocol.swift",

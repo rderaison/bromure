@@ -82,7 +82,7 @@ enum ImageState {
 // @port-skip linux-only: Bundle.main's CFBundleShortVersionString, which a Linux binary has no Info.plist for
 enum LinuxAppVersion {
     // @port-skip linux-only: see the type
-    static let short = "5.4.6"
+    static let short = "5.6.0"
 }
 
 extension ImageCatalog {

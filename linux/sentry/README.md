@@ -31,7 +31,7 @@ How it was run:
 | `test_boot.sh` | sentry-only, Landlock-only, strict, landlock+sentry idled, strict-only, strict+network-only: pass, both directly and through `vm exec` over vsock 5800. **`run_as_user: sandbox`: fails on the Linux host** (see below) |
 | `test_lockdown.sh --raise` | before/after table recorded. Raising to integrity stops `/dev/mem`, unsigned modules and the kprobes switch |
 
-`ia32_emulation=0` (setup.sh on amd64, and the bake's cmdline): a getpid through `int 0x80` returns the pid without it, and dies with SIGSEGV with it. The sentry probes only `__x64_sys_*`, so this is the 32-bit entry it would otherwise miss.
+`ia32_emulation=0` (setup.sh on amd64, and the bake's cmdline): a getpid through `int 0x80` returns the pid without it, and dies with SIGSEGV with it. Since main's 852a85acb the sentry also probes the 32-bit entry itself (`__ia32_sys_*`, `__ia32_compat_sys_*`, x32's compat entries), so a kernel booted without that option is watched too; the option stays, and `test_sentry.sh` skips its `int 0x80` section when the gate is closed.
 
 ## Open on the Linux host (not arch)
 
