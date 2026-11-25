@@ -9,13 +9,14 @@ import fs from 'node:fs';
 
 const platform = process.argv[2] ?? 'linux';
 const arch = (process.argv[3] ?? 'x64,arm64').split(',');
-const keep = /^\/(dist|dist-electron)(\/|$)|^\/package\.json$|^$/;
+const keep = /^\/(dist|dist-electron)(\/|$)|^\/build(\/icon\.(png|ico))?$|^\/package\.json$|^$/;
 const noMaps = (p) => !p.endsWith('.map');
 const paths = await packager({
   dir: '.', out: 'out', overwrite: true, platform, arch,
   name: 'Bromure Client', executableName: platform === 'win32' ? 'Bromure Client' : 'bromure-client',
   appBundleId: 'io.bromure.client', appCopyright: '© Bromure',
   protocols: [{ name: 'Bromure Client', schemes: ['bromure-client'] }],
+  icon: 'build/icon',          // build/icon.ico for the Windows exe (scripts/make-icon.cjs); unused on Linux
   asar: true, prune: false,
   ignore: p => p !== '' && (!keep.test(p) || !noMaps(p)),
   win32metadata: { CompanyName: 'Bromure', ProductName: 'Bromure Client', FileDescription: 'Bromure Client' },

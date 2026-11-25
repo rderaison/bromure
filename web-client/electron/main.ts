@@ -39,7 +39,20 @@ if (!PRIMARY) app.quit();
 // Windows: the taskbar button, jump list and notifications are keyed on this id
 // (it must match the shortcut an installer creates, or a pinned app gets a
 // second taskbar button). Same value as the packager's appBundleId.
-if (process.platform === 'win32') app.setAppUserModelId('io.bromure.client');
+const APP_ID = 'io.bromure.client';
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+// The Start-menu shortcut the installer creates (installer/BromureClient.nsi)
+// has to carry the same id, and NSIS can't write that property: stamp it here.
+function stampStartMenuShortcut() {
+  if (process.platform !== 'win32' || process.defaultApp || SHOT) return;
+  const lnk = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Bromure Client.lnk');
+  try {
+    const cur = shell.readShortcutLink(lnk);
+    // Only the shortcut that starts THIS exe (not one left by another copy).
+    if (path.resolve(cur.target).toLowerCase() !== process.execPath.toLowerCase() || cur.appUserModelId === APP_ID) return;
+    shell.writeShortcutLink(lnk, 'update', { ...cur, appUserModelId: APP_ID });
+  } catch { /* no installer shortcut (zip build), or not writable */ }
+}
 
 // Its own URL scheme: `bromure://` belongs to the macOS app / Bromure and must
 // never be taken over on a machine that has them.
@@ -73,6 +86,9 @@ function createWindow(hash = '') {
     frame: false,                       // the app draws its own titlebar strip
     backgroundColor: '#FCFCFB',
     title: 'Bromure',
+    // Window / taskbar icon (scripts/make-icon.cjs). The packaged Windows exe
+    // carries the same .ico; this also covers `electron .` and Linux.
+    icon: path.join(__dirname, '..', 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       // BROMURE_AS_WEB=1 (tests): no bridge — the page runs exactly as the hosted app.
       preload: process.env.BROMURE_AS_WEB ? undefined : path.join(__dirname, 'preload.cjs'),
@@ -203,6 +219,7 @@ app.on('open-url', (e, url) => { e.preventDefault(); handleDeepLink(url); });
 
 app.whenReady().then(() => {
   if (!PRIMARY) return;
+  stampStartMenuShortcut();
   // Serve the bundle from app:// (a real origin: IndexedDB/WebCrypto persist,
   // CSP applies) instead of file://.
   protocol.handle('app', req => {
