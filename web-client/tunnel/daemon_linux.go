@@ -473,7 +473,7 @@ func setupTunnel(cidr string, uid uint32) (*tunnel, error) {
 		// interface without any is a reverse-path failure for everything
 		// arriving on it.
 		{"ip", "addr", "add", fmt.Sprintf("169.254.98.%d/32", unit+1), "scope", "link", "dev", name},
-		{"ip", "link", "set", "dev", name, "mtu", "1500", "up"},
+		{"ip", "link", "set", "dev", name, "mtu", strconv.Itoa(tunMTU), "up"},
 		{"ip", "route", "add", cidr, "dev", name, "table", tbl},
 		{"ip", "rule", "add", "pref", strconv.Itoa(prefRoute), "uidrange", fmt.Sprintf("%d-%d", uid, uid), "lookup", tbl},
 	}
