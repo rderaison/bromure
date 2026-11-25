@@ -591,8 +591,11 @@ function Findings({ host, st, repoFilter, setRepoFilter, showFlash, onOpenTask }
   const fixMenu = (e: React.MouseEvent, x: any) => {
     const items: MenuItem[] = [{ label: 'Start a Fix Session', action: () => fix(x.id) }, { separator: true }, { label: 'Ask the Switchboard', action: () => route(x.id) }];
     for (const r of st.agentRooms ?? []) items.push({ label: `Ask #${r.name}'s Switchboard`, action: () => route(x.id, r.id) });
-    const sessions = (st.agentSessions ?? []).filter(s => !s.archivedAt && (s as any).role !== 'switchboard').slice(0, 20);
-    if (sessions.length) { items.push({ separator: true }, { header: 'Ask a session' }); for (const s of sessions) items.push({ label: s.nickname ? '@' + s.nickname : `“${s.title}”`, action: () => ask(x.id, { id: s.id, label: s.nickname ? '@' + s.nickname : `“${s.title}”` }) }); }
+    // Every session, by name: a list cut to the first 20 left the others out of reach.
+    const label = (s: any) => s.nickname ? '@' + s.nickname : `“${s.title}”`;
+    const sessions = (st.agentSessions ?? []).filter(s => !s.archivedAt && !(s as any).deletedAt && (s as any).role !== 'switchboard')
+      .sort((a, b) => label(a).replace(/^[@“]/, '').localeCompare(label(b).replace(/^[@“]/, ''), undefined, { numeric: true, sensitivity: 'base' }));
+    if (sessions.length) { items.push({ separator: true }, { header: 'Ask a session' }); for (const s of sessions) items.push({ label: label(s), action: () => ask(x.id, { id: s.id, label: label(s) }) }); }
     openMenu((e.currentTarget as HTMLElement).getBoundingClientRect(), items);
   };
   void ctx;
