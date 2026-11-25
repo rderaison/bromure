@@ -4,7 +4,9 @@
 // /subscriptions/register|forget) and the macOS 26 checkbox these panes draw.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Sheet, cx } from '../../../ui/kit';
+import { Button, Sheet, Spinner, cx } from '../../../ui/kit';
+import { isAgentSignInURL, parseCallbackPaste, deliverCallback } from './signIn';
+import { canListenLoopback, startCallbackTunnel } from './callbackTunnel';
 import { openExternal } from '../../../platform';
 import { useRemote } from '../../../app/store';
 import type { RemoteHost } from '../../../core/remote/host';
@@ -193,27 +195,57 @@ export function AskSheet({ ask, done }: { ask: Ask; done: () => void }) {
 
 /** Sign-in / log-out on the HOST (FatClientController.beginRemoteRegistration):
  *  the throwaway login VM and the credential store stay on the server; the
- *  sign-in page it publishes in /state.pendingRegistration opens here. */
+ *  sign-in page it publishes in /state.pendingRegistration opens here, and
+ *  its loopback callback goes back to the VM (signIn.ts). */
 export function useSignIn(ctx: EditorCtxValue) {
   const { host, mode, workspaceID, hostName } = ctx;
   const [ask, setAsk] = useState<Ask | null>(null);
-  const run = useRef<string | null>(null);
+  // State, not a ref: the host's /state can publish the sign-in page before
+  // the register request's reply names the run — the effect must re-run then.
+  const [run, setRun] = useState<RunInfo | null>(null);
+  // Closed after the callback went in: the run is still watched for its end.
+  const [hidden, setHidden] = useState(false);
   const opened = useRef(new Set<string>());
+  const tunnel = useRef<{ key: string; stop: () => void } | null>(null);
+  const [page, setPage] = useState<{ url?: string; refused?: boolean; callback?: { vmIP: string; port: number }; listening?: boolean; listenError?: string }>({});
   const pending = useRemote(host, s => s.pendingRegistration);
   const ended = useRemote(host, s => s.registrationsEnded);
+  const stopTunnel = () => { tunnel.current?.stop(); tunnel.current = null; };
+  useEffect(() => () => stopTunnel(), []);
   useEffect(() => {
     const p = pending as any;
-    if (p && run.current && p.id === run.current && p.url && !opened.current.has(p.url)) {
-      opened.current.add(p.url); openExternal(p.url);
+    if (!run || !p || p.id !== run.id) return;
+    const next: Partial<typeof page> = {};
+    if (p.url && !opened.current.has(p.url)) {
+      opened.current.add(p.url);
+      if (isAgentSignInURL(p.url, run.provider)) { next.url = p.url; openExternal(p.url); }
+      else next.refused = true;            // never opened: not that agent's sign-in page
     }
-  }, [pending]);
+    const refused = next.refused ?? page.refused;
+    const port = Number(p.callbackPort) || 0;
+    // A refused page gets no callback either (as on the Mac).
+    if (refused) stopTunnel();
+    else if (port > 0 && p.vmIP) {
+      next.callback = { vmIP: p.vmIP, port };
+      const key = `${p.vmIP}:${port}`;
+      if (canListenLoopback() && tunnel.current?.key !== key) {
+        stopTunnel();
+        tunnel.current = { key, stop: () => {} };
+        startCallbackTunnel(host, p.vmIP, port)
+          .then(stop => { if (tunnel.current?.key === key) { tunnel.current.stop = stop; setPage(x => ({ ...x, listening: true })); } else stop(); })
+          .catch((e: any) => setPage(x => ({ ...x, listenError: String(e?.message ?? e) })));
+      }
+    }
+    setPage(x => ({ ...x, ...next }));
+  }, [pending, run]); // eslint-disable-line react-hooks/exhaustive-deps
+  const finishRun = () => { stopTunnel(); setRun(null); setPage({}); opened.current.clear(); };
   useEffect(() => {
-    const e = ((ended as any[]) ?? []).find(x => x?.id === run.current);
-    if (e && !e.success) {
-      run.current = null;
-      setAsk({ title: 'Register', message: e.message || 'The sign-in didn’t complete. You can try again.', ok: 'OK', cancel: '' });
-    } else if (e) run.current = null;
-  }, [ended]);
+    if (!run) return;
+    const e = ((ended as any[]) ?? []).find(x => x?.id === run.id);
+    if (!e) return;
+    finishRun();
+    if (!e.success) setAsk({ title: 'Register', message: e.message || 'The sign-in didn’t complete. You can try again.', ok: 'OK', cancel: '' });
+  }, [ended, run]); // eslint-disable-line react-hooks/exhaustive-deps
   // Sign-ins from a workspace not created yet go to the host's shared store.
   const profileId = mode === 'workspace' ? workspaceID : undefined;
   const register = (p: Provider) => {
@@ -225,20 +257,86 @@ export function useSignIn(ctx: EditorCtxValue) {
       onOK: async () => {
         try {
           const r = await host.request<any>('POST', '/subscriptions/register', { provider: REGISTER_NAME[p], ...(profileId ? { profileId } : {}) }, { allowError: true });
-          if (r?.registration) run.current = r.registration;
+          if (r?.registration) { opened.current.clear(); setPage({}); setHidden(false); setRun({ id: r.registration, provider: REGISTER_NAME[p]!, name }); }
           else setAsk({ title: `Register with ${name}`, message: r?.error || 'The sign-in didn’t complete. You can try again.', ok: 'OK', cancel: '' });
           host.refreshSoon();
         } catch (e: any) { setAsk({ title: `Register with ${name}`, message: String(e?.message ?? e), ok: 'OK', cancel: '' }); }
       },
     });
   };
+  const cancelRun = () => {
+    if (run) host.send('POST', '/subscriptions/cancel', { registration: run.id });
+    finishRun();
+  };
   const forget = (p: Provider) => setAsk({
     title: `Log out of ${PROVIDER_NAME[p]}?`, message: 'Workspaces using this sign-in stop working until you sign in again.',
     ok: 'Log Out', destructive: true,
     onOK: () => host.send('POST', '/subscriptions/forget', { provider: SUB_KEY[p], ...(profileId ? { profileId } : {}) }),
   });
-  const sheet = ask ? <AskSheet ask={ask} done={() => setAsk(null)} /> : null;
+  const sheet = ask ? <AskSheet ask={ask} done={() => setAsk(null)} />
+    : run && !hidden ? <SignInSheet run={run} page={page} hostName={hostName} onCancel={cancelRun} onHide={() => setHidden(true)}
+                         deliver={async path => {
+                           const cb = page.callback!;
+                           const status = await deliverCallback(() => host.openForward(`forward ${cb.vmIP} ${cb.port}`), cb.port, path);
+                           if (status >= 400) throw new Error(`The sign-in machine refused it (HTTP ${status}). Start the sign-in again.`);
+                         }} />
+    : null;
   return { register, forget, sheet, setAsk };
+}
+
+interface RunInfo { id: string; provider: string; name: string }
+
+/** The in-flight sign-in: open the page again, and — when the browser can't
+ *  reach the callback on this computer (always, in a web page) — paste the
+ *  address it ended on so it goes to the VM. */
+function SignInSheet({ run, page, hostName, onCancel, onHide, deliver }: {
+  run: RunInfo; hostName: string; onCancel: () => void; onHide: () => void; deliver: (path: string) => Promise<void>;
+  page: { url?: string; refused?: boolean; callback?: { vmIP: string; port: number }; listening?: boolean; listenError?: string };
+}) {
+  const [pasted, setPasted] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const port = page.callback?.port;
+  const submit = async () => {
+    if (!port) return;
+    const r = parseCallbackPaste(pasted, port);
+    if ('error' in r) { setErr(r.error); return; }
+    setErr(null); setBusy(true);
+    try { await deliver(r.path); setSent(true); }
+    catch (e: any) { setErr(String(e?.message ?? e)); }
+    setBusy(false);
+  };
+  const status = sent ? `Finishing the ${run.name} sign-in on ${hostName}…`
+    : page.refused ? `${hostName} published a sign-in address that isn’t ${run.name}’s own sign-in page, so it wasn’t opened.`
+    : page.url ? `Sign in to ${run.name} in your browser.`
+    : `Starting a sign-in machine on ${hostName}…`;
+  return (
+    <Sheet width={440} onClose={sent ? onHide : onCancel}>
+      <div className="mdl-ask">
+        <div className="mdl-ask-title">Register with {run.name}</div>
+        <div className="mdl-ask-msg" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {!page.url && !page.refused && !sent && <Spinner size={12} />}{status}
+        </div>
+        {page.url && !sent && <div><Button size="small" onClick={() => openExternal(page.url!)}>Open the Sign-In Page Again</Button></div>}
+        {page.listenError && !sent && <div className="mdl-ask-msg">Couldn’t answer the sign-in on this computer ({page.listenError}).</div>}
+        {port && !sent && !page.refused && <>
+          <div className="mdl-ask-msg">
+            {page.listening
+              ? `If your browser ends on a page that can’t connect to localhost:${port}, copy that page’s address from the address bar and paste it here:`
+              : `When you’ve signed in, your browser ends on a page that can’t connect to localhost:${port} — that’s expected. Copy that page’s address from the address bar and paste it here:`}
+          </div>
+          <input className="field" spellCheck={false} placeholder={`http://localhost:${port}/callback?code=…`} value={pasted}
+                 onChange={e => setPasted(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); submit(); } }} />
+        </>}
+        {err && <div className="mdl-ask-msg" style={{ color: 'var(--red)' }}>{err}</div>}
+        <div className="mdl-ask-buttons">
+          <Button onClick={sent ? onHide : onCancel}>{sent ? 'Close' : 'Cancel'}</Button>
+          {port && !sent && !page.refused && <Button variant="prominent" disabled={busy || !pasted.trim()} onClick={submit}>Finish Sign-In</Button>}
+        </div>
+      </div>
+    </Sheet>
+  );
 }
 
 // ── on-device catalog (the server's) ────────────────────────────────────

@@ -4,6 +4,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 const tcpListeners: Array<(id: number, kind: string, data?: Uint8Array, message?: string) => void> = [];
 ipcRenderer.on('tcp:event', (_e, id, kind, data, message) => { for (const l of tcpListeners) l(id, kind, data, message); });
+const acceptListeners: Array<(listenerID: number, socketID: number) => void> = [];
+ipcRenderer.on('tcp:accept', (_e, lid, id) => { for (const l of acceptListeners) l(lid, id); });
 
 contextBridge.exposeInMainWorld('bromureElectron', {
   platform: process.platform,
@@ -12,6 +14,10 @@ contextBridge.exposeInMainWorld('bromureElectron', {
   tcpWrite: (id: number, data: Uint8Array) => ipcRenderer.send('tcp:write', id, data),
   tcpClose: (id: number) => ipcRenderer.send('tcp:close', id),
   onTcpEvent: (cb: any) => { tcpListeners.push(cb); },
+  tcpListen: (port: number) => ipcRenderer.invoke('tcp:listen', port),
+  tcpUnlisten: (id: number) => ipcRenderer.send('tcp:unlisten', id),
+  tcpResume: (id: number) => ipcRenderer.send('tcp:resume', id),
+  onTcpAccept: (cb: any) => { acceptListeners.push(cb); },
   http: (url: string, init: any) => ipcRenderer.invoke('http', url, init),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
   onDeepLink: (cb: (url: string) => void) => {

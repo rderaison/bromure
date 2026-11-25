@@ -61,6 +61,12 @@ export interface ElectronNetBridge {
   tcpWrite(id: number, data: Uint8Array): void;
   tcpClose(id: number): void;
   onTcpEvent(cb: (id: number, kind: 'data' | 'close' | 'error', data?: Uint8Array, message?: string) => void): void;
+  /** Listen on 127.0.0.1:<port> (≥ 1024); connections arrive via onTcpAccept. */
+  tcpListen?(port: number): Promise<number>;
+  tcpUnlisten?(listenerID: number): void;
+  /** Start delivering an accepted socket's data (once its stream is wired). */
+  tcpResume?(socketID: number): void;
+  onTcpAccept?(cb: (listenerID: number, socketID: number) => void): void;
 }
 
 export class ElectronTcpStream implements ByteStream {
@@ -72,7 +78,17 @@ export class ElectronTcpStream implements ByteStream {
 
   private constructor(private bridge: ElectronNetBridge, private id: number) {}
 
-  static async open(bridge: ElectronNetBridge, host: string, port: number): Promise<ElectronTcpStream> {
+  /** An accepted loopback connection (see ElectronNetBridge.tcpListen). */
+  static adopt(bridge: ElectronNetBridge, id: number): ElectronTcpStream {
+    ElectronTcpStream.wire(bridge);
+    const s = new ElectronTcpStream(bridge, id);
+    ElectronTcpStream.streams.set(id, s);
+    return s;
+  }
+  /** Begin delivering data once onData/onClose are set. */
+  start(): void { this.bridge.tcpResume?.(this.id); }
+
+  private static wire(bridge: ElectronNetBridge) {
     if (!ElectronTcpStream.wired) {
       ElectronTcpStream.wired = true;
       bridge.onTcpEvent((id, kind, data, message) => {
@@ -83,6 +99,10 @@ export class ElectronTcpStream implements ByteStream {
         else if (kind === 'error') s.finish(new Error(message || 'connection error'));
       });
     }
+  }
+
+  static async open(bridge: ElectronNetBridge, host: string, port: number): Promise<ElectronTcpStream> {
+    ElectronTcpStream.wire(bridge);
     const id = await bridge.tcpOpen(host, port);
     const s = new ElectronTcpStream(bridge, id);
     ElectronTcpStream.streams.set(id, s);

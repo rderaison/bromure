@@ -224,6 +224,53 @@ const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(
 ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => { owned(e, id)?.write(data); });
 ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { s.destroy(); sockets.delete(id); } });
 
+// ── Loopback listener (a model sign-in's OAuth callback) ───────────────────
+// The provider sends the browser back to http://localhost:<port>/… — the port
+// the CLI in the host's throwaway sign-in VM listens on. Like the macOS
+// client, we answer on 127.0.0.1:<port> HERE and the renderer splices each
+// connection to the VM over SSH (`forward <vmIP> <port>`). Loopback only,
+// unprivileged ports, a few per window, closed with the window.
+const listeners = new Map<number, { srv: net.Server; owner: number }>();
+let nextListen = 1;
+ipcMain.handle('tcp:listen', async (e, port: number) => {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Bad port.');
+  const wc = e.sender;
+  if ([...listeners.values()].filter(l => l.owner === wc.id).length >= 4) throw new Error('Too many listeners.');
+  const lid = nextListen++;
+  const srv = net.createServer(s => {
+    if (wc.isDestroyed()) { s.destroy(); return; }
+    const id = nextSock++;
+    // Held paused (no 'data' listener yet) until the renderer has its stream.
+    sockets.set(id, { s, owner: wc.id });
+    accepted.set(id, () => {
+      s.setNoDelay(true);
+      s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); });
+    });
+    s.on('error', () => {});
+    s.on('close', () => { sockets.delete(id); accepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    wc.send('tcp:accept', lid, id);
+  });
+  await new Promise<void>((resolve, reject) => {
+    srv.once('error', (err: any) => reject(new Error(err?.code === 'EADDRINUSE' ? `Port ${port} is in use on this computer.` : (err?.message ?? 'listen failed'))));
+    srv.listen(port, '127.0.0.1', () => resolve());
+  });
+  srv.on('error', () => {});
+  if (wc.isDestroyed()) { srv.close(); throw new Error('Window closed.'); }
+  listeners.set(lid, { srv, owner: wc.id });
+  wc.once('destroyed', () => {
+    srv.close(); listeners.delete(lid);
+    // Its connections too: nothing is left to read them.
+    for (const [id, x] of sockets) if (x.owner === wc.id) { x.s.destroy(); sockets.delete(id); accepted.delete(id); }
+  });
+  return lid;
+});
+const accepted = new Map<number, () => void>();
+ipcMain.on('tcp:resume', (e, id: number) => { if (owned(e, id)) { accepted.get(id)?.(); accepted.delete(id); } });
+ipcMain.on('tcp:unlisten', (e, lid: number) => {
+  const l = listeners.get(lid);
+  if (l && l.owner === e.sender.id) { l.srv.close(); listeners.delete(lid); }
+});
+
 function friendlyNetError(err: any, host: string, port: number) {
   switch (err?.code) {
     case 'ECONNREFUSED': return `${host}:${port} refused the connection — is Remote Access on?`;
