@@ -124,23 +124,29 @@ export const account = {
     }
   },
 
-  /** Retire this device on bromure.io, then forget it locally. */
-  async signOut() {
+  /** Retire this device on bromure.io, then forget it locally. The local
+   *  credential is only dropped once bromure.io confirmed the revocation (or
+   *  says it's already gone): otherwise it's kept, so signing out can be
+   *  retried, and the failure is shown. Resolves to whether it signed out. */
+  async signOut(): Promise<boolean> {
     const rec = snap.record;
-    stopTimer();
     if (rec && !DEMO) {
-      const cp = new ControlPlane(rec.apiBase, http);
-      if (rec.delivery === 'cookie') await cp.webLogout().catch(() => {});   // revokes + clears the cookies
-      else {
-        cp.removeSSHKey(rec.deviceToken).catch(() => {});
-        cp.selfRevoke(rec.deviceToken).catch(() => {});
+      set({ busy: true, error: null });
+      try {
+        await revokeOnServer(new ControlPlane(rec.apiBase, http), rec);
+      } catch (e: any) {
+        set({ busy: false, error: `Couldn't sign out of bromure.io: ${e?.message ?? e}. This device is still registered there — check your connection and try again.` });
+        return false;
       }
+      set({ busy: false });
     }
+    stopTimer();
     await clearDeviceRecord().catch(() => {});
     await idbDelete('device-identity').catch(() => {});
     directoryEverLoaded = false; firstLoad401Retries = 0;
     set({ record: null, servers: [], directoryError: null, error: null });
     if (watchers) startTimer();
+    return true;
   },
 
   async loadDirectory(silent = false) {
@@ -182,6 +188,22 @@ export const account = {
     return () => { watchers = Math.max(0, watchers - 1); if (!watchers) stopTimer(); };
   },
 };
+
+/** A 401 means the credential is already dead (revoked or lapsed): nothing
+ *  left to revoke. A 404 on the SSH key means none is published. */
+const gone = (e: any, ...codes: number[]) => codes.includes(e?.status);
+
+async function revokeOnServer(cp: ControlPlane, rec: DeviceRecord) {
+  if (rec.delivery === 'cookie') {
+    // Revokes the device and clears its cookies.
+    await cp.webLogout().catch(e => { if (!gone(e, 401)) throw e; });
+    return;
+  }
+  // The SSH key first: removing it needs the still-valid bearer.
+  try { await cp.removeSSHKey(rec.deviceToken); }
+  catch (e) { if (gone(e, 401)) return; if (!gone(e, 404)) throw e; }
+  await cp.selfRevoke(rec.deviceToken).catch(e => { if (!gone(e, 401)) throw e; });
+}
 
 interface PendingSignIn { state: string; api: string }
 let pendingState: PendingSignIn | null = null;

@@ -420,7 +420,7 @@ export function ConnectScreen() {
             <span>{account.label()}</span>
             <Button variant="borderless" {...tip.bind('Refresh servers')} onClick={() => account.loadDirectory()}><SF name="arrow.clockwise" size={13} /></Button>
             <span className="cx-spacer" />
-            <Button variant="link" onClick={() => { account.signOut(); setSelection(null); }}>Sign Out</Button>
+            <Button variant="link" disabled={acct.busy} onClick={async () => { if (await account.signOut()) setSelection(null); }}>Sign Out</Button>
           </>) : (<>
             <SF name="person.crop.circle.badge.plus" size={15} className="cx-secondary" />
             <Button onClick={() => account.signIn()}>Sign in with bromure.io</Button>
