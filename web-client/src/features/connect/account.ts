@@ -83,6 +83,9 @@ export const account = {
     } else {
       // The desktop client's own scheme (bromure:// is the macOS app's).
       u.searchParams.set('return_scheme', 'bromure-client');
+      // So bromure.io's brief "Opening…" screen names the right app.
+      const plat = electron?.platform;
+      if (plat === 'win32' || plat === 'linux') u.searchParams.set('platform', plat === 'win32' ? 'windows' : 'linux');
       openExternal(u.toString());
     }
   },
