@@ -3,6 +3,11 @@
 `bromure-ac` packages are published at **https://dl.bromure.io/apt**: static
 files in the `bromure-dl` Space (prefix `apt/`), signed with an OpenPGP key.
 
+The repository is shared: the Bromure Client's packages (`bromure-client`,
+branch `web-client`, `Jenkinsfile.client-linux`) go to the same suites, with
+the same key and the same tool (`--package bromure-client`). See "Two
+pipelines" below.
+
 ## On a server
 
 ```sh
@@ -20,7 +25,7 @@ sudo apt update && sudo apt install bromure-ac
 
 ```
 apt/bromure-archive-keyring.gpg     the public key (binary, for signed-by); .asc armored
-apt/pool/main/b/bromure-ac/bromure-ac_<version>_<arch>.deb
+apt/pool/main/b/<package>/<package>_<version>_<arch>.deb    (bromure-ac, bromure-client)
 apt/dists/<suite>/InRelease         Release, clearsigned (+ Release, Release.gpg)
 apt/dists/<suite>/main/binary-{amd64,arm64}/Packages, Packages.gz
 apt/dists/<suite>/main/binary-*/by-hash/SHA256/<sha256>
@@ -52,6 +57,23 @@ keeps its version.
 
 Tested by `linux/packaging/test-apt-publish.sh` (a local directory for the
 Space, a throwaway key, apt against 127.0.0.1).
+
+### Two pipelines
+
+A run publishes one package: `--package NAME`, `bromure-ac` when omitted (a
+`.deb` of another package is refused). The suite's indexes are rewritten from
+what the bucket has, every package's entries included, plus the run's own, so
+a `bromure-ac` publish keeps `bromure-client` and the reverse.
+
+**Never run two publishes to the same suite at the same time**, from either
+pipeline: each one reads the index, adds to it and writes it back, so the
+second to finish drops what the first added (its package stays in the pool,
+in no index). Each pipeline has `disableConcurrentBuilds()`, which only
+covers its own runs. If it happens, publish the dropped version again: the
+tool replaces the pool file and adds the entry.
+
+`tools/apt-publish.mjs` exists on both branches (`linux-port`, `web-client`)
+and must stay the same file.
 
 ## Setting it up (once)
 

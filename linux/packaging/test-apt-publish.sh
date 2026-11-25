@@ -6,7 +6,9 @@
 # Checks: a first publish (beta), promotion of the same version to stable
 # (beta's package, not a new one), a second version in beta, a repeat
 # refused, another signing key refused, a dry run writes nothing, the
-# indexes by hash, and apt (update + candidate) for each step.
+# indexes by hash, a second package in the same suites (--package: each
+# publish keeps the other package's entries), and apt (update + candidate)
+# for each step.
 #
 # Needs node, dpkg-deb, gpg, apt-get, python3. Exit 0 = PASS.
 set -euo pipefail
@@ -40,24 +42,28 @@ mkkey a
 mkkey b
 
 # --- fake packages ------------------------------------------------------------
-mkdeb() {   # version arch
-    local d="$W/pkg-$1-$2"
-    mkdir -p "$d/DEBIAN" "$d/usr/share/doc/bromure-ac"
-    echo "$1 $2" > "$d/usr/share/doc/bromure-ac/version"
+mkdeb() {   # version arch [package]
+    local pkg="${3:-bromure-ac}" d="$W/pkg-$1-$2"
+    [ "$pkg" = bromure-ac ] || d="$W/$pkg-pkg-$1-$2"
+    mkdir -p "$d/DEBIAN" "$d/usr/share/doc/$pkg"
+    echo "$1 $2" > "$d/usr/share/doc/$pkg/version"
     cat > "$d/DEBIAN/control" <<EOF
-Package: bromure-ac
+Package: $pkg
 Version: $1
 Architecture: $2
 Maintainer: Test <test@invalid>
 Description: test package
- A fake bromure-ac for the APT publish test.
+ A fake $pkg for the APT publish test.
 EOF
-    dpkg-deb --root-owner-group --build "$d" "$W/bromure-ac-$1_$2.deb" >/dev/null
-    echo "$W/bromure-ac-$1_$2.deb"
+    dpkg-deb --root-owner-group --build "$d" "$W/$pkg-$1_$2.deb" >/dev/null
+    echo "$W/$pkg-$1_$2.deb"
 }
 A10=$(mkdeb 1.0 amd64); R10=$(mkdeb 1.0 arm64)
 A11=$(mkdeb 1.1 amd64); R11=$(mkdeb 1.1 arm64)
 mkdeb 1.0 i386 >/dev/null
+# A second package for the same repository (the Electron client's).
+C20=$(mkdeb 2.0 amd64 bromure-client); CR20=$(mkdeb 2.0 arm64 bromure-client)
+C11=$(mkdeb 1.1 amd64 bromure-client)
 
 BUCKET="$W/bucket"
 mkdir -p "$BUCKET"
@@ -123,6 +129,34 @@ pub --suite beta --dry-run "$R11" >"$W/p8.log" 2>&1 && pass "dry run ran" || { f
 [ "$snap" = "$(cd "$BUCKET" && find . -type f -exec sha256sum {} + | sort | sha256sum)" ] \
     && pass "dry run wrote nothing" || fail "dry run changed the bucket"
 grep -q "pool/main/b/bromure-ac/bromure-ac_1.1_arm64.deb" "$W/p8.log" && pass "dry run lists the upload" || fail "dry run list"
+
+echo "== a second package in the same repository (--package)"
+count() { grep -c "^Package: $2\$" "$BUCKET/apt/dists/$1/main/binary-amd64/Packages" || true; }
+pub --suite beta "$C20" >"$W/c1.log" 2>&1 && fail "bromure-client accepted without --package" \
+    || { grep -q "is bromure-client, not bromure-ac" "$W/c1.log" && pass "another package refused by default" || { fail "wrong refusal"; cat "$W/c1.log"; }; }
+pub --suite beta --package bromure-client "$R11" >"$W/c2.log" 2>&1 && fail "bromure-ac accepted as bromure-client" \
+    || { grep -q "is bromure-ac, not bromure-client" "$W/c2.log" && pass "--package refuses bromure-ac's .deb" || { fail "wrong refusal"; cat "$W/c2.log"; }; }
+pub --suite beta --package 'Bad_Name' "$C20" >"$W/c3.log" 2>&1 && fail "a bad package name was accepted" \
+    || { grep -q "bad --package" "$W/c3.log" && pass "bad package name refused" || { fail "wrong refusal"; cat "$W/c3.log"; }; }
+pub --suite beta --package bromure-client "$C20" "$CR20" >"$W/c4.log" 2>&1 && pass "bromure-client 2.0 published to beta" || { fail "publish bromure-client"; cat "$W/c4.log"; }
+[ -f "$BUCKET/apt/pool/main/b/bromure-client/bromure-client_2.0_amd64.deb" ] && pass "its own pool directory" || fail "pool layout (bromure-client)"
+check --suite beta --package bromure-client --expect 2.0 && pass "apt sees bromure-client 2.0 in beta (both arches)" || { fail "verify bromure-client"; cat "$W/verify.log"; }
+check --suite beta --expect 1.1 --arches amd64 && pass "bromure-ac still 1.1 in beta" || { fail "bromure-ac after the client's publish"; cat "$W/verify.log"; }
+[ "$(count beta bromure-ac)" = 2 ] && [ "$(count beta bromure-client)" = 1 ] \
+    && pass "beta amd64 has both packages' entries" || fail "beta amd64: $(count beta bromure-ac) bromure-ac, $(count beta bromure-client) bromure-client"
+# The other way round: a bromure-ac publish keeps the client's entries.
+pub --suite beta "$R11" >"$W/c5.log" 2>&1 && pass "bromure-ac 1.1 arm64 published after it" || { fail "publish bromure-ac after the client"; cat "$W/c5.log"; }
+check --suite beta --expect 1.1 && pass "bromure-ac 1.1 in beta (both arches)" || { fail "verify bromure-ac"; cat "$W/verify.log"; }
+check --suite beta --package bromure-client --expect 2.0 && pass "bromure-client kept by bromure-ac's publish" || { fail "bromure-client lost"; cat "$W/verify.log"; }
+# The same version number under the other name is another package, not a repeat.
+pub --suite beta --package bromure-client "$C11" >"$W/c6.log" 2>&1 && pass "bromure-client 1.1 beside bromure-ac 1.1" || { fail "version taken for a repeat"; cat "$W/c6.log"; }
+[ "$(count beta bromure-ac)" = 2 ] && [ "$(count beta bromure-client)" = 2 ] \
+    && pass "neither package's entries replaced" || fail "beta amd64: $(count beta bromure-ac) bromure-ac, $(count beta bromure-client) bromure-client"
+# Promotion works per package, and stable keeps bromure-ac.
+pub --suite stable --package bromure-client "$C20" "$CR20" >"$W/c7.log" 2>&1 && pass "bromure-client promoted to stable" || { fail "promote bromure-client"; cat "$W/c7.log"; }
+grep -q "stable gets that one" "$W/c7.log" && pass "it reused beta's package" || fail "promotion message (bromure-client)"
+check --suite stable --package bromure-client --expect 2.0 && pass "apt sees bromure-client 2.0 in stable" || { fail "verify stable bromure-client"; cat "$W/verify.log"; }
+check --suite stable --expect 1.0 && pass "bromure-ac still 1.0 in stable" || { fail "stable bromure-ac"; cat "$W/verify.log"; }
 
 echo "== a tampered index is caught"
 printf '\n' >> "$BUCKET/apt/dists/stable/main/binary-arm64/Packages"
