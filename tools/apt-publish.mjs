@@ -31,7 +31,12 @@
  *
  * Several packages share the repository: a publish rewrites the suite's
  * indexes from what the bucket has (every package) plus this run's debs, so
- * two publishes to the same suite must not run at the same time.
+ * two publishes to the same suite must not run at the same time: the second
+ * to write would drop what the first added. A publish reads the suite's
+ * indexes again just before it writes them and stops if they changed. That
+ * catches a publish that finished during this one's package upload (minutes),
+ * not one that writes during this one's index upload (seconds): the rule
+ * stands.
  *
  * Usage (--package defaults to bromure-ac):
  *   node tools/apt-publish.mjs publish --suite stable|beta [--package NAME] [--dry-run] [--local DIR] [--out DIR] <deb>...
@@ -300,9 +305,12 @@ async function publish() {
 
   // What every suite has now (from the bucket).
   const index = {};
+  const asRead = {};   // this suite's Packages, per architecture, as read here
   for (const suite of SUITES) {
     for (const arch of ARCHES) {
-      index[`${suite}/${arch}`] = parsePackages((await store.get(packagesKey(suite, arch)))?.toString("utf8"));
+      const packages = await store.get(packagesKey(suite, arch));
+      if (suite === SUITE) asRead[arch] = packages;
+      index[`${suite}/${arch}`] = parsePackages(packages?.toString("utf8"));
     }
   }
 
@@ -383,17 +391,43 @@ async function publish() {
     [stageFile("bromure-archive-keyring.asc", sign.publicKeyArmored), KEYRING_ASC, "application/pgp-keys", "public, max-age=300"],
   ];
 
-  const all = [...uploads, ...(publishedKey ? [] : keys), ...byHash, ...indexes, ...top];
+  const first = [...uploads, ...(publishedKey ? [] : keys)];
+  const then = [...byHash, ...indexes, ...top];
   if (dryRun) {
-    console.log(`dry run: would upload, in order:\n${all.map((u) => `  ${u[1]}`).join("\n")}`);
+    console.log(`dry run: would upload, in order:\n${[...first, ...then].map((u) => `  ${u[1]}`).join("\n")}`);
     if (opts.out) console.log(`staged in ${stage}`);
     return;
   }
-  for (const [file, key, type, cache] of all) {
-    await store.put(file, key, type, cache);
-    console.log(`  ↑ ${key}`);
+  const upload = async (list) => {
+    for (const [file, key, type, cache] of list) {
+      await store.put(file, key, type, cache);
+      console.log(`  ↑ ${key}`);
+    }
+  };
+  await upload(first);
+  // The indexes about to go up were built from what was read at the start. If
+  // another publish to this suite (this package's or another's) finished since,
+  // they would drop what it added: stop instead. Every architecture's index is
+  // rewritten, so every one is compared.
+  if (opts.local && process.env.APT_PUBLISH_TEST_HOLD) await heldUntil(process.env.APT_PUBLISH_TEST_HOLD);
+  for (const arch of ARCHES) {
+    const now = await store.get(packagesKey(SUITE, arch));
+    const was = asRead[arch];
+    const same = now === null || was === null ? now === was : now.equals(was);
+    if (!same) {
+      die(`${SUITE}'s ${arch} index changed while this publish ran: another publish to ${SUITE} finished in between, ` +
+          `and writing this one's indexes would drop what it added. ${SUITE} is as that publish left it; run this one again`);
+    }
   }
+  await upload(then);
   console.log(`done: ${SUITE} now has ${added.join(", ")}`);
+}
+
+/** For linux/packaging/test-apt-publish.sh, --local only: wait here, between
+ *  the package upload and the index check, until FILE exists (60 s at most). */
+async function heldUntil(file) {
+  for (let i = 0; i < 1200 && !existsSync(file); i++) await new Promise((r) => setTimeout(r, 50));
+  if (!existsSync(file)) die(`APT_PUBLISH_TEST_HOLD: ${file} never appeared`);
 }
 
 // ---------------------------------------------------------------------------
