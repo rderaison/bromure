@@ -17,7 +17,7 @@ import { closeConnection, connectionFor, savedHosts, targetForSaved, useSavedHos
 import type { HostTarget } from '../../core/remote/host';
 import type { DeviceInfo } from '../../core/cloud/controlPlane';
 import { canDialDirect, electron, shell } from '../../platform';
-import { account } from './account';
+import { account, takeConnectRequest, hasConnectRequest, CONNECT_EVENT } from './account';
 import { deviceDisplayName, peerTarget, rememberPeerUser } from './peers';
 import { ClientKeySheet, HostKeyStep, PasswordStep, claimTrustInline } from './TrustPrompts';
 import './connect.css';
@@ -220,6 +220,25 @@ export function ConnectScreen() {
     };
     connectSaved(host);
   };
+
+  // A `#connect?device=` link (bromure.io/app's Connect button): once signed
+  // in and the directory is in, connect straight to that server — or say why
+  // not and leave the chooser up.
+  const [connectTick, setConnectTick] = useState(0);
+  useEffect(() => {
+    const on = () => setConnectTick(n => n + 1);
+    window.addEventListener(CONNECT_EVENT, on);
+    return () => window.removeEventListener(CONNECT_EVENT, on);
+  }, []);
+  useEffect(() => {
+    if (!signedIn || !acct.directoryLoaded || !hasConnectRequest()) return;
+    const id = takeConnectRequest();
+    const s = id ? servers.find(x => x.id.toLowerCase() === id.toLowerCase()) : undefined;
+    if (!s) { setPhase({ k: 'unreachable', msg: "That server isn't in your bromure.io account (or it was removed). Pick one below." }); return; }
+    setSelection('peer:' + s.id);
+    if (s.online) connectPeer(s);
+    else setPhase({ k: 'unreachable', msg: `${deviceDisplayName(s)} is offline. Start Bromure on it, then connect.` });
+  }, [signedIn, acct.directoryLoaded, servers, connectTick]); // eslint-disable-line
 
   const selectedPeer = selection?.startsWith('peer:') ? servers.find(s => s.id === selection.slice(5)) : undefined;
   const selectedHost = selection?.startsWith('host:') ? saved.find(h => h.id === selection.slice(5)) : undefined;

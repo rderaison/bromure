@@ -25,6 +25,9 @@ export interface AccountSnapshot {
   error: string | null;
   servers: DeviceInfo[];
   directoryLoading: boolean;
+  /** The directory came back at least once since sign-in (so a server
+   *  missing from `servers` really isn't there). */
+  directoryLoaded: boolean;
   directoryError: string | null;
   /** Doc/screenshot stand-in (?connectdemo=1): no bromure.io calls. */
   demo: boolean;
@@ -34,7 +37,7 @@ const STATE_KEY = 'bromure.enroll.state';
 const DEMO = typeof location !== 'undefined' && new URLSearchParams(location.search).get('connectdemo') === '1';
 
 let snap: AccountSnapshot = {
-  record: null, loaded: false, busy: false, error: null, servers: [], directoryLoading: false, directoryError: null, demo: DEMO,
+  record: null, loaded: false, busy: false, error: null, servers: [], directoryLoading: false, directoryLoaded: false, directoryError: null, demo: DEMO,
 };
 const listeners = new Set<() => void>();
 function set(patch: Partial<AccountSnapshot>) { snap = { ...snap, ...patch }; for (const l of [...listeners]) l(); }
@@ -115,7 +118,7 @@ export const account = {
       await idbPut('device-identity', { privateKey: key.privateKey, publicKey: key.publicKey });
       await saveDeviceRecord(record);
       directoryEverLoaded = false; firstLoad401Retries = 0;
-      set({ record, busy: false, servers: [] });
+      set({ record, busy: false, servers: [], directoryLoaded: false });
       // The user's servers authorize this device's SSH key (no password).
       cp.uploadSSHKey(record.deviceToken, await publicKeyLine()).catch(e => console.warn('ssh-key publish', e));
       account.loadDirectory();
@@ -144,7 +147,8 @@ export const account = {
     await clearDeviceRecord().catch(() => {});
     await idbDelete('device-identity').catch(() => {});
     directoryEverLoaded = false; firstLoad401Retries = 0;
-    set({ record: null, servers: [], directoryError: null, error: null });
+    try { sessionStorage.removeItem(CONNECT_KEY); } catch {}   // a pending Connect link was for that account
+    set({ record: null, servers: [], directoryLoaded: false, directoryError: null, error: null });
     if (watchers) startTimer();
     return true;
   },
@@ -159,7 +163,7 @@ export const account = {
       if (snap.record !== rec) return;
       // Our own row (you don't mirror yourself), revoked devices and Sidecar
       // Macs (they serve no mirror) are left out.
-      set({ servers: devices.filter(d => !d.self && !d.revoked && d.capability !== 'agent-host'), directoryLoading: false });
+      set({ servers: devices.filter(d => !d.self && !d.revoked && d.capability !== 'agent-host'), directoryLoading: false, directoryLoaded: true });
       directoryEverLoaded = true; firstLoad401Retries = 0;
     } catch (e: any) {
       set({ directoryLoading: false });
@@ -167,7 +171,7 @@ export const account = {
       if (e?.status === 401 && directoryEverLoaded) {
         // Loaded before: a 401 now is a real revocation of this device.
         await clearDeviceRecord().catch(() => {});
-        set({ record: null, servers: [], directoryError: "This device's bromure.io registration was revoked. Sign in again." });
+        set({ record: null, servers: [], directoryLoaded: false, directoryError: "This device's bromure.io registration was revoked. Sign in again." });
       } else if (e?.status === 401) {
         // First load after sign-in: still propagating, or no servers yet.
         set({ servers: [] });
@@ -232,11 +236,41 @@ function describeEnrollError(e: any): string {
   return `Couldn't reach bromure.io: ${e?.message ?? e}`;
 }
 
+const CONNECT_KEY = 'bromure.connect.device';
+/** Fired when a link asks for a server (the chooser may already be up). */
+export const CONNECT_EVENT = 'bromure:connect-request';
+/** The server a `#connect?device=` link asked for, once (then forgotten). */
+export function takeConnectRequest(): string | null {
+  try { const d = sessionStorage.getItem(CONNECT_KEY); sessionStorage.removeItem(CONNECT_KEY); return d; } catch { return null; }
+}
+export function hasConnectRequest(): boolean {
+  try { return !!sessionStorage.getItem(CONNECT_KEY); } catch { return false; }
+}
+
 // ── callbacks ────────────────────────────────────────────────────────────
 
 if (typeof window !== 'undefined') {
   // Electron: bromure-client://enroll?code=…&api=…&state=…
   electron?.onDeepLink(url => { if (/^bromure-client:\/\/enroll/i.test(url)) account.complete(url); });
+  // bromure.io/app's Connect button: /client/#connect?device=<install id>.
+  // Stashed (it outlives a sign-in round trip) and cleared from the address
+  // bar so a refresh doesn't connect again; the chooser acts on it once the
+  // directory has loaded.
+  const takeConnectLink = () => {
+    if (!location.hash.startsWith('#connect?')) return false;
+    const device = new URLSearchParams(location.hash.slice('#connect?'.length)).get('device') ?? '';
+    history.replaceState(null, '', location.pathname + location.search);
+    // An install id (a uuid); only matched against the directory, never used
+    // in a URL or shown — a safe charset is all that's needed.
+    if (/^[A-Za-z0-9-]{1,64}$/.test(device)) {
+      try { sessionStorage.setItem(CONNECT_KEY, device); } catch {}
+      window.dispatchEvent(new Event(CONNECT_EVENT));
+    }
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    return true;
+  };
+  takeConnectLink();
+  window.addEventListener('hashchange', () => { takeConnectLink(); });
   // Hosted: the enroll page returns to /client/#enroll?…
   if (location.hash.startsWith('#enroll?')) {
     const h = location.hash;
@@ -255,7 +289,7 @@ if (typeof window !== 'undefined') {
       // the enrollment key — signing in again re-enrolls the same device.
       if (e?.status !== 401 || account.get().record !== rec) return;
       await clearDeviceRecord().catch(() => {});
-      set({ record: null, servers: [], directoryError: 'Your bromure.io session for this browser expired. Sign in again.' });
+      set({ record: null, servers: [], directoryLoaded: false, directoryError: 'Your bromure.io session for this browser expired. Sign in again.' });
     });
   };
   setTimeout(beat, 1500);
