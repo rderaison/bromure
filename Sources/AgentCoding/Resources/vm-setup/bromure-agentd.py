@@ -1702,8 +1702,9 @@ def _file_op(spec):
         if op == "rename":
             # An upload's last step: a complete temp file replaces `dest` in
             # one atomic step, so a copy that fails part-way never leaves the
-            # destination truncated. An existing file keeps its permissions;
-            # a symlinked destination is written through (like a plain write).
+            # destination truncated. An existing file keeps its owner,
+            # permissions, ACLs and extended attributes (_replace_staged); a
+            # symlinked destination is written through (like a plain write).
             dest = spec.get("dest", "")
             if not dest.startswith("/"):
                 return {"error": "dest must be absolute", "exit_code": 1}
@@ -1711,11 +1712,7 @@ def _file_op(spec):
                 dest = os.path.realpath(dest)
             if os.path.isdir(dest):
                 return {"error": "%s is a folder" % dest, "exit_code": 1}
-            try:
-                shutil.copymode(dest, path)
-            except OSError:
-                pass
-            os.replace(path, dest)
+            _replace_staged(path, dest)
             return {"exit_code": 0}
         if op == "remove":
             if os.path.isdir(path) and not os.path.islink(path):
@@ -1726,6 +1723,64 @@ def _file_op(spec):
         return {"error": "unknown file op %r" % op, "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
+
+
+def _replace_staged(staged, dest):
+    """Put the complete file `staged` (beside `dest`, same filesystem) in
+    place of `dest`. A new destination is a rename. An existing one is too,
+    once the staged file carries everything the file had besides its bytes:
+    owner and group, mode, and every extended attribute (POSIX ACLs are
+    extended attributes here: system.posix_acl_*). Where that can't be
+    reproduced (an owner this user can't give, an attribute it can't set),
+    the rename is refused, or the file has other hard links, a rename would
+    change it or can't, so its own inode
+    gets the new bytes instead: its metadata and its links stay as they are,
+    the upload no longer atomic there (the staged copy is complete and local,
+    so only a full disk can stop it part-way). HostExec's twin:
+    StagedReplace.replace."""
+    try:
+        st = os.stat(dest)
+    except FileNotFoundError:
+        os.replace(staged, dest)
+        return
+    if st.st_nlink > 1 or not _copy_file_metadata(dest, staged, st):
+        _write_in_place(staged, dest)
+        return
+    try:
+        os.replace(staged, dest)
+    except PermissionError:
+        # Refused (the folder or an ACL forbids removing the file): the
+        # file's own permissions may still allow writing it, as a plain
+        # write did.
+        _write_in_place(staged, dest)
+
+
+def _copy_file_metadata(src, dst, st):
+    """Give `dst` the owner, group, mode and extended attributes `src` (whose
+    stat is `st`) has. False when any of it can't be set."""
+    try:
+        cur = os.stat(dst)
+        if (cur.st_uid, cur.st_gid) != (st.st_uid, st.st_gid):
+            os.chown(dst, st.st_uid, st.st_gid)
+        # After the chown, which clears set-id bits.
+        os.chmod(dst, st.st_mode & 0o7777)
+        if hasattr(os, "listxattr"):
+            names = os.listxattr(src)
+            for name in os.listxattr(dst):
+                if name not in names:
+                    os.removexattr(dst, name)
+            for name in names:
+                os.setxattr(dst, name, os.getxattr(src, name))
+        return True
+    except OSError:
+        return False
+
+
+def _write_in_place(staged, dest):
+    with open(staged, "rb") as src, open(dest, "r+b") as out:
+        shutil.copyfileobj(src, out, 1 << 20)
+        out.truncate()
+    os.unlink(staged)
 
 
 def _untar_confined(archive, dest):

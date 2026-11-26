@@ -122,7 +122,7 @@ enum HostExec {
             case "rename":
                 // An upload's last step (bromure-agentd.py's `rename`): the
                 // complete temp file replaces `dest` atomically; an existing
-                // file keeps its permissions, a symlink is written through.
+                // file keeps its metadata, a symlink is written through.
                 var dest = mapHome(spec["dest"] as? String ?? "")
                 guard dest.hasPrefix("/") else { return ["error": "dest must be absolute", "exit_code": 1] }
                 if (try? fm.destinationOfSymbolicLink(atPath: dest)) != nil {
@@ -132,11 +132,10 @@ enum HostExec {
                 if fm.fileExists(atPath: dest, isDirectory: &isDir), isDir.boolValue {
                     return ["error": "\(dest) is a folder", "exit_code": 1]
                 }
-                if let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] {
-                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
-                }
-                guard Foundation.rename(path, dest) == 0 else {
-                    return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                // Owner, mode, ACL and extended attributes kept; a hard-linked
+                // file updated in place (StagedReplace).
+                if let failure = StagedReplace.replace(path, onto: dest) {
+                    return ["error": failure, "exit_code": 1]
                 }
                 return ["exit_code": 0]
             case "remove":
