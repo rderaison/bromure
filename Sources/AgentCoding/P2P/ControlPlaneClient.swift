@@ -208,8 +208,7 @@ struct ControlPlaneClient {
     /// iPhone/iPad/Vision clients say `bromure-remote/…`: they serve nothing.
     /// Display only on the other side — never an authorization input.
     static let userAgent: String = {
-        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-        let version = userAgentVersion(raw)
+        let version = userAgentVersion(appShortVersion)
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let os = "\(v.majorVersion).\(v.minorVersion)"
         #if AGENT_HOST
@@ -217,11 +216,22 @@ struct ControlPlaneClient {
         #elseif os(macOS)
         return "bromure-ac/\(version) (macOS \(os))"
         #elseif os(Linux)
-        return "bromure-ac/\(version) (linux \(os))"   // the Linux server (its version must be in Bundle.main)
+        return "bromure-ac/\(version) (linux \(os))"   // the Linux server; \(os) is its kernel's
         #else
         return "bromure-remote/\(version) (\(os))"
         #endif
     }()
+
+    /// This build's release. The apps read it from their Info.plist; the
+    /// Linux server is a plain binary with none, and pins the same number in
+    /// LinuxAppVersion (its tests hold it to Info.plist's).
+    static var appShortVersion: String {
+        #if BROMURE_LINUX
+        return LinuxAppVersion.short
+        #else
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        #endif
+    }
 
     /// "5.6" → "5.6.0", "5" → "5.0.0", "5.6.0.1" → "5.6.0"; non-numeric → "0.0.0".
     static func userAgentVersion(_ raw: String) -> String {
