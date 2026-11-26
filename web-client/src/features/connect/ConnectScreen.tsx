@@ -233,6 +233,11 @@ export function ConnectScreen() {
   useEffect(() => {
     if (!signedIn || !acct.directoryLoaded || !hasConnectRequest()) return;
     const id = takeConnectRequest();
+    // The link replaces whatever was being connected: cancel and close that
+    // attempt first (its prompts answered, its connection closed, its
+    // attempt number spent), so a late success can't navigate to the
+    // earlier server over the link's target or its error.
+    if (current.current || phase.k !== 'editing') cancelConnect();
     const s = id ? servers.find(x => x.id.toLowerCase() === id.toLowerCase()) : undefined;
     if (!s) { setPhase({ k: 'unreachable', msg: "That server isn't in your bromure.io account (or it was removed). Pick one below." }); return; }
     setSelection('peer:' + s.id);
