@@ -8,8 +8,12 @@
 // come from Jenkins credentials, never from this file.
 //   WEB_CLIENT_REGISTRY        (secret text)  registry prefix, e.g. <host>/<namespace>
 //   DOCKER_DO_REGISTRY         (secret file)  docker config.json with push auth
-//   WEB_CLIENT_ROLLOUT         (secret text)  "<namespace> <deployment>" to restart after
-//                                             the push; ROLLOUT=false skips it
+//   WEB_CLIENT_ROLLOUT         (secret text)  the deployment to restart after the push:
+//                                             "<namespace> <deployment>" (e.g. "bromure
+//                                             web-client"), or the kubectl line itself
+//                                             ("kubectl rollout restart deploy/web-client
+//                                             -n bromure"); only the two names are taken
+//                                             from it, never run. ROLLOUT=false skips it
 //   DIGITAL_OCEAN_KUBECONFIG   (secret file)  kubeconfig for that restart
 pipeline {
     agent any
@@ -63,9 +67,32 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
-                        set -- $ROLLOUT_TARGET
-                        kubectl rollout restart "deploy/$2" -n "$1"
-                        kubectl rollout status "deploy/$2" -n "$1" --timeout=5m
+                        # The namespace and deployment: from "<namespace> <deployment>",
+                        # or picked out of a kubectl line (deploy/<name>, -n <ns>,
+                        # -n<ns>, --namespace[=]<ns>). Validated as Kubernetes names;
+                        # anything else stops here rather than restarting the wrong thing.
+                        ns=''; dep=''
+                        set -f; set -- $ROLLOUT_TARGET; set +f
+                        if [ $# -eq 2 ] && [ "${1#-}" = "$1" ] && [ "${2#*/}" = "$2" ]; then
+                            ns=$1; dep=$2
+                        else
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    deploy/*|deployment/*|deployments/*|deployment.apps/*) dep=${1#*/} ;;
+                                    -n|--namespace) if [ $# -ge 2 ]; then shift; ns=$1; fi ;;
+                                    --namespace=*) ns=${1#--namespace=} ;;
+                                    -n*) ns=${1#-n} ;;
+                                esac
+                                shift
+                            done
+                        fi
+                        name='^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                        if ! printf '%s' "$ns" | grep -Eq "$name" || ! printf '%s' "$dep" | grep -Eq "$name"; then
+                            echo 'WEB_CLIENT_ROLLOUT must be "<namespace> <deployment>" (or a "kubectl rollout restart deploy/<deployment> -n <namespace>" line); it is neither.'
+                            exit 1
+                        fi
+                        kubectl rollout restart "deploy/$dep" -n "$ns"
+                        kubectl rollout status "deploy/$dep" -n "$ns" --timeout=5m
                     '''
                 }
             }
