@@ -70,6 +70,8 @@ export interface ElectronNetBridge {
 }
 
 type TcpEvent = [kind: string, data?: Uint8Array, message?: string];
+/** Early events kept per unclaimed id (see `early`). */
+const EARLY_MAX = 4096;
 
 export class ElectronTcpStream implements ByteStream {
   onData: (data: Uint8Array) => void = () => {};
@@ -90,10 +92,14 @@ export class ElectronTcpStream implements ByteStream {
   /** Begin delivering data once onData/onClose are set. */
   start(): void { this.bridge.tcpResume?.(this.id); }
 
-  /** Events for an id `open` hasn't returned yet: main sends the socket's
-   *  first bytes (the SSH server's banner) as soon as it connects, which can
-   *  beat tcpOpen's reply. Kept until `open` claims them, never dropped. */
-  private static early = new Map<number, TcpEvent[]>();
+  /** Events for an id `open` hasn't returned yet. Main holds a new socket's
+   *  bytes until `open` resumes it (tcpResume), so only its close or error
+   *  can come early; older mains sent bytes at once, which can beat
+   *  tcpOpen's reply. Kept in order until `open` claims them. Past
+   *  EARLY_MAX the id is marked overflowed instead of silently losing
+   *  events: `open` then fails the stream and closes the socket, so a
+   *  truncated byte stream is never mistaken for a live one. */
+  private static early = new Map<number, TcpEvent[] | 'overflow'>();
   /** While set, events queue here (behind the early ones) instead of firing. */
   private backlog: TcpEvent[] | null = null;
 
@@ -105,7 +111,9 @@ export class ElectronTcpStream implements ByteStream {
         const s = ElectronTcpStream.streams.get(id);
         if (!s) {
           const q = ElectronTcpStream.early.get(id) ?? [];
-          if (q.length < 1024) q.push(ev);
+          if (q === 'overflow') return;
+          if (q.length >= EARLY_MAX) { ElectronTcpStream.early.set(id, 'overflow'); return; }
+          q.push(ev);
           ElectronTcpStream.early.set(id, q);
           return;
         }
@@ -126,12 +134,21 @@ export class ElectronTcpStream implements ByteStream {
     ElectronTcpStream.streams.set(id, s);
     const early = ElectronTcpStream.early.get(id);
     ElectronTcpStream.early.delete(id);
-    if (early) {
-      // After the caller has set onData/onClose (it does so right after this
-      // returns), in order, ahead of anything that arrives meanwhile.
-      s.backlog = early;
-      setTimeout(() => { const q = s.backlog ?? []; s.backlog = null; for (const ev of q) s.deliver(ev); }, 0);
-    }
+    // After the caller has set onData/onClose (it does so right after this
+    // returns): what came early, in order, ahead of anything that arrives
+    // meanwhile — then main may start reading the socket.
+    s.backlog = early === 'overflow' ? [] : early ?? [];
+    setTimeout(() => {
+      if (early === 'overflow') {
+        s.backlog = null;
+        bridge.tcpClose(id);
+        s.finish(new Error('connection lost: too much arrived before it was ready'));
+        return;
+      }
+      const q = s.backlog ?? []; s.backlog = null;
+      for (const ev of q) s.deliver(ev);
+      if (!s.closed) bridge.tcpResume?.(id);
+    }, 0);
     return s;
   }
   write(data: Uint8Array): void { if (!this.closed) this.bridge.tcpWrite(this.id, data); }

@@ -215,10 +215,17 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
     s.setNoDelay(true);
     s.setKeepAlive(true, 30000);
     const wc = e.sender;
-    s.once('connect', () => { sockets.set(id, { s, owner: wc.id }); resolve(id); });
+    // Held paused (no 'data' listener) until the renderer has its stream and
+    // says so (tcp:resume), as an accepted socket is: bytes that beat
+    // tcpOpen's reply wait in the kernel and this socket's buffer — TCP's
+    // own backpressure — instead of piling up in the renderer.
+    s.once('connect', () => {
+      sockets.set(id, { s, owner: wc.id });
+      accepted.set(id, () => s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); }));
+      resolve(id);
+    });
     s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else wc.send('tcp:event', id, 'error', null, err.message); });
-    s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); });
-    s.on('close', () => { sockets.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    s.on('close', () => { sockets.delete(id); accepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
     s.setTimeout(15000, () => { if (!sockets.has(id)) { s.destroy(); reject(new Error(`Timed out reaching ${host}:${port}`)); } else s.setTimeout(0); });
   });
 });

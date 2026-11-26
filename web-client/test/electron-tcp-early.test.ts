@@ -13,8 +13,11 @@ let nextOpen: { id: number; before: [string, Uint8Array?][] } = { id: 0, before:
 const bridge = {
   onTcpEvent: (cb: any) => { emitter = cb; },
   tcpOpen: async () => { const { id, before } = nextOpen; for (const [k, d] of before) emitter(id, k, d); return id; },
-  tcpWrite: () => {}, tcpClose: () => {},
+  tcpWrite: () => {},
+  tcpClose: (id: number) => { calls.push(`close ${id}`); },
+  tcpResume: (id: number) => { calls.push(`resume ${id}`); },
 } as unknown as ElectronNetBridge;
+const calls: string[] = [];
 function fakeBridge(id: number, before: [string, Uint8Array?][]) {
   nextOpen = { id, before };
   return { bridge, emit: (k: string, d?: Uint8Array) => emitter(id, k as any, d) };
@@ -39,4 +42,36 @@ describe('ElectronTcpStream', () => {
     await new Promise(r => setTimeout(r, 5));
     expect(closed).toBe(true);
   });
+
+  // Main holds a new socket's bytes until the stream is claimed: the
+  // renderer resumes it once its handlers are set.
+  it('resumes the socket only after open() returned and the handlers are set', async () => {
+    calls.length = 0;
+    const { bridge } = fakeBridge(903, []);
+    const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
+    expect(calls).toEqual([]);                       // not yet: the caller is still wiring
+    s.onData = () => {};
+    await new Promise(r => setTimeout(r, 5));
+    expect(calls).toEqual(['resume 903']);
+  });
+
+  // Regression: past 1,024 early events the rest — data, error, close — were
+  // silently dropped, so SSH saw a truncated stream or waited forever for a
+  // close. Now an overflow fails the stream and closes the socket.
+  it('more early events than it keeps fails the stream loudly instead of truncating it', async () => {
+    calls.length = 0;
+    const many: [string, Uint8Array?][] = Array.from({ length: 5000 }, () => ['data', new Uint8Array([1])]);
+    many.push(['close']);
+    const { bridge } = fakeBridge(904, many);
+    const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
+    let bytes = 0, err: Error | undefined, closed = false;
+    s.onData = d => { bytes += d.length; };
+    s.onClose = e => { closed = true; err = e; };
+    await new Promise(r => setTimeout(r, 5));
+    expect(closed).toBe(true);
+    expect(err?.message).toMatch(/too much arrived/);
+    expect(bytes).toBe(0);                            // nothing partial handed on as if live
+    expect(calls).toEqual(['close 904']);             // and never resumed
+  });
 });
+
