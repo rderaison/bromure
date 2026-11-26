@@ -621,8 +621,10 @@ final class FileExplorerModel {
     /// Reads a file off the machine for the media preview (nil: no file
     /// service here).
     private func mediaReader() -> DisplayFileReader? {
-        guard profileID != nil, fileOpProvider != nil else { return nil }
-        return DisplayFileReader.chunked { [weak self] op in try? await self?.fileOp(op) }
+        // Pinned to this machine: a preview's chunks never come from the one
+        // selected next (transferOp).
+        guard let profileID, let read = transferOp(for: profileID) else { return nil }
+        return DisplayFileReader.chunked { op in try? await read(op) }
     }
 
     private func fileOp(_ op: [String: Any]) async throws -> [String: Any] {
@@ -630,9 +632,19 @@ final class FileExplorerModel {
         return try await fileOpProvider(profileID, op)
     }
 
+    /// File ops pinned to the machine a transfer started on. The pane keeps
+    /// this model across selections (setLocation), so `fileOp` follows the
+    /// current one; a copy's writes, reads and cleanup must not — a failed
+    /// upload's `remove` would otherwise hit the same path on the machine
+    /// selected since, and closing the pane would strand the partial file.
+    private func transferOp(for profileID: Profile.ID) -> FolderUpload.FileOp? {
+        guard let fileOpProvider else { return nil }
+        return { op in try await fileOpProvider(profileID, op) }
+    }
+
     /// Pull a file (root-relative) into the local cache; returns the local URL.
     func download(_ relPath: String) async throws -> URL {
-        guard let root, let profileID else { throw CocoaError(.fileNoSuchFile) }
+        guard let root, let profileID, let op = transferOp(for: profileID) else { throw CocoaError(.fileNoSuchFile) }
         let guestPath = (root as NSString).appendingPathComponent(relPath)
         let local = downloadRoot
             .appendingPathComponent(profileID.uuidString, isDirectory: true)
@@ -651,7 +663,7 @@ final class FileExplorerModel {
         let name = (relPath as NSString).lastPathComponent
         var offset: Int64 = 0
         while true {
-            let resp = try await fileOp(["op": "read", "path": guestPath,
+            let resp = try await op(["op": "read", "path": guestPath,
                                          "offset": offset, "length": Self.chunkBytes])
             guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
                 throw CocoaError(.fileReadCorruptFile)
@@ -696,7 +708,7 @@ final class FileExplorerModel {
     /// Copy files dropped from the Finder into the folder on show (or the
     /// given root-relative folder), folders whole, chunked.
     func receive(_ urls: [URL], into dir: String? = nil) {
-        guard let root, canTransfer else { return }
+        guard let root, canTransfer, let profileID, let op = transferOp(for: profileID) else { return }
         let base = dir.map { (root as NSString).appendingPathComponent($0) } ?? root
         Task { @MainActor in
             var note: String?
@@ -709,7 +721,7 @@ final class FileExplorerModel {
                     if isDir.boolValue {
                         let skipped = try await FolderUpload.upload(
                             src, into: (base as NSString).appendingPathComponent(src.lastPathComponent),
-                            op: { try await self.fileOp($0) }, progress: { self.transferText = $0 })
+                            op: op, progress: { self.transferText = $0 })
                         if skipped > 0 {
                             note = String(format: NSLocalizedString(
                                 "%d items in “%@” weren't copied: they point outside the folder or aren't regular files.",
@@ -720,7 +732,7 @@ final class FileExplorerModel {
                     }
 #endif
                     try await uploadItem(at: src, to: (base as NSString).appendingPathComponent(src.lastPathComponent),
-                                         isDirectory: isDir.boolValue)
+                                         isDirectory: isDir.boolValue, op: op)
                 } catch {
                     note = error.localizedDescription
                 }
@@ -732,30 +744,28 @@ final class FileExplorerModel {
         }
     }
 
-    private func uploadItem(at src: URL, to guestPath: String, isDirectory: Bool) async throws {
+    private func uploadItem(at src: URL, to guestPath: String, isDirectory: Bool,
+                            op: @escaping FolderUpload.FileOp) async throws {
         if isDirectory {
-            _ = try await fileOp(["op": "mkdir", "path": guestPath])
+            _ = try await op(["op": "mkdir", "path": guestPath])
             let children = (try? FileManager.default.contentsOfDirectory(
                 at: src, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
             for child in children {
                 let childIsDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
                 try await uploadItem(at: child, to: (guestPath as NSString).appendingPathComponent(child.lastPathComponent),
-                                     isDirectory: childIsDir)
+                                     isDirectory: childIsDir, op: op)
             }
             return
         }
-        try await uploadFile(at: src, to: guestPath, label: src.lastPathComponent)
+        try await uploadFile(at: src, to: guestPath, label: src.lastPathComponent, op: op)
     }
 
     /// One file, atomically onto `guestPath` (FolderUpload.write: a temp
     /// file renamed over it once complete — a failed copy leaves a file
     /// already there untouched).
-    private func uploadFile(at src: URL, to guestPath: String, label: String) async throws {
-        try await FolderUpload.write(src, to: guestPath, label: label,
-                                     op: { [weak self] op in
-                                         guard let self else { throw CancellationError() }
-                                         return try await self.fileOp(op)
-                                     },
+    private func uploadFile(at src: URL, to guestPath: String, label: String,
+                            op: @escaping FolderUpload.FileOp) async throws {
+        try await FolderUpload.write(src, to: guestPath, label: label, op: op,
                                      progress: { [weak self] text in self?.transferText = text })
     }
 
