@@ -52,11 +52,12 @@ export type GuestFileOp = (op: Record<string, unknown>, timeoutSec?: number) => 
  *  removed (a file already there stays). */
 export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
                                      fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
-                                     progress?: (sent: number) => void): Promise<number> {
+                                     progress?: (sent: number) => void, staged = false): Promise<number> {
   let created = false;
   try {
     return await writeStreamChunked(stream, chunk, async (bytes, append) => {
-      await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
+      // `staged`: an upload's staging file, created owner-only (CWE-200).
+      await fileOp({ op: 'write', path, data: encode(bytes), append, ...(staged && !append ? { staged: true } : {}) }, 60);
       created = true;
     }, progress);
   } catch (e) {
@@ -80,7 +81,9 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
                                        progress?: (sent: number) => void): Promise<number> {
   const cut = dest.lastIndexOf('/');
   const tmp = `${dest.slice(0, cut + 1)}.${dest.slice(cut + 1)}.bromure-${crypto.randomUUID()}.part`;
-  const sent = await writeGuestFile(open(), tmp, chunk, fileOp, encode, progress);
+  // Owner-only while it fills (CWE-200): `dest` may be private. `rename`
+  // gives it its final mode.
+  const sent = await writeGuestFile(open(), tmp, chunk, fileOp, encode, progress, true);
   try {
     await fileOp({ op: 'rename', path: tmp, dest });
     return sent;

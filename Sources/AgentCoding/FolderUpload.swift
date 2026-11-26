@@ -25,7 +25,14 @@ enum FolderUpload {
         let archive = try await tarball(of: src)
         defer { try? FileManager.default.removeItem(at: archive) }
         let guestArchive = "/tmp/bromure-drop-\(UUID().uuidString).tgz"
-        try await write(archive, to: guestArchive, label: name, op: op, progress: progress)
+        // A fresh name, owner-only while it fills and until it's unpacked
+        // (CWE-200): nothing to stage it beside.
+        do {
+            try await writeChunks(archive, to: guestArchive, label: name, op: op, progress: progress, staged: true)
+        } catch {
+            _ = try? await op(["op": "remove", "path": guestArchive])
+            throw error
+        }
         progress?(String(format: NSLocalizedString("Unpacking %@…",
                                                    comment: "a dropped folder is being unpacked in the VM"), name))
         do {
@@ -51,7 +58,7 @@ enum FolderUpload {
     /// A folder `packed` elsewhere, unpacked into `guestDir`.
     static func unpack(_ archive: Data, into guestDir: String, op: FileOp) async throws {
         let guestArchive = "/tmp/bromure-drop-\(UUID().uuidString).tgz"
-        for w in GuestDrop.writeOps(guestPath: guestArchive, data: archive) { _ = try await op(w) }
+        for w in GuestDrop.writeOps(guestPath: guestArchive, data: archive, staged: true) { _ = try await op(w) }
         _ = try await op(["op": "untar", "path": guestDir, "archive": guestArchive])
     }
 
@@ -95,7 +102,9 @@ enum FolderUpload {
         let name = (guestPath as NSString).lastPathComponent
         let tmp = (dir as NSString).appendingPathComponent(".\(name).bromure-\(UUID().uuidString).part")
         do {
-            try await writeChunks(src, to: tmp, label: label, op: op, progress: progress)
+            // Owner-only while it fills (CWE-200): the file it replaces may
+            // be private. `rename` gives it its final mode.
+            try await writeChunks(src, to: tmp, label: label, op: op, progress: progress, staged: true)
         } catch {
             _ = try? await op(["op": "remove", "path": tmp])
             throw error
@@ -110,9 +119,10 @@ enum FolderUpload {
         try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
     }
 
-    /// One file, chunked: a truncating first write, then appends.
+    /// One file, chunked: a truncating first write, then appends. `staged`:
+    /// an upload's staging file, created owner-only.
     private static func writeChunks(_ src: URL, to guestPath: String, label: String, op: FileOp,
-                                    progress: ((String) -> Void)?) async throws {
+                                    progress: ((String) -> Void)?, staged: Bool = false) async throws {
         guard let handle = try? FileHandle(forReadingFrom: src) else { return }
         defer { try? handle.close() }
         var first = true
@@ -120,8 +130,10 @@ enum FolderUpload {
         while true {
             let data = handle.readData(ofLength: chunkBytes)
             if data.isEmpty && !first { break }
-            _ = try await op(["op": "write", "path": guestPath,
-                              "data": data.base64EncodedString(), "append": !first])
+            var w: [String: Any] = ["op": "write", "path": guestPath,
+                                    "data": data.base64EncodedString(), "append": !first]
+            if staged && first { w["staged"] = true }
+            _ = try await op(w)
             sent += Int64(data.count)
             progress?(String(format: NSLocalizedString("Copying %@ in… %@", comment: ""), label,
                              ByteCountFormatter.string(fromByteCount: sent, countStyle: .file)))

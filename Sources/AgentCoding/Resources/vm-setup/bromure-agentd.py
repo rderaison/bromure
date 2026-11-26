@@ -1680,6 +1680,18 @@ def _file_op(spec):
                     "exit_code": 0}
         if op == "write":
             data = base64.b64decode(spec.get("data", "") or "")
+            if spec.get("staged") and not spec.get("append"):
+                # An upload's staging file (a temp file `rename` later puts
+                # in place, a folder's archive): only its owner may read it
+                # while it fills (CWE-200) -- the file it replaces may be
+                # private. `rename` gives it its final mode. Never through a
+                # link planted at its name.
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    os.fchmod(f.fileno(), 0o600)
+                    f.write(data)
+                return {"exit_code": 0}
             with open(path, "ab" if spec.get("append") else "wb") as f:
                 f.write(data)
             return {"exit_code": 0}
@@ -1711,8 +1723,14 @@ def _file_op(spec):
                 dest = os.path.realpath(dest)
             if os.path.isdir(dest):
                 return {"error": "%s is a folder" % dest, "exit_code": 1}
+            # The staged file is owner-only while it fills (`write`'s
+            # `staged`): it takes its final mode only now, the existing
+            # file's, or for a new one what a plain write would have given.
             try:
-                shutil.copymode(dest, path)
+                if os.path.exists(dest):
+                    shutil.copymode(dest, path)
+                else:
+                    os.chmod(path, 0o666 & ~_current_umask())
             except OSError:
                 pass
             os.replace(path, dest)
@@ -1726,6 +1744,19 @@ def _file_op(spec):
         return {"error": "unknown file op %r" % op, "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
+
+
+def _current_umask():
+    """This process's umask, read without changing it (os.umask would, for
+    a moment, under the agent's other threads). Linux: /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0o022
 
 
 def _untar_confined(archive, dest):

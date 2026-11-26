@@ -68,3 +68,30 @@ describe('replaceGuestFile', () => {
     expect([...g.files.keys()]).toEqual([DEST]);
   });
 });
+
+// Regression (CWE-200): the staging file was created with the guest's
+// default mode (0644) and only took the destination's (perhaps 0600) at the
+// rename, readable by others while a large upload filled it. Its first write
+// now asks for an owner-only file.
+describe('replaceGuestFile staging is owner-only', () => {
+  it('the first write of the temp file is `staged`, the appends and the rename are not', async () => {
+    const seen: Record<string, any>[] = [];
+    const op = async (o: Record<string, any>) => { seen.push(o); };
+    await replaceGuestFile(bytes(3000), DEST, 1024, op, enc);
+    const writes = seen.filter(o => o.op === 'write');
+    expect(writes.length).toBeGreaterThan(1);
+    expect(writes[0].staged).toBe(true);
+    expect(writes[0].append).toBe(false);
+    expect(writes.slice(1).every(o => !('staged' in o))).toBe(true);
+    expect(seen.find(o => o.op === 'rename')?.staged).toBeUndefined();
+  });
+
+  it('the old-guest fallback writes the destination directly, not staged', async () => {
+    const seen: Record<string, any>[] = [];
+    const op = async (o: Record<string, any>) => { seen.push(o); if (o.op === 'rename') throw new Error("unknown file op 'rename'"); };
+    await replaceGuestFile(bytes(10), DEST, 1024, op, enc);
+    const direct = seen.filter(o => o.op === 'write' && o.path === DEST);
+    expect(direct.length).toBe(1);
+    expect(direct[0].staged).toBeUndefined();
+  });
+});
