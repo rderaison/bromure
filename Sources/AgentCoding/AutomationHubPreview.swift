@@ -109,7 +109,7 @@ enum AutomationHubPreview {
         return (AnyView(view), size)
     }
 
-    private static func populate(autoStore: ScheduledAutomationStore, findingStore: FindingStore,
+    static func populate(autoStore: ScheduledAutomationStore, findingStore: FindingStore,
                                  taskStore: CodingTaskStore, ws1: UUID, ws2: UUID) {
         let now = Date()
         func ago(_ h: Double) -> Date { now.addingTimeInterval(-h * 3600) }

@@ -5572,6 +5572,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                     return ["ok": true, "count": samples.count]
 
+                case "seed-hub-demo":
+                    // Screenshot/QA fixture for the Automations hub (Code
+                    // Review): the same watches, runs and findings the
+                    // offscreen `__shot-ui hub-*` preview renders, into the
+                    // live stores — so a remote client shows them too.
+                    guard self.profiles.count >= 1 else { return ["error": "no workspace"] }
+                    let ws1 = self.profiles[0].id
+                    let ws2 = self.profiles.count > 1 ? self.profiles[1].id : ws1
+                    AutomationHubPreview.populate(autoStore: self.scheduledAutomationStore,
+                                                  findingStore: self.findingStore,
+                                                  taskStore: self.codingTaskStore, ws1: ws1, ws2: ws2)
+                    return ["ok": true, "findings": self.findingStore.findings.count]
+
                 case "seed-board-demo":
                     // Screenshot/demo fixture: populate BOTH kanban boards
                     // with representative cards. Everything is tagged with a
