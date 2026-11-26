@@ -24,6 +24,10 @@ export interface DeviceRecord {
   deviceName: string; enrolledAt: string;
   /** The workspace's slug (the connect window's account label). */
   orgSlug?: string;
+  /** bromure.io accepted this credential at least once (a call with it
+   *  succeeded). Until then a 401 may be enrollment propagation lag, not a
+   *  revocation (AcceptedCredential in the macOS app). */
+  accepted?: boolean;
 }
 
 /** How the platform performs HTTP to bromure.io (Electron: main process). */

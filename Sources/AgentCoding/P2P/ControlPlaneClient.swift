@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - Control-plane REST DTOs (exact bromure-infra contract)
 
@@ -416,6 +417,10 @@ struct ControlPlaneClient {
             throw ControlPlaneError.transport((error as NSError).localizedDescription)
         }
         guard let http = resp as? HTTPURLResponse else { throw ControlPlaneError.decode }
+        if (200..<300).contains(http.statusCode),
+           let auth = req.value(forHTTPHeaderField: "Authorization"), auth.hasPrefix("Bearer ") {
+            AcceptedCredential.note(String(auth.dropFirst("Bearer ".count)))
+        }
         guard (200..<300).contains(http.statusCode) else {
             // The server's error body is `{ "error": "<code>" }`.
             let code = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String
@@ -441,5 +446,32 @@ enum ISO8601 {
     static func date(from s: String?) -> Date? {
         guard let s else { return nil }
         return fractional.date(from: s) ?? plain.date(from: s)
+    }
+}
+
+/// Whether bromure.io has accepted a device credential at least once: some
+/// call with it as the bearer answered 2xx. Until then a 401 doesn't prove
+/// the device is revoked -- right after enrollment the credential may not have
+/// propagated yet (see `RemoteConnectModel.loadDirectory`). After it, a 401 is
+/// the server refusing a credential it knew: revoked. Kept across launches,
+/// as a hash of the last accepted bearer (never the bearer itself).
+enum AcceptedCredential {
+    static let defaultsKey = "p2p.acceptedCredential"
+
+    static func fingerprint(_ bearer: String) -> String {
+        SHA256.hash(data: Data(bearer.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func note(_ bearer: String, defaults: UserDefaults = .standard) {
+        let f = fingerprint(bearer)
+        if defaults.string(forKey: defaultsKey) != f { defaults.set(f, forKey: defaultsKey) }
+    }
+
+    static func wasAccepted(_ bearer: String, defaults: UserDefaults = .standard) -> Bool {
+        defaults.string(forKey: defaultsKey) == fingerprint(bearer)
+    }
+
+    static func forget(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: defaultsKey)
     }
 }
