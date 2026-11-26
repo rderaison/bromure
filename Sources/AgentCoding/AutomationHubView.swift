@@ -1353,7 +1353,7 @@ struct SwitchboardRouteItems: View {
     var body: some View {
         if let ask = routing.ask, !routing.sessions.isEmpty {
             Menu {
-                ForEach(routing.sessions) { peer in
+                ForEach(PeerMention.byName(routing.sessions)) { peer in
                     Button {
                         gate { ask(finding.id, peer, $0) }
                     } label: {
