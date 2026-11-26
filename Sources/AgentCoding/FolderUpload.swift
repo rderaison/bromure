@@ -88,26 +88,65 @@ enum FolderUpload {
     /// step (the guest's `rename`) only once all of it was read and written.
     /// A copy that fails part-way leaves a file already there untouched and
     /// removes the temp file. A guest agent too old for `rename` gets the
-    /// direct write it always had.
+    /// direct write it always had, and so does a destination whose DIRECTORY
+    /// we may not write — see below.
     static func write(_ src: URL, to guestPath: String, label: String, op: FileOp,
                       progress: ((String) -> Void)?) async throws {
         let dir = (guestPath as NSString).deletingLastPathComponent
         let name = (guestPath as NSString).lastPathComponent
         let tmp = (dir as NSString).appendingPathComponent(".\(name).bromure-\(UUID().uuidString).part")
+        // Did the guest accept a write to `tmp`? Only a write that SUCCEEDED
+        // counts, so a refusal of the very first one — the create — leaves
+        // this false.
+        var tmpCreated = false
+        var viaTmp = true
         do {
-            try await writeChunks(src, to: tmp, label: label, op: op, progress: progress)
+            try await writeChunks(src, to: tmp, label: label, op: { spec in
+                let result = try await op(spec)
+                if (spec["op"] as? String) == "write" { tmpCreated = true }
+                return result
+            }, progress: progress)
         } catch {
             _ = try? await op(["op": "remove", "path": tmp])
-            throw error
+            // Writing a file does not need write access to its directory, but
+            // CREATING a sibling of it does. A group-writable file in someone
+            // else's directory is the ordinary case: the direct write this
+            // replaced worked there, so refusing the upload is a regression.
+            //
+            // Narrow on purpose. Only when the guest refused AND nothing was
+            // written: a denial part-way through must never become a direct
+            // write, which is not atomic and would leave `guestPath` in
+            // whatever state the failure left it.
+            guard !tmpCreated, Self.refusedByFilesystem(error) else { throw error }
+            NSLog("[upload] %@: cannot create a temp file in its directory (%@) — writing straight to it. NOT atomic: a copy that fails part-way leaves the destination incomplete.",
+                  guestPath, "\(error)")
+            viaTmp = false
         }
-        do {
-            _ = try await op(["op": "rename", "path": tmp, "dest": guestPath])
-            return
-        } catch {
-            _ = try? await op(["op": "remove", "path": tmp])
-            guard ("\(error) " + error.localizedDescription).localizedCaseInsensitiveContains("unknown file op") else { throw error }
+        if viaTmp {
+            do {
+                _ = try await op(["op": "rename", "path": tmp, "dest": guestPath])
+                return
+            } catch {
+                _ = try? await op(["op": "remove", "path": tmp])
+                guard ("\(error) " + error.localizedDescription).localizedCaseInsensitiveContains("unknown file op") else { throw error }
+            }
         }
         try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
+    }
+
+    /// The guest's answer when the filesystem refused. bromure-agentd.py's
+    /// file ops end in `except Exception as e: return {"error": str(e)}`, so
+    /// an OSError arrives as Python's own text — `[Errno 13] Permission
+    /// denied: '/path/.f.bromure-….part'`. Mirrors permissionDenied() in
+    /// web-client/src/core/remote/chunkedWrite.ts; keep the two in step.
+    /// Only the text before the path counts: a file named
+    /// `permission-denied` that failed for another reason isn't a refusal.
+    static func refusedByFilesystem(_ error: Error) -> Bool {
+        ["\(error)", error.localizedDescription].contains { full in
+            let text = full.components(separatedBy: ": '")[0]
+            return text.range(of: #"\[errno (1|13)\]|permission denied|operation not permitted"#,
+                              options: [.regularExpression, .caseInsensitive]) != nil
+        }
     }
 
     /// One file, chunked: a truncating first write, then appends.
