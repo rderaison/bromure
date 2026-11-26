@@ -443,16 +443,18 @@ final class RemoteHostController {
             installedRepos: { [weak self] in Array(self?.serverInstalledModels ?? []) },
             removeRepo: { [weak self] repo in self?.removeServerModel(repo: repo) },
             installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] },
-            probeServer: { [host] base, key in try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key) })
+            probeServer: { [host] base, key, scope in
+                try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key, scope: scope) })
     }
 
     /// "Test Connection" for a custom inference server, run BY THE REMOTE
     /// (`POST /models/probe-server`): the server's network and source address
     /// are what its launches use, and the client never contacts the engine.
     /// A redacted/blank key makes the remote use the key it stores for that
-    /// server. Throws the remote's reason on failure.
-    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?) async throws -> [String] {
-        var body: [String: Any] = ["baseURL": baseURL]
+    /// server in `scope`'s configuration. Throws the remote's reason on failure.
+    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?,
+                                              scope: EngineProbeScope) async throws -> [String] {
+        var body: [String: Any] = scope.wire.merging(["baseURL": baseURL]) { _, new in new }
         if let apiKey, !apiKey.isEmpty { body["apiKey"] = apiKey }
         let payload = body
         let resp = try await Task.detached(priority: .userInitiated) {
@@ -3102,16 +3104,41 @@ final class RemoteHostController {
     }
     /// One request, answered on the main actor: (status, json); status nil
     /// when the server couldn't be reached. Refreshes the mirror after.
+    ///
+    /// `retryUnanswered`, for a request that's safe to send twice: one that
+    /// got no answer at all is sent once more. A pooled connection that died
+    /// while idle (the Mac slept, the network changed) is only found out by
+    /// the request that rides it, which fails at once; the pool then dials a
+    /// fresh one, so a resend gets through.
     func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 retryUnanswered: Bool = false,
                  completion: @escaping @MainActor (Int?, [String: Any]) -> Void) {
         let host = self.host
         pollQueue.async { [weak self] in
-            let resp = try? RemoteTransport.client(for: host).request(method, path, body: body)
+            let resp = Self.sendResendingUnanswered(retryUnanswered, label: "\(method) \(path)") {
+                try? RemoteTransport.client(for: host).request(method, path, body: body)
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { completion(resp?.status, resp?.json ?? [:]) }
                 self?.pollOnce()
             }
         }
+    }
+
+    /// How long a `retryUnanswered` request waits before its resend: the
+    /// pool sees the dead connection close first.
+    nonisolated static let unansweredRetryDelay: TimeInterval = 0.5
+
+    /// `send`, and once more if it got no answer (nil) and `resend` says
+    /// it's safe to send twice (tested).
+    nonisolated static func sendResendingUnanswered<T>(_ resend: Bool, label: String,
+                                                       delay: TimeInterval = unansweredRetryDelay,
+                                                       _ send: () -> T?) -> T? {
+        if let answer = send() { return answer }
+        guard resend else { return nil }
+        FatClientLog.log("request \(label): no answer, sending it once more")
+        Thread.sleep(forTimeInterval: delay)
+        return send()
     }
 
     func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
@@ -5326,8 +5353,10 @@ final class RemoteHostWindow: NSWindow {
                     fix: { id, confirmed, done in
                         // Wait for the host: it refuses a flag this mirror
                         // hasn't shown yet, and the hub then asks.
+                        // Safe to resend: a fix already started stays the one.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/fix",
-                                  body: confirmed ? ["confirmed": true] : [:]) { status, json in
+                                  body: confirmed ? ["confirmed": true] : [:],
+                                  retryUnanswered: true) { status, json in
                             done(.fromServer(status: status, json: json))
                         }
                     },
@@ -5345,8 +5374,12 @@ final class RemoteHostWindow: NSWindow {
                         // code review, as on the local window: the
                         // finding's row says it's in progress and opens
                         // the task.
+                        // Safe to resend: the key makes a resend get the
+                        // task the first send queued, even one done since.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
-                                  body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
+                                  body: ["session": sid.uuidString, "confirmed": confirmed,
+                                         "handOver": UUID().uuidString],
+                                  retryUnanswered: true) { status, json in
                             done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",
                                 comment: "finding → session failure")))
@@ -5747,7 +5780,6 @@ final class RemoteHostWindow: NSWindow {
                         TaskAssigneeChoices(
                             sessions: c.sessionStore.sessions
                                 .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
-                                .prefix(40)
                                 .map { .init(id: $0.id, label: $0.nickname.map { "@" + $0 } ?? $0.title,
                                              workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false,
                                              profileID: $0.profileID) },

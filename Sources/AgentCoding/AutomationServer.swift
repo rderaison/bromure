@@ -283,7 +283,7 @@ final class ACAutomationServer {
     /// run FROM THIS HOST — the machine whose launches will reach it, with its
     /// source address and network. A blank/redacted key uses the key stored
     /// for that same server. `{ok, models}` or `{ok:false, error}`.
-    var onProbeEngine: ((_ base: String, _ apiKey: String?) async -> [String: Any])?
+    var onProbeEngine: ((_ base: String, _ apiKey: String?, _ scope: EngineProbeScope) async -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -954,11 +954,12 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 400, body: ["error": "Missing 'baseURL'"]); return
             }
             let key = bodyJSON["apiKey"] as? String
+            let scope = EngineProbeScope(wire: bodyJSON)
             let semaphore = DispatchSemaphore(value: 0)
             var result: [String: Any] = ["ok": false, "error": "unavailable"]
             DispatchQueue.main.async {
                 Task { @MainActor in
-                    result = await self.onProbeEngine?(base, key) ?? ["ok": false, "error": "unavailable"]
+                    result = await self.onProbeEngine?(base, key, scope) ?? ["ok": false, "error": "unavailable"]
                     semaphore.signal()
                 }
             }

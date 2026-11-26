@@ -1999,6 +1999,16 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Squelch — noise cut from the command output the agent sends its
     /// model (passing tests, progress, download chatter). Enforced in the MITM.
     public var squelch = SquelchPolicy()
+    /// Claude Code's `/ship` and `/steward` turned off for this workspace
+    /// (hidden through `skillOverrides`): no commit, push or pull request
+    /// from them, and no watch. Default: allowed (ClaudeShip).
+    public var claudeShipDisabled = false
+    /// The switch was off under a build that kept no record of the
+    /// `skillOverrides` entries it wrote, so this workspace's home may hold
+    /// that build's "off" entries, which ClaudeShip can't tell from the
+    /// user's own. Known from a profile saved without this key while off;
+    /// consulted only where the home has no record yet (ClaudeShip.legacyOff).
+    public var claudeShipLegacyOff = false
 
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
@@ -2580,6 +2590,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case promptInjection
         case pii
         case squelch
+        case claudeShipDisabled
+        case claudeShipLegacyOff
         case digitalOceanToken
         case linearToken
         case twilioCredential
@@ -2723,6 +2735,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         pii = try c.decodeIfPresent(PIIPolicy.self, forKey: .pii) ?? PIIPolicy()
         squelch = try c.decodeIfPresent(SquelchPolicy.self, forKey: .squelch) ?? SquelchPolicy()
+        claudeShipDisabled = try c.decodeIfPresent(Bool.self, forKey: .claudeShipDisabled) ?? false
+        // Saved off by a build before the record: that build wrote the "off"
+        // entries. A later build always saves the key while off.
+        claudeShipLegacyOff = try c.decodeIfPresent(Bool.self, forKey: .claudeShipLegacyOff) ?? claudeShipDisabled
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
@@ -2922,6 +2938,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(promptInjection, forKey: .promptInjection)
         if pii != PIIPolicy() { try c.encode(pii, forKey: .pii) }
         if squelch != SquelchPolicy() { try c.encode(squelch, forKey: .squelch) }
+        if claudeShipDisabled { try c.encode(true, forKey: .claudeShipDisabled) }
+        if claudeShipDisabled || claudeShipLegacyOff { try c.encode(claudeShipLegacyOff, forKey: .claudeShipLegacyOff) }
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
@@ -5581,6 +5599,19 @@ public final class ProfileStore {
             var plugins = settings["enabledPlugins"] as? [String: Any] ?? [:]
             plugins[Self.claudeDiffPlugin] = false
             settings["enabledPlugins"] = plugins
+            // /ship and /steward: off when the workspace says so, the user's
+            // other skill overrides kept, and a skill the user turned off left
+            // off (bromure-agentd's twin does the same).
+            let ship = ClaudeShip.skillOverrides(settings["skillOverrides"],
+                                                 allowed: !profile.claudeShipDisabled,
+                                                 owned: ClaudeShip.readOwnedOverrides(in: claudeDir),
+                                                 legacyOff: profile.claudeShipLegacyOff
+                                                     && !ClaudeShip.hasOwnedRecord(in: claudeDir))
+            if let o = ship.overrides {
+                settings["skillOverrides"] = o
+            } else {
+                settings.removeValue(forKey: "skillOverrides")
+            }
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot.
             let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
@@ -5640,6 +5671,8 @@ public final class ProfileStore {
             try data.write(to: claudeSettingsURL, options: .atomic)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
                                   ofItemAtPath: claudeSettingsURL.path)
+            // Recorded once settings.json holds what it describes.
+            ClaudeShip.writeOwnedOverrides(ship.owned, in: claudeDir)
 
             // Pre-approve the session's ANTHROPIC_API_KEY in ~/.claude.json
             // (customApiKeyResponses stores the key's last-20 suffix) so the
@@ -6005,8 +6038,19 @@ public final class ProfileStore {
             if [ -n "$hook_json" ]; then
               sid=$(printf '%s' "$hook_json" | sed -n 's/.*"session_\{0,1\}[iI]d"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z_-]*\)".*/\1/p' 2>/dev/null | head -1)
             fi
+            # Line 3, on a turn's end: the /ship watch the transcript shows
+            # running ("ship #41", "ship <branch>"), or none ("ship") -- the
+            # host keeps the Mac awake and the tab says so (ClaudeShip).
+            ship=""
+            if [ -n "${stop_read:-}" ] && [ -n "$hook_json" ] && [ -r "$HOME/.bromure/ship-watch.py" ]; then
+              stp=$(printf '%s' "$hook_json" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
+              if [ -n "$stp" ] && [ -r "$stp" ]; then
+                ship=$(python3 -I "$HOME/.bromure/ship-watch.py" "$stp" 2>/dev/null | head -1)
+                ship="ship${ship:+ $ship}"
+              fi
+            fi
             if [ "$signal" != "start" ]; then
-              printf '%s\n%s' "$signal" "$sid" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+              { printf '%s\n%s' "$signal" "$sid"; [ -z "$ship" ] || printf '\n%s' "$ship"; } > "$d/.agent-status-$idx.tmp" 2>/dev/null \
                 && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
             fi
             # Remember the transcript per tab: the host then reads THIS
@@ -6031,6 +6075,12 @@ public final class ProfileStore {
             try? statusScript.write(to: scriptURL, atomically: true, encoding: .utf8)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
                                   ofItemAtPath: scriptURL.path)
+            // What it runs at a turn's end: the /ship watch the transcript
+            // shows (ClaudeShip.scannerScript).
+            let shipURL = bromureDir.appendingPathComponent("ship-watch.py")
+            try? ClaudeShip.scannerScript.write(to: shipURL, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
+                                  ofItemAtPath: shipURL.path)
         }
         do {
             // omp (Oh My Pi) turn-status hook. omp is provider-agnostic, so the
@@ -6264,7 +6314,8 @@ public final class ProfileStore {
         Profile.hermesNousSidecar,
     ]
     /// Relpaths chmod 755 (scripts).
-    private static let seed755: Set<String> = [".bromure/agent-status.sh", ".bromure/hermes-hook.py"]
+    private static let seed755: Set<String> = [".bromure/agent-status.sh", ".bromure/hermes-hook.py",
+                                                     ".bromure/ship-watch.py"]
     /// Directories created 0700 (everything else 0755).
     private static let seedDir700: Set<String> = [
         ".kube", ".aws", ".claude", ".docker", ".ssh", ".codex", ".grok",
@@ -6411,6 +6462,9 @@ public final class ProfileStore {
         // What auto mode's classifier should know about this VM (and the
         // user's own environment): merged into autoMode.environment.
         spec["autoModeEnvironment"] = ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText)
+        // /ship and /steward allowed (skillOverrides; see ClaudeShip).
+        spec["claudeShip"] = !profile.claudeShipDisabled
+        if profile.claudeShipLegacyOff { spec["claudeShipLegacyOff"] = true }
         if profile.bedrockEnabled {
             var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
             if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }
@@ -8302,7 +8356,10 @@ public final class ProfileStore {
             sudo -n tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
-    After=mnt-bromure\x2dmeta.mount network.target
+    DefaultDependencies=no
+    After=mnt-bromure\x2dmeta.mount local-fs.target systemd-tmpfiles-setup.service systemd-journald.socket
+    Conflicts=shutdown.target
+    Before=shutdown.target
     StartLimitIntervalSec=0
     ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
     [Service]

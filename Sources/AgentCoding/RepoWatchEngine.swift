@@ -355,9 +355,25 @@ final class RepoWatchEngine {
     /// landing), picked up as soon as the session has no board task in
     /// progress. A finding whose task hasn't started yet is re-queued for
     /// it; one already under way stays where it is. Returns the task id.
+    ///
+    /// `handOver`: the client's key for this one request, the same on its
+    /// resend. A resend of a hand-over already done gets that task back --
+    /// even once it's Done, when a new ask would start a second fix.
     @discardableResult
-    func fix(_ findingID: UUID, by session: AgentSession) -> UUID? {
+    func fix(_ findingID: UUID, by session: AgentSession, handOver: String? = nil) -> UUID? {
         guard let delegate, let f = store.finding(findingID) else { return nil }
+        if let tid = handOvers.task(findingID, handOver, exists: { delegate.codingTaskStore.task($0) != nil }) {
+            return tid
+        }
+        guard let tid = queueFix(f, by: session, delegate: delegate) else { return nil }
+        handOvers.record(findingID, handOver, task: tid)
+        return tid
+    }
+
+    private var handOvers = HandOverLedger()
+
+    private func queueFix(_ f: RepoFinding, by session: AgentSession, delegate: ACAppDelegate) -> UUID? {
+        let findingID = f.id
         let assignee = TaskAssignment(kind: .session, id: session.id,
                                       label: delegate.delegationEngine.label(session))
         if let tid = f.taskID, let existing = delegate.codingTaskStore.task(tid), existing.stage != .done {
@@ -526,6 +542,32 @@ final class RepoWatchNotifier: NSObject, UNUserNotificationCenterDelegate {
             NSApp.activate(ignoringOtherApps: true)
             self.onOpen?(id)
         }
+    }
+}
+
+/// Hand-overs of a finding to a session answered lately, by the client's key
+/// for each request (`RepoWatchEngine.fix(_:by:handOver:)`): a resend of one
+/// gets the task the first send queued. Oldest first; a resend comes within
+/// the minute, so only the last few hundred are kept.
+struct HandOverLedger {
+    private var entries: [(key: String, task: UUID)] = []
+    static let kept = 256
+
+    private static func key(_ finding: UUID, _ handOver: String?) -> String? {
+        handOver.map { "\(finding.uuidString) \($0)" }
+    }
+
+    /// The task a hand-over with this key got, when it's still on the board.
+    func task(_ finding: UUID, _ handOver: String?, exists: (UUID) -> Bool) -> UUID? {
+        guard let k = Self.key(finding, handOver),
+              let tid = entries.last(where: { $0.key == k })?.task, exists(tid) else { return nil }
+        return tid
+    }
+
+    mutating func record(_ finding: UUID, _ handOver: String?, task: UUID) {
+        guard let k = Self.key(finding, handOver) else { return }
+        entries.append((k, task))
+        if entries.count > Self.kept { entries.removeFirst(entries.count - Self.kept) }
     }
 }
 #endif

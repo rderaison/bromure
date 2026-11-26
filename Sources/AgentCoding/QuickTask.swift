@@ -71,7 +71,6 @@ final class QuickTaskPanel {
             let sessions = c.sessionStore.sessions
                 .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
                 .sorted { SessionHome.lastActivity($0) > SessionHome.lastActivity($1) }
-                .prefix(40)
                 .map { s -> TaskAssigneeChoices.Session in
                     let b = SessionHome.bucket(for: s, in: c.listModel)
                     return .init(id: s.id, label: label(s), workspace: c.profile(for: s.profileID)?.name ?? "",
@@ -82,7 +81,7 @@ final class QuickTaskPanel {
             return Target(key: c.host.id.uuidString,
                           machine: c.host.name.isEmpty ? c.host.address : c.host.name,
                           profiles: c.profiles, toolSpecs: { c.readyToolSpecs(for: $0) },
-                          choices: TaskAssigneeChoices(sessions: Array(sessions), rooms: rooms),
+                          choices: TaskAssigneeChoices(sessions: sessions, rooms: rooms),
                           current: w.selectedSessionID.flatMap { c.sessionStore.session($0) },
                           label: label,
                           save: { c.upsertTask($0) },
@@ -474,9 +473,7 @@ struct QuickTaskView: View {
                                       detail: Self.onMachine(r.machine) + String(format: NSLocalizedString("%@'s Switchboard picks a member", comment: "quick task"),
                                                      "#" + r.name)))
             }
-            for s in choices.sessions where m.query.isEmpty
-                || s.label.lowercased().contains(m.query) || s.workspace.lowercased().contains(m.query)
-                || (s.machine?.lowercased().contains(m.query) ?? false) {
+            for s in Self.matching(choices.sessions, m.query) {
                 out.append(Suggestion(id: s.id.uuidString,
                                       assignment: TaskAssignment(kind: .session, id: s.id, label: s.label),
                                       detail: Self.onMachine(s.machine) + s.workspace + (s.busy ? " · " + NSLocalizedString("busy — takes it after its current work", comment: "quick task") : "")))
@@ -492,6 +489,31 @@ struct QuickTaskView: View {
         // Several machines: a few more rows, as each lists its own.
         let machines = Set(choices.sessions.compactMap(\.machine) + choices.rooms.compactMap(\.machine)).count
         return Array(out.prefix(machines > 1 ? 10 : 6))
+    }
+
+    /// The sessions an "@query" suggests, best first (tested): every one for
+    /// an empty query (most recent first); else those whose name starts with
+    /// it, then those whose name holds it, then those whose workspace or
+    /// machine does, each in recency order. Only the first rows show, so a
+    /// session named as typed must never sit behind ones merely matching
+    /// its workspace.
+    static func matching(_ sessions: [TaskAssigneeChoices.Session], _ query: String) -> [TaskAssigneeChoices.Session] {
+        guard !query.isEmpty else { return sessions }
+        func name(_ s: TaskAssigneeChoices.Session) -> String {
+            let l = s.label.lowercased()
+            return l.hasPrefix("@") ? String(l.dropFirst()) : l
+        }
+        func rank(_ s: TaskAssigneeChoices.Session) -> Int? {
+            let n = name(s)
+            if n.hasPrefix(query) { return 0 }
+            if n.contains(query) { return 1 }
+            if s.workspace.lowercased().contains(query) || (s.machine?.lowercased().contains(query) ?? false) { return 2 }
+            return nil
+        }
+        return sessions.enumerated()
+            .compactMap { i, s in rank(s).map { (r: $0, i: i, s: s) } }
+            .sorted { ($0.r, $0.i) < ($1.r, $1.i) }
+            .map(\.s)
     }
 
     /// "Mac mini · " before a row's detail, when the list spans machines.

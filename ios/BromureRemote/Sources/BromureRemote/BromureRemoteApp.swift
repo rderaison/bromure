@@ -469,8 +469,11 @@ struct RootView: View {
                         Text("Signed in").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Sign Out") { directory.signOutAccount() }
+                    // Revokes on bromure.io first; a failure keeps the user
+                    // signed in and shows p2pError.
+                    Button("Sign Out") { Task { await directory.signOutAccount() } }
                         .font(.callout)
+                        .disabled(directory.p2pBusy)
                 }
                 .padding(.vertical, 4)
             } else {

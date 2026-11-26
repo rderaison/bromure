@@ -29,13 +29,22 @@ const HELPER_SOCKET = '/run/bromure-client-tunnel.sock';
 const FLOW_HIGH = 1 << 20;   // pause a local socket with this much unacked
 const FLOW_LOW = 256 << 10;  // and resume below this
 
-interface Flow { sock: net.Socket; inflight: number; paused: boolean; opened: boolean }
+/** One start of the tunnel: its forwarder, its flow socket, its flows. A
+ *  newer start (or a stop) ends it; everything an attempt set up is cleaned up
+ *  by that attempt's own session, so a late answer from an older forwarder
+ *  never touches the newer tunnel. */
+interface Session {
+  owner: WebContents;
+  cidr: string;
+  sockPath: string;
+  server: net.Server;
+  child: ChildProcessWithoutNullStreams | null;
+  stopped: boolean;
+}
+interface Flow { s: Session; sock: net.Socket; inflight: number; paused: boolean; opened: boolean }
 
-let child: ChildProcessWithoutNullStreams | null = null;
-let server: net.Server | null = null;
-let sockPath = '';
-let cidr = '';
-let owner: WebContents | null = null;
+let current: Session | null = null;
+let attempts = 0;
 const flows = new Map<number, Flow>();
 let nextFlow = 1;
 
@@ -69,9 +78,9 @@ function cidrMatch(ip: string, c: string): boolean {
 
 const VERB = /^(forward (\d{1,3}(?:\.\d{1,3}){3}) (\d{1,5})|forward-udp (\d{1,3}(?:\.\d{1,3}){3}))$/;
 
-/** One flow from the forwarder: its verb line, then raw bytes. */
-function acceptFlow(sock: net.Socket) {
-  if (!owner || owner.isDestroyed()) { sock.destroy(); return; }
+/** One flow from session `s`'s forwarder: its verb line, then raw bytes. */
+function acceptFlow(s: Session, sock: net.Socket) {
+  if (s.stopped || s.owner.isDestroyed()) { sock.destroy(); return; }
   let head = Buffer.alloc(0);
   const fail = (why: string) => { try { sock.end(`ERR ${why}\n`); } catch {} };
   sock.setTimeout(10000, () => sock.destroy());
@@ -85,22 +94,22 @@ function acceptFlow(sock: net.Socket) {
     const rest = head.subarray(nl + 1);
     const m = VERB.exec(line);
     const ip = m?.[2] ?? m?.[4];
-    if (!m || !ip || ip.split('.').some(o => +o > 255) || (m[3] && (+m[3] < 1 || +m[3] > 65535)) || !cidrMatch(ip, cidr)) {
+    if (!m || !ip || ip.split('.').some(o => +o > 255) || (m[3] && (+m[3] < 1 || +m[3] > 65535)) || !cidrMatch(ip, s.cidr)) {
       fail('bad request'); return;
     }
     const id = nextFlow++;
-    const flow: Flow = { sock, inflight: 0, paused: false, opened: false };
+    const flow: Flow = { s, sock, inflight: 0, paused: false, opened: false };
     flows.set(id, flow);
     if (rest.length) sock.unshift(rest);
-    sock.on('close', () => { if (flows.delete(id)) send('tunnel:flow-close', id); });
+    sock.on('close', () => { if (flows.delete(id)) send(s, 'tunnel:flow-close', id); });
     sock.on('error', () => {});
-    send('tunnel:flow', id, line);
+    send(s, 'tunnel:flow', id, line);
   };
   sock.on('data', onHead);
 }
 
-function send(channel: string, ...args: unknown[]) {
-  if (owner && !owner.isDestroyed()) owner.send(channel, ...args);
+function send(s: Session, channel: string, ...args: unknown[]) {
+  if (!s.owner.isDestroyed()) s.owner.send(channel, ...args);
 }
 
 /** The flow's SSH channel is open (or not): data starts flowing. */
@@ -112,44 +121,63 @@ function flowOpened(id: number, ok: boolean, error?: string) {
   f.sock.setTimeout(0);
   f.sock.write('OK\n');
   f.sock.on('data', (d: Buffer) => {
-    send('tunnel:flow-data', id, new Uint8Array(d.buffer, d.byteOffset, d.length));
+    send(f.s, 'tunnel:flow-data', id, new Uint8Array(d.buffer, d.byteOffset, d.length));
     f.inflight += d.length;
     if (f.inflight > FLOW_HIGH && !f.paused) { f.paused = true; f.sock.pause(); }
   });
-  f.sock.on('end', () => send('tunnel:flow-end', id));
-  f.sock.on('drain', () => send('tunnel:flow-pause', id, false));
+  f.sock.on('end', () => send(f.s, 'tunnel:flow-end', id));
+  f.sock.on('drain', () => send(f.s, 'tunnel:flow-pause', id, false));
   f.sock.resume();
 }
 
-function stopTunnel() {
-  for (const f of flows.values()) f.sock.destroy();
-  flows.clear();
-  if (child) { try { child.stdin.end(); } catch {} child.kill('SIGTERM'); child = null; }
-  if (server) { server.close(); server = null; }
-  if (sockPath) { try { fs.unlinkSync(sockPath); } catch {} sockPath = ''; }
+/** Ends session `s` and only what it owns (idempotent). */
+function stopSession(s: Session) {
+  if (s.stopped) return;
+  s.stopped = true;
+  if (current === s) current = null;
+  for (const [id, f] of flows) if (f.s === s) { flows.delete(id); f.sock.destroy(); }
+  if (s.child) { try { s.child.stdin.end(); } catch {} s.child.kill('SIGTERM'); s.child = null; }
+  s.server.close();
+  try { fs.unlinkSync(s.sockPath); } catch {}
 }
+
+/** Stops the current tunnel (a start still under way included). */
+function stopTunnel() {
+  if (current) stopSession(current);
+}
+
+const SUPERSEDED = { ok: false, error: 'superseded by a newer start' };
 
 async function startTunnel(wc: WebContents, wanted: string): Promise<{ ok: boolean; ifname?: string; error?: string }> {
   if (!/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.0\/24$/.test(wanted)) return { ok: false, error: `not a /24 subnet: ${wanted}` };
   const a = availability();
   if (!a.ok) return { ok: false, error: a.reason };
   stopTunnel();
-  owner = wc;
-  cidr = wanted;
-  // The flow socket: owner-only, in an owner-only directory.
+  // The flow socket: owner-only, in an owner-only directory, one per attempt
+  // (an older attempt's cleanup must not unlink a newer one's).
   const dir = path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), `bromure-client-${process.getuid?.() ?? 'u'}`);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
-  sockPath = path.join(dir, `tunnel-${process.pid}.sock`);
-  try { fs.unlinkSync(sockPath); } catch {}
-  // Half-open: a flow's local side may finish sending (the client's FIN)
-  // while the remote's answer still flows back.
-  server = net.createServer({ allowHalfOpen: true }, acceptFlow);
-  await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(sockPath, () => resolve()); });
-  fs.chmodSync(sockPath, 0o600);
+  const s: Session = {
+    owner: wc, cidr: wanted, sockPath: path.join(dir, `tunnel-${process.pid}-${++attempts}.sock`),
+    // Half-open: a flow's local side may finish sending (the client's FIN)
+    // while the remote's answer still flows back.
+    server: net.createServer({ allowHalfOpen: true }, sock => acceptFlow(s, sock)),
+    child: null, stopped: false,
+  };
+  current = s;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    try { fs.unlinkSync(s.sockPath); } catch {}
+    await new Promise<void>((resolve, reject) => { s.server.once('error', reject); s.server.listen(s.sockPath, () => resolve()); });
+    if (s.stopped) return SUPERSEDED;
+    fs.chmodSync(s.sockPath, 0o600);
+  } catch (e: any) {
+    stopSession(s);
+    return { ok: false, error: `the tunnel's socket: ${e?.message ?? e}` };
+  }
 
-  const proc = spawn(tunnelBinary(), ['forward', '--cidr', cidr, '--app-socket', sockPath], { stdio: ['pipe', 'pipe', 'pipe'] });
-  child = proc;
+  const proc = spawn(tunnelBinary(), ['forward', '--cidr', s.cidr, '--app-socket', s.sockPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+  s.child = proc;
   let stderr = '';
   proc.stderr.on('data', d => { stderr = (stderr + d.toString()).slice(-2000); });
   const status = await new Promise<string>(resolve => {
@@ -163,15 +191,18 @@ async function startTunnel(wc: WebContents, wanted: string): Promise<{ ok: boole
     proc.once('exit', () => { clearTimeout(timer); resolve(out.split('\n')[0] || `ERR ${stderr.trim().split('\n').pop() || 'the tunnel program stopped'}`); });
     proc.once('error', e => { clearTimeout(timer); resolve(`ERR ${e.message}`); });
   });
+  // Stopped meanwhile (a stop, or a newer start): this attempt's own
+  // resources are already gone, and nothing else is ours to touch.
+  if (s.stopped) return SUPERSEDED;
   if (!status.startsWith('OK ')) {
-    stopTunnel();
+    stopSession(s);
     return { ok: false, error: status.replace(/^ERR /, '') };
   }
   proc.once('exit', () => {
-    if (child !== proc) return;
+    if (s.stopped) return;
     const why = stderr.trim().split('\n').pop() || 'the tunnel stopped';
-    stopTunnel();
-    send('tunnel:exit', why.replace(/^bromure-client-tunnel: /, ''));
+    stopSession(s);
+    send(s, 'tunnel:exit', why.replace(/^bromure-client-tunnel: /, ''));
   });
   return { ok: true, ifname: status.slice(3).trim() };
 }
@@ -192,7 +223,7 @@ export function setupTunnel(mainWindow: () => BrowserWindow | null) {
   ipcMain.on('tunnel:flow-recv', (e, id: number, data: Uint8Array) => {
     const f = fromMain(e) ? flows.get(id) : undefined;
     if (!f || !f.opened) return;
-    if (!f.sock.write(data)) send('tunnel:flow-pause', id, true);
+    if (!f.sock.write(data)) send(f.s, 'tunnel:flow-pause', id, true);
   });
   ipcMain.on('tunnel:flow-eof', (e, id: number) => { const f = fromMain(e) ? flows.get(id) : undefined; f?.sock.end(); });
   // The remote side closed: finish gracefully (what's buffered still goes

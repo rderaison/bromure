@@ -38,6 +38,7 @@ npm run build:hosted      # → bromure-client-web.tgz of dist-web/
 npm run package:linux     # → out/bromure-client_<ver>_{amd64,arm64}.deb + out/bromure-client-<ver>-linux-{x64,arm64}.tar.gz
 npm run package:win       # → out/Bromure Client-win32-{x64,arm64}(.zip) — also runs on Windows
 npm run installer:win     # → out/BromureClient-<version>-{x64,arm64}-setup.exe (needs makensis: NSIS 3.08+)
+scripts/installer-win.sh  # the same, Authenticode-signed when ESIGNER_* are set (macOS/Linux; Jenkinsfile.client-windows)
 npm run make:icon         # regenerate build/icon.{ico,png} from Resources/BromureACIcon.icns
 npm run electron          # run Electron locally
 ```

@@ -120,7 +120,8 @@ export const account = {
       directoryEverLoaded = false; firstLoad401Retries = 0;
       set({ record, busy: false, servers: [], directoryLoaded: false });
       // The user's servers authorize this device's SSH key (no password).
-      cp.uploadSSHKey(record.deviceToken, await publicKeyLine()).catch(e => console.warn('ssh-key publish', e));
+      cp.uploadSSHKey(record.deviceToken, await publicKeyLine())
+        .then(() => markAccepted(record), e => console.warn('ssh-key publish', e));
       account.loadDirectory();
     } catch (e: any) {
       set({ busy: false, error: describeEnrollError(e) });
@@ -165,6 +166,7 @@ export const account = {
       // Macs (they serve no mirror) are left out.
       set({ servers: devices.filter(d => !d.self && !d.revoked && d.capability !== 'agent-host'), directoryLoading: false, directoryLoaded: true });
       directoryEverLoaded = true; firstLoad401Retries = 0;
+      markAccepted(rec);
     } catch (e: any) {
       set({ directoryLoading: false });
       if (snap.record !== rec) return;
@@ -193,20 +195,54 @@ export const account = {
   },
 };
 
-/** A 401 means the credential is already dead (revoked or lapsed): nothing
- *  left to revoke. A 404 on the SSH key means none is published. */
+/** A 404 on the SSH key means none is published. */
 const gone = (e: any, ...codes: number[]) => codes.includes(e?.status);
+
+/** Record that bromure.io accepted this device's credential (kept with it).
+ *  Only for the current record: a late answer must not save one signed out. */
+function markAccepted(rec: DeviceRecord) {
+  if (rec.accepted || DEMO || snap.record !== rec) return;
+  rec.accepted = true;
+  saveDeviceRecord(rec).catch(() => {});
+}
+
+/** A sign-out call's 401 retried this many times, this far apart, before it's
+ *  reported (the directory's first load allows the same). */
+const REVOKE_401_RETRIES = 3;
+let revoke401DelayMs = 2000;
+/** Tests only. */
+export function setRevoke401DelayForTests(ms: number) { revoke401DelayMs = ms; }
+
+/** Run a sign-out call. 'gone' when it answered 401 for a credential
+ *  bromure.io accepted before: revoked already, nothing left to do. A 401 for
+ *  one it never accepted proves nothing (CWE-613): right after enrollment it
+ *  may not have propagated, and forgetting the credential then would lose
+ *  the only one that can revoke a still-live device. It's retried, then
+ *  reported, the credential kept. */
+async function revokeCall(rec: DeviceRecord, call: () => Promise<unknown>): Promise<'done' | 'gone'> {
+  for (let attempt = 0; ; attempt++) {
+    try { await call(); return 'done'; }
+    catch (e) {
+      if (!gone(e, 401)) throw e;
+      if (rec.accepted) return 'gone';
+      if (attempt >= REVOKE_401_RETRIES) {
+        throw new Error("it doesn't recognize this device's credentials yet, so the sign-out couldn't be confirmed");
+      }
+      await new Promise(r => setTimeout(r, revoke401DelayMs));
+    }
+  }
+}
 
 async function revokeOnServer(cp: ControlPlane, rec: DeviceRecord) {
   if (rec.delivery === 'cookie') {
     // Revokes the device and clears its cookies.
-    await cp.webLogout().catch(e => { if (!gone(e, 401)) throw e; });
+    await revokeCall(rec, () => cp.webLogout());
     return;
   }
   // The SSH key first: removing it needs the still-valid bearer.
-  try { await cp.removeSSHKey(rec.deviceToken); }
-  catch (e) { if (gone(e, 401)) return; if (!gone(e, 404)) throw e; }
-  await cp.selfRevoke(rec.deviceToken).catch(e => { if (!gone(e, 401)) throw e; });
+  try { if (await revokeCall(rec, () => cp.removeSSHKey(rec.deviceToken)) === 'gone') return; }
+  catch (e) { if (!gone(e, 404)) throw e; }
+  await revokeCall(rec, () => cp.selfRevoke(rec.deviceToken));
 }
 
 interface PendingSignIn { state: string; api: string }

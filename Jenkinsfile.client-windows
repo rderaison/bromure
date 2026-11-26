@@ -1,0 +1,142 @@
+// Jenkinsfile.client-windows — build the Bromure Client (web-client/, the
+// Electron app) for Windows, x64 and arm64, on the Mac builder: typecheck,
+// unit tests, the packaged app, its per-user NSIS installers, and Authenticode
+// signing (SSL.com eSigner through jsign, exactly as Bromure Sidecar for
+// Windows is signed: web-client/scripts/installer-win.sh reuses
+// sidecar/scripts/esign.sh) —
+//
+//   web-client/out/Bromure Client-win32-{x64,arm64}.zip        portable
+//   web-client/out/BromureClient-<ver>-{x64,arm64}-setup.exe   per-user NSIS installer
+//   web-client/out/win-SHA256SUMS                              of both, after signing
+//
+// Linux is Jenkinsfile.client-linux, the hosted app Jenkinsfile.client-web.
+// The version is web-client/package.json's (X.Y.Z); bump it to release.
+// Nothing is published here yet: the artifacts are archived on the build.
+// No secrets live here: signing uses Jenkins credentials by id.
+//
+// Agent macosx-builder: node + npm, git and Homebrew.
+// web-client/scripts/installer-win.sh installs what it misses: makensis, and
+// for SIGN openjdk, osslsigncode and jsign 7.6 (downloaded once, SHA-256
+// checked). Dependencies are installed only through the Socket wrapper.
+// @electron/packager downloads the Electron builds for each target from
+// GitHub (cached in the agent's home).
+// Credentials (only when used):
+//   ESIGNER_USERNAME / ESIGNER_PASSWORD / ESIGNER_CREDENTIAL_ID /
+//   ESIGNER_TOTP_SECRET  secret-text credentials, SSL.com eSigner — SIGN
+//   (the same ones sidecar/Jenkinsfile.sidecar-windows uses)
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        booleanParam(
+            name: 'SIGN',
+            defaultValue: false,
+            description: 'Authenticode-sign the Windows app, its installers and the uninstaller (SSL.com eSigner via jsign; ESIGNER_* credentials). Unsigned builds make SmartScreen warn on first run.'
+        )
+        string(
+            name: 'ARCHS',
+            defaultValue: 'x64,arm64',
+            description: 'Windows architectures to package, comma-separated (x64, arm64).'
+        )
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        // No funding / audit / update notices in the log.
+        CI = 'true'
+        npm_config_fund = 'false'
+        npm_config_audit = 'false'
+        npm_config_update_notifier = 'false'
+    }
+
+    stages {
+        stage('Install') {
+            steps {
+                script {
+                    if (!(params.ARCHS ==~ /^(x64|arm64)(,(x64|arm64))?$/)) {
+                        error("ARCHS must be x64, arm64 or both, got '${params.ARCHS}'")
+                    }
+                    env.CLIENT_VERSION = sh(
+                        script: '''node -p "require('./web-client/package.json').version"''',
+                        returnStdout: true
+                    ).trim()
+                    if (!(env.CLIENT_VERSION ==~ /^\d+\.\d+\.\d+$/)) {
+                        error("web-client/package.json version must be X.Y.Z, got '${env.CLIENT_VERSION}'")
+                    }
+                    echo "Building Bromure Client ${env.CLIENT_VERSION} (${params.ARCHS})${params.SIGN ? ', signed' : ', UNSIGNED'}"
+                }
+                dir('web-client') {
+                    sh '''
+                        set -euo pipefail
+                        node --version
+                        npm --version
+                        # A clean tree: nothing from an earlier build is archived.
+                        rm -rf node_modules dist dist-electron out
+                        # Supply-chain policy: dependencies only through Socket.
+                        npx --yes @socketsecurity/cli npm ci
+                    '''
+                }
+            }
+        }
+
+        stage('Test & build') {
+            steps {
+                dir('web-client') {
+                    sh '''
+                        set -euo pipefail
+                        npm test
+                        # Typecheck + the app's bundle (dist/).
+                        npm run build
+                        npm run build:electron
+                    '''
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                dir('web-client') {
+                    // dist/ and dist-electron/ are built: package them as they are
+                    // (npm run package:win would rebuild both).
+                    sh '''
+                        set -euo pipefail
+                        node scripts/package.mjs win32 "$ARCHS"
+                    '''
+                }
+            }
+        }
+
+        stage('Windows installers') {
+            steps {
+                script {
+                    // Homebrew's prefixes (Apple silicon, Intel) for makensis & co.
+                    withEnv(["PATH+BREW=/opt/homebrew/bin:/usr/local/bin"]) {
+                        if (params.SIGN) {
+                            // installer-win.sh hands these to jsign through the
+                            // environment only (never argv or the log).
+                            withCredentials([
+                                string(credentialsId: 'ESIGNER_USERNAME',      variable: 'ESIGNER_USERNAME'),
+                                string(credentialsId: 'ESIGNER_PASSWORD',      variable: 'ESIGNER_PASSWORD'),
+                                string(credentialsId: 'ESIGNER_CREDENTIAL_ID', variable: 'ESIGNER_CREDENTIAL_ID'),
+                                string(credentialsId: 'ESIGNER_TOTP_SECRET',   variable: 'ESIGNER_TOTP_SECRET')
+                            ]) {
+                                sh 'bash web-client/scripts/installer-win.sh --require-sign "$ARCHS"'
+                            }
+                        } else {
+                            sh 'bash web-client/scripts/installer-win.sh "$ARCHS"'
+                        }
+                    }
+                }
+                sh 'ls -l web-client/out'
+                archiveArtifacts(
+                    artifacts: 'web-client/out/*.zip, web-client/out/*-setup.exe, web-client/out/win-SHA256SUMS',
+                    fingerprint: true
+                )
+            }
+        }
+    }
+}

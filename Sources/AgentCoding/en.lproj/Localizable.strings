@@ -4445,3 +4445,12 @@
 "SHA-256 fingerprint" = "SHA-256 fingerprint";
 "Add certificate" = "Add certificate";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then.";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "Watching";
+"Watching %@" = "Watching %@";
+"Stop Watching Pull Request" = "Stop Watching Pull Request";
+"Allow /ship and /steward" = "Allow /ship and /steward";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge.";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts.";

@@ -12,6 +12,7 @@ import { Button, PopUp, SearchField, cx, useMenu, type MenuItem } from '../../ui
 import { type Run, automationsOf, runsOf, classify, liveRunTab, outcomeGlyph, outcomeTint, relNamed, dateTime, tasksOf, type CodingTask } from './model';
 import { MiniSpinner, confirm } from './kanban';
 import { Markdown } from './Markdown';
+import { requestResending } from './resend';
 
 // ── Vocabulary (RepoFinding.Severity / .Status) ──────────────────────────
 
@@ -83,9 +84,15 @@ function HubCard({ title, trailing, children }: { title?: string; trailing?: Rea
  *  `askSession` actions. */
 export function useFindingActions(host: RemoteHost, st: RemoteState, showFlash: (t: string, e?: boolean) => void) {
   const openMenu = useMenu();
-  const handOver = async (path: string, body: any, success: string, failure: (why: string) => string, retry: () => void) => {
+  // `resend`: safe to send twice (a fix's task is started once however many
+  // times it's asked; a session's hand-over carries a key, and a resend gets
+  // the task the first send queued), so a request that got no answer at all is
+  // sent once more. A connection that died while idle (sleep, a network
+  // change) is only found out by the request riding it; the resend reconnects.
+  const handOver = async (path: string, body: any, success: string, failure: (why: string) => string, retry: () => void,
+                          resend = false) => {
     try {
-      const r = await host.request<any>('POST', path, body, { allowError: true } as any);
+      const r = await requestResending(() => host.request<any>('POST', path, body, { allowError: true } as any), resend);
       host.refreshSoon();
       if (r?.flagged) {
         confirm({ title: "This finding's text was flagged",
@@ -96,11 +103,11 @@ export function useFindingActions(host: RemoteHost, st: RemoteState, showFlash: 
     } catch { showFlash(failure("the server didn't answer"), true); }
   };
   const fix = (id: string, confirmed = false) => handOver(`/findings/${seg(id)}/fix`, confirmed ? { confirmed: true } : {},
-    "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.", w => `Couldn't start the fix: ${w}`, () => fix(id, true));
+    "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.", w => `Couldn't start the fix: ${w}`, () => fix(id, true), true);
   const route = (id: string, room?: string, confirmed = false) => handOver(`/findings/${seg(id)}/switchboard`, { ...(room ? { room } : {}), ...(confirmed ? { confirmed: true } : {}) },
     'Asked the Switchboard — it will propose a session and wait for your OK.', w => `Couldn't ask the Switchboard: ${w}`, () => route(id, room, true));
-  const ask = (id: string, s: { id: string; label: string }, confirmed = false) => handOver(`/findings/${seg(id)}/session`, { session: s.id, confirmed },
-    `Sent to ${s.label} — it works on the fix in its own session.`, w => `Couldn't send it to ${s.label}: ${w}`, () => ask(id, s, true));
+  const ask = (id: string, s: { id: string; label: string }, confirmed = false) => handOver(`/findings/${seg(id)}/session`, { session: s.id, confirmed, handOver: crypto.randomUUID() },
+    `Sent to ${s.label} — it works on the fix in its own session.`, w => `Couldn't send it to ${s.label}: ${w}`, () => ask(id, s, true), true);
   const setStatus = (id: string, status: string, note?: string) => host.send('POST', `/findings/${seg(id)}/status`, note ? { status, note } : { status });
   const markDuplicate = (id: string, of: string) => host.send('POST', `/findings/${seg(id)}/duplicate`, { of });
   const deleteFinding = (id: string) => host.send('DELETE', `/findings/${seg(id)}`);

@@ -383,7 +383,8 @@ export function ModelsBoard({ ctx, settings, onChange, layer }: {
     const base = (res.localServer?.baseURL ?? '').trim(); if (!base) return;
     setProbe({ s: 'probing' });
     try {
-      const ids = await probeCustomServer((m, p, b, o) => ctx.host.request(m, p, b, o), base, res.localServer?.apiKey);
+      const ids = await probeCustomServer((m, p, b, o) => ctx.host.request(m, p, b, o), base, res.localServer?.apiKey,
+                                          ctx.mode === 'preferences' ? { kind: 'global' } : { kind: 'workspace', id: ctx.workspaceID });
       setServerModels(ids); setProbe({ s: 'ok', n: ids.length });
     } catch (e: any) {
       setServerModels([]);
