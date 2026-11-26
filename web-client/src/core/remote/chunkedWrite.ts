@@ -70,10 +70,13 @@ const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.mes
 
 /** The filesystem refused. bromure-agentd.py's file ops end in
  *  `except Exception as e: return {"error": str(e)}`, so an OSError arrives as
- *  Python's own text — `[Errno 13] Permission denied: '/path/.f.bromure-…'`. */
-const permissionDenied = (e: unknown) =>
-  /permission denied|operation not permitted|errno 13|eacces|eperm/i
-    .test(String((e as any)?.message ?? e));
+ *  Python's own text — `[Errno 13] Permission denied: '/path/.f.bromure-…'`.
+ *  Only the text before the path counts: a file named `permission-denied`
+ *  that failed for another reason isn't a refusal. Mirrors
+ *  FolderUpload.refusedByFilesystem in Swift; keep the two in step. */
+export const permissionDenied = (e: unknown) =>
+  /\[errno (1|13)\]|permission denied|operation not permitted/i
+    .test(String((e as any)?.message ?? e).split(": '")[0]);
 
 /** Copy a dropped file OVER `dest` without ever leaving it half-written: the
  *  bytes go to a hidden temp file beside it, which replaces `dest` in one
@@ -115,7 +118,10 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
         String((e as any)?.message ?? e)}), so writing straight to it. ` +
       'This is NOT atomic: if the copy fails part-way the destination is lost.',
     );
-    return writeGuestFile(open(), dest, chunk, fileOp, encode, progress);
+    // Straight onto `dest`, and NOT through writeGuestFile: its clean-up on a
+    // failed copy removes the file it wrote, which here is the user's own.
+    return writeStreamChunked(open(), chunk, (bytes, append) =>
+      fileOp({ op: 'write', path: dest, data: encode(bytes), append }, 60).then(() => {}), progress);
   }
   try {
     await fileOp({ op: 'rename', path: tmp, dest });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { replaceGuestFile } from '../src/core/remote/chunkedWrite';
+import { replaceGuestFile, permissionDenied } from '../src/core/remote/chunkedWrite';
 
 // Regression (CWE-73): a dropped file was streamed straight onto its
 // destination — the first write truncated a file already there, so a source
@@ -113,6 +113,15 @@ describe('replaceGuestFile', () => {
     expect(g.ops.some(o => o === `write ${DEST}`)).toBe(false);
   });
 
+  // The direct write is not atomic, but a failure part-way through it must
+  // not remove the destination either: that file is the user's own.
+  it('a direct write failing part-way keeps the destination (never removed)', async () => {
+    const g = guest({ roDir: '/home/ubuntu', denyWriteNo: 3 });
+    await expect(replaceGuestFile(bytes(10), DEST, 4, g.op, enc)).rejects.toThrow('Permission denied');
+    expect(g.files.has(DEST)).toBe(true);
+    expect(g.ops.some(o => o === `remove ${DEST}`)).toBe(false);
+  });
+
   // A refused RENAME must keep its existing behaviour: the destination is
   // left alone and the error surfaces. It must not be mistaken for the
   // directory case just because it also says "Permission denied".
@@ -121,5 +130,15 @@ describe('replaceGuestFile', () => {
     await expect(replaceGuestFile(bytes(10), DEST, 4, g.op, enc)).rejects.toThrow('Permission denied');
     expect(g.files.get(DEST)).toBe('ORIGINAL');
     expect(g.ops.filter(o => o === `write ${DEST}`).length).toBe(0);
+  });
+});
+
+describe('permissionDenied', () => {
+  it('reads the refusal from the message, not from the path it names', () => {
+    expect(permissionDenied(new Error("[Errno 13] Permission denied: '/d/.f.bromure-1.part'"))).toBe(true);
+    expect(permissionDenied(new Error("[Errno 1] Operation not permitted: '/d/x'"))).toBe(true);
+    expect(permissionDenied('Permission denied')).toBe(true);
+    expect(permissionDenied(new Error("[Errno 28] No space left on device: '/d/permission-denied.txt'"))).toBe(false);
+    expect(permissionDenied(new Error("[Errno 130] Owner died: '/d/x'"))).toBe(false);
   });
 });

@@ -139,12 +139,14 @@ enum FolderUpload {
     /// an OSError arrives as Python's own text — `[Errno 13] Permission
     /// denied: '/path/.f.bromure-….part'`. Mirrors permissionDenied() in
     /// web-client/src/core/remote/chunkedWrite.ts; keep the two in step.
-    private static func refusedByFilesystem(_ error: Error) -> Bool {
-        let text = "\(error) " + error.localizedDescription
-        for needle in ["permission denied", "operation not permitted", "errno 13", "eacces", "eperm"] {
-            if text.localizedCaseInsensitiveContains(needle) { return true }
+    /// Only the text before the path counts: a file named
+    /// `permission-denied` that failed for another reason isn't a refusal.
+    static func refusedByFilesystem(_ error: Error) -> Bool {
+        ["\(error)", error.localizedDescription].contains { full in
+            let text = full.components(separatedBy: ": '")[0]
+            return text.range(of: #"\[errno (1|13)\]|permission denied|operation not permitted"#,
+                              options: [.regularExpression, .caseInsensitive]) != nil
         }
-        return false
     }
 
     /// One file, chunked: a truncating first write, then appends.

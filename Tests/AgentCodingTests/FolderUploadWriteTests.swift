@@ -84,4 +84,13 @@ struct FolderUploadWriteTests {
         }
         #expect(g.files == ["/d/f": Data("old".utf8)])
     }
+
+    @Test("a refusal is read from the message, not from the path it names")
+    func refusalText() {
+        #expect(FolderUpload.refusedByFilesystem(E("[Errno 13] Permission denied: '/d/.f.bromure-1.part'")))
+        #expect(FolderUpload.refusedByFilesystem(E("[Errno 1] Operation not permitted: '/d/x'")))
+        #expect(FolderUpload.refusedByFilesystem(E("Permission denied")))
+        #expect(!FolderUpload.refusedByFilesystem(E("[Errno 28] No space left on device: '/d/permission-denied.txt'")))
+        #expect(!FolderUpload.refusedByFilesystem(E("[Errno 130] Owner died: '/d/x'")))
+    }
 }
