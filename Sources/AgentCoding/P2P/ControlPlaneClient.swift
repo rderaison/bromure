@@ -517,4 +517,23 @@ enum AcceptedCredential {
     static func forget(defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: defaultsKey)
     }
+
+    /// Enrollment propagates in seconds; past this, a credential bromure.io
+    /// refuses isn't one it hasn't caught up with.
+    static let propagationWindow: TimeInterval = 10 * 60
+
+    /// Whether a 401 for `bearer` can only mean the credential is dead
+    /// (revoked or lapsed): bromure.io accepted it before, it has expired, or
+    /// it's older than propagation could explain -- including a record saved
+    /// by a build before `DeviceRecord.enrolledAt`, which enrolled before
+    /// that upgrade and may never be accepted again (revoked meanwhile).
+    /// Otherwise the 401 may be propagation lag right after enrollment.
+    static func refusalIsFinal(bearer: String, record: DeviceRecord?, now: Date = Date(),
+                               defaults: UserDefaults = .standard) -> Bool {
+        if wasAccepted(bearer, defaults: defaults) { return true }
+        guard let record, record.deviceToken == bearer else { return false }
+        if let expires = record.deviceTokenExpiresAt, expires <= now { return true }
+        guard let enrolled = record.enrolledAt else { return true }
+        return now.timeIntervalSince(enrolled) > propagationWindow
+    }
 }

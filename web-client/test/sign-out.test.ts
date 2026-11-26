@@ -33,11 +33,11 @@ vi.mock('../src/core/ssh/keys', () => ({ idbGet: async () => undefined, idbPut: 
 vi.mock('../src/platform', () => ({ electron: undefined, http: async () => ({ status: 200 }), openExternal() {}, shell: 'electron', SITE_BASE: '', API_BASE: '' }));
 vi.mock('../src/app/store', () => ({ publicKeyLine: async () => '' }));
 
-const { account, setRevoke401DelayForTests } = await import('../src/features/connect/account');
+const { account, setRevoke401DelayForTests, refusalIsFinal } = await import('../src/features/connect/account');
 setRevoke401DelayForTests(0);
 
-async function signedIn(delivery?: 'cookie', accepted = true) {
-  stored = { deviceId: 'd1', deviceToken: delivery ? '' : 'tok', apiBase: 'https://bromure.example/api', deviceName: 'x', enrolledAt: '', delivery, accepted };
+async function signedIn(delivery?: 'cookie', accepted = true, enrolledAt = new Date().toISOString()) {
+  stored = { deviceId: 'd1', deviceToken: delivery ? '' : 'tok', apiBase: 'https://bromure.example/api', deviceName: 'x', enrolledAt, delivery, accepted };
   await account.load();
   expect(account.get().record).toBeTruthy();
 }
@@ -119,6 +119,17 @@ describe('account.signOut', () => {
     expect(await account.signOut()).toBe(true);
   });
 
+  // Regression (CWE-613 follow-up): a record saved before `accepted` existed
+  // starts unaccepted; one revoked before its first successful call answers
+  // 401 forever and could never sign out. Past propagation, a 401 is final.
+  it('a 401 for a credential enrolled long ago signs out, accepted or not', async () => {
+    await signedIn(undefined, false, new Date(Date.now() - 3600_000).toISOString());
+    outcome.selfRevoke = 401;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
+    expect(account.get().record).toBeNull();
+  });
+
   it('a 401 that clears once the credential propagates signs out', async () => {
     await signedIn(undefined, false);
     queue.selfRevoke = [401, 401];
@@ -135,5 +146,16 @@ describe('account.signOut', () => {
     delete outcome.webLogout;
     expect(await account.signOut()).toBe(true);
     expect(account.get().record).toBeNull();
+  });
+});
+
+describe('refusalIsFinal', () => {
+  const rec = (over: Record<string, any>) => ({ deviceId: 'd', deviceToken: 't', apiBase: '', deviceName: '', enrolledAt: '', ...over });
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  it('final once accepted, past the propagation window, or with no readable enrollment time', () => {
+    expect(refusalIsFinal(rec({ accepted: true, enrolledAt: '2026-11-26T11:59:59Z' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '2026-11-26T11:00:00Z' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '2026-11-26T11:58:00Z' }), now)).toBe(false);
   });
 });

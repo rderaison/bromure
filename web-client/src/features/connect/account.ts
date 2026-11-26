@@ -213,9 +213,25 @@ let revoke401DelayMs = 2000;
 /** Tests only. */
 export function setRevoke401DelayForTests(ms: number) { revoke401DelayMs = ms; }
 
-/** Run a sign-out call. 'gone' when it answered 401 for a credential
- *  bromure.io accepted before: revoked already, nothing left to do. A 401 for
- *  one it never accepted proves nothing (CWE-613): right after enrollment it
+/** Enrollment propagates in seconds; past this, a credential bromure.io
+ *  refuses isn't one it hasn't caught up with (AcceptedCredential in the
+ *  macOS app). */
+const PROPAGATION_WINDOW_MS = 10 * 60 * 1000;
+
+/** Whether a 401 for this credential can only mean it's dead: bromure.io
+ *  accepted it before, or it's older than propagation could explain -- a
+ *  record saved before `accepted` existed may never be accepted again
+ *  (revoked meanwhile), and would otherwise never sign out. */
+export function refusalIsFinal(rec: DeviceRecord, now = Date.now()): boolean {
+  if (rec.accepted) return true;
+  const enrolled = Date.parse(rec.enrolledAt);
+  return !Number.isFinite(enrolled) || now - enrolled > PROPAGATION_WINDOW_MS;
+}
+
+/** Run a sign-out call. 'gone' when it answered 401 for a credential whose
+ *  refusal is final (refusalIsFinal): revoked already, nothing left to do. A
+ *  401 for a fresh one it never accepted proves nothing (CWE-613): right
+ *  after enrollment it
  *  may not have propagated, and forgetting the credential then would lose
  *  the only one that can revoke a still-live device. It's retried, then
  *  reported, the credential kept. */
@@ -224,7 +240,7 @@ async function revokeCall(rec: DeviceRecord, call: () => Promise<unknown>): Prom
     try { await call(); return 'done'; }
     catch (e) {
       if (!gone(e, 401)) throw e;
-      if (rec.accepted) return 'gone';
+      if (refusalIsFinal(rec)) return 'gone';
       if (attempt >= REVOKE_401_RETRIES) {
         throw new Error("it doesn't recognize this device's credentials yet, so the sign-out couldn't be confirmed");
       }
