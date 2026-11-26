@@ -570,8 +570,9 @@ function Findings({ host, st, repoFilter, setRepoFilter, showFlash, onOpenTask }
     .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
   const f = all.find(x => x.id === sel) ?? list[0];
   const repos = [...new Set(all.map(x => x.repo))].sort();
-  // `resend`: safe to send twice (a fix or a session's task is queued once
-  // however many times it's asked), so a request that got no answer at all is
+  // `resend`: safe to send twice (a fix's task is started once however many
+  // times it's asked; a session's hand-over carries a key, and a resend gets
+  // the task the first send queued), so a request that got no answer at all is
   // sent once more. A connection that died while idle (sleep, a network
   // change) is only found out by the request riding it; the resend reconnects.
   const handOver = async (path: string, body: any, success: string, failure: (why: string) => string, retry: () => void,
@@ -591,7 +592,7 @@ function Findings({ host, st, repoFilter, setRepoFilter, showFlash, onOpenTask }
     "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.", w => `Couldn't start the fix: ${w}`, () => fix(id, true), true);
   const route = (id: string, room?: string, confirmed = false) => handOver(`/findings/${seg(id)}/switchboard`, { ...(room ? { room } : {}), ...(confirmed ? { confirmed: true } : {}) },
     'Asked the Switchboard — it will propose a session and wait for your OK.', w => `Couldn't ask the Switchboard: ${w}`, () => route(id, room, true));
-  const ask = (id: string, s: { id: string; label: string }, confirmed = false) => handOver(`/findings/${seg(id)}/session`, { session: s.id, confirmed },
+  const ask = (id: string, s: { id: string; label: string }, confirmed = false) => handOver(`/findings/${seg(id)}/session`, { session: s.id, confirmed, handOver: crypto.randomUUID() },
     `Sent to ${s.label} — it works on the fix in its own session.`, w => `Couldn't send it to ${s.label}: ${w}`, () => ask(id, s, true), true);
   const setStatus = (id: string, status: string) => host.send('POST', `/findings/${seg(id)}/status`, { status });
   const fixMenu = (e: React.MouseEvent, x: any) => {

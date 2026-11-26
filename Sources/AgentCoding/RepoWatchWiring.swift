@@ -151,13 +151,13 @@ extension ACAppDelegate {
     /// get there (nil = queued). A flagged finding goes only once the user
     /// `confirmed` it.
     func routeFindingToSession(_ findingID: UUID, session sessionID: UUID,
-                               confirmed: Bool) async -> String? {
+                               confirmed: Bool, handOver: String? = nil) async -> String? {
         guard let f = findingStore.finding(findingID),
               let s = allSessionRecords.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
             return NSLocalizedString("that session is gone", comment: "finding → session failure")
         }
         if let refusal = f.handOverRefusal(confirmed: confirmed) { return refusal }
-        guard let tid = repoWatchEngine.fix(findingID, by: s) else {
+        guard let tid = repoWatchEngine.fix(findingID, by: s, handOver: handOver) else {
             return NSLocalizedString("couldn't put it on the board", comment: "finding → session failure")
         }
         BACDebug.log("watch", "finding \(findingID) → task \(tid) for session \(sessionID)")
@@ -189,7 +189,9 @@ extension ACAppDelegate {
     ///   POST   /findings/{id}/status       {"status": …, "note": …}
     ///   POST   /findings/{id}/duplicate    {"of": id}
     ///   POST   /findings/{id}/switchboard  {"room": id?} — ask a Switchboard
-    ///   POST   /findings/{id}/session      {"session": id} — ask that session
+    ///   POST   /findings/{id}/session      {"session": id, "handOver": key?} —
+    ///                                       ask that session; a resend with
+    ///                                       the same key gets the same task
     ///   DELETE /findings/{id}
     ///   POST   /findings/report            {"profileID", "repo", "branch"?,
     ///                                       "commit"?, "findings": [...]} —
@@ -262,7 +264,8 @@ extension ACAppDelegate {
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
                 }
-                if let why = await routeFindingToSession(id, session: sid, confirmed: true) {
+                let key = (body["handOver"] as? String).flatMap { $0.isEmpty || $0.count > 100 ? nil : $0 }
+                if let why = await routeFindingToSession(id, session: sid, confirmed: true, handOver: key) {
                     return ["error": why]
                 }
             case ("POST", "duplicate"):

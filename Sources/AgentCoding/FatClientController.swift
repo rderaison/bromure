@@ -5374,10 +5374,11 @@ final class RemoteHostWindow: NSWindow {
                         // code review, as on the local window: the
                         // finding's row says it's in progress and opens
                         // the task.
-                        // Safe to resend: the finding's task is queued
-                        // for that session once, whatever the count.
+                        // Safe to resend: the key makes a resend get the
+                        // task the first send queued, even one done since.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
-                                  body: ["session": sid.uuidString, "confirmed": confirmed],
+                                  body: ["session": sid.uuidString, "confirmed": confirmed,
+                                         "handOver": UUID().uuidString],
                                   retryUnanswered: true) { status, json in
                             done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",

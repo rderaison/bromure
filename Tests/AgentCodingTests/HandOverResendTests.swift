@@ -44,7 +44,7 @@ struct HandOverResendTests {
         let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
         for route in ["/fix\",", "/session\","] {
             let at = try #require(src.range(of: route))
-            #expect(src[at.upperBound...].prefix(200).contains("retryUnanswered: true"), "\(route) isn't resent")
+            #expect(src[at.upperBound...].prefix(300).contains("retryUnanswered: true"), "\(route) isn't resent")
         }
         let sb = try #require(src.range(of: "/switchboard\","))
         #expect(!src[sb.upperBound...].prefix(200).contains("retryUnanswered"))
