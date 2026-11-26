@@ -4414,3 +4414,12 @@
 "SHA-256 fingerprint" = "SHA-256 指紋";
 "Add certificate" = "新增憑證";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "需要主機名稱與 64 個字元的 SHA-256 指紋；在此之前會被忽略。";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "正在監看";
+"Watching %@" = "正在監看 %@";
+"Stop Watching Pull Request" = "停止監看提取要求";
+"Allow /ship and /steward" = "允許 /ship 和 /steward";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code 會提交、推送、建立提取要求，並持續修正直到你合併。";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "Claude Code 的 /ship 會提交你的工作、推送、在 GitHub 上建立提取要求並進行審查，然後監看它：修正失敗的檢查、衝突和審查意見，並再次推送，直到你合併。/steward 會開始監看一個已開啟的提取要求。推送使用此工作區的 GitHub 權杖，以你的名義進行。監看期間，工作階段顯示「正在監看 PR #…」，你的 Mac 保持喚醒；按一下右鍵於工作階段即可停止。關閉此項後，這裡的 Claude Code 將不再有這兩個指令。在此工作區下次啟動時生效。";

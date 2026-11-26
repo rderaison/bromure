@@ -4411,3 +4411,12 @@
 "SHA-256 fingerprint" = "SHA-256-Fingerabdruck";
 "Add certificate" = "Zertifikat hinzufügen";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Benötigt einen Hostnamen und einen 64-stelligen SHA-256-Fingerabdruck; bis dahin ignoriert.";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "Überwacht";
+"Watching %@" = "Überwacht %@";
+"Stop Watching Pull Request" = "Überwachung des Pull Requests beenden";
+"Allow /ship and /steward" = "/ship und /steward erlauben";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code committet, pusht, öffnet einen Pull Request und korrigiert ihn, bis Sie ihn mergen.";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "/ship von Claude Code committet Ihre Arbeit, pusht sie, öffnet einen Pull Request auf GitHub und prüft ihn, dann überwacht es ihn: Es behebt fehlschlagende Checks, Konflikte und Review-Kommentare und pusht erneut, bis Sie mergen. /steward startet die Überwachung eines bereits offenen Pull Requests. Gepusht wird mit dem GitHub-Token dieses Arbeitsbereichs, unter Ihrem Namen. Während einer Überwachung zeigt die Sitzung „Überwacht PR #…“ und Ihr Mac bleibt wach; klicken Sie mit der rechten Maustaste auf die Sitzung, um sie zu beenden. Schalten Sie dies aus, und beide Befehle verschwinden hier aus Claude Code. Wirkt beim nächsten Start dieses Arbeitsbereichs.";

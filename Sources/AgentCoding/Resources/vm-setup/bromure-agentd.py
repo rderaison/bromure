@@ -7727,6 +7727,21 @@ def _seed_claude_settings():
     plugins = plugins if isinstance(plugins, dict) else {}
     plugins["cc-plugin-diff@builtin"] = False
     settings["enabledPlugins"] = plugins
+    # /ship and /steward: off when the workspace says so, the user's other
+    # skill overrides kept (host ClaudeShip.skillOverrides does the same).
+    if isinstance(spec.get("claudeShip"), bool):
+        overrides = settings.get("skillOverrides")
+        overrides = dict(overrides) if isinstance(overrides, dict) else {}
+        for skill in ("ship-local", "steward"):
+            if spec["claudeShip"]:
+                if overrides.get(skill) == "off":
+                    overrides.pop(skill, None)
+            else:
+                overrides[skill] = "off"
+        if overrides:
+            settings["skillOverrides"] = overrides
+        else:
+            settings.pop("skillOverrides", None)
     hook = "/home/ubuntu/.bromure/agent-status.sh"
 
     def _hook_cmd(arg):

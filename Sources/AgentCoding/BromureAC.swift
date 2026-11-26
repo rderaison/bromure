@@ -3997,6 +3997,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
+        // Claude Code's /ship watches: the Mac stays awake while one runs.
+        // Reported ones from before a restart are old by now (stale) or
+        // heard from again at their next wake-up.
+        ShipWatchAwake.shared.provider = { [weak self] in
+            self?.agentSessionStore.liveShipWatches() ?? 0
+        }
+        ShipWatchAwake.shared.refresh()
         // Host sleep stops the guests' clocks; set them right on wake.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -17049,6 +17056,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     sessions: self.agentSessionStore.sessions) else { return }
                 self.setTabAgentStatus(pid, index: w, status,
                                        turnEnded: AgentStatus.endsTurn(signal: signal))
+                // Line 3, at a turn's end: the tab's /ship watch, if any.
+                if case .some(let ref) = ClaudeShip.watch(inStatus: signal),
+                   let s = self.agentSessionStore.session(profileID: pid, windowIndex: w) {
+                    self.agentSessionStore.setShipWatch(s.id, ref)
+                    ShipWatchAwake.shared.refresh()
+                }
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
@@ -17107,6 +17120,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         GuestSandboxStatusStore.shared.reset(profileID: profile.id)
         OpenShellAdvisor.shared.reset(profileID: profile.id)
         AgentWatchdog.shared.reset(profileID: profile.id)
+        agentSessionStore.clearShipWatches(profileID: profile.id)
+        ShipWatchAwake.shared.refresh()
         UnmanagedCredentialGuard.shared.reset(profileID: profile.id)
         PolicySteering.shared.reset(profileID: profile.id)
         browserMCPBridges[profile.id]?.stop()
