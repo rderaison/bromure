@@ -7963,16 +7963,14 @@ def _seed_claude_settings():
     plugins["cc-plugin-diff@builtin"] = False
     settings["enabledPlugins"] = plugins
     # /ship and /steward: off when the workspace says so, the user's other
-    # skill overrides kept (host ClaudeShip.skillOverrides does the same).
+    # skill overrides kept, and a skill the user turned off left off (host
+    # ClaudeShip.skillOverrides does the same).
+    owned_path = os.path.join(claude_dir, _SHIP_OWNED_FILE)
+    ship_owned = None
     if isinstance(spec.get("claudeShip"), bool):
-        overrides = settings.get("skillOverrides")
-        overrides = dict(overrides) if isinstance(overrides, dict) else {}
-        for skill in ("ship-local", "steward"):
-            if spec["claudeShip"]:
-                if overrides.get(skill) == "off":
-                    overrides.pop(skill, None)
-            else:
-                overrides[skill] = "off"
+        overrides, ship_owned = _ship_skill_overrides(
+            settings.get("skillOverrides"), spec["claudeShip"],
+            _read_ship_owned(owned_path))
         if overrides:
             settings["skillOverrides"] = overrides
         else:
@@ -8016,6 +8014,68 @@ def _seed_claude_settings():
     hooks["StopFailure"] = _hook_cmd("needsInput") + _keep_others("StopFailure")
     settings["hooks"] = hooks
     _write(settings)
+    # Recorded once settings.json holds what it describes.
+    if ship_owned is not None:
+        _write_ship_owned(owned_path, ship_owned)
+
+
+# The skills behind /ship and /steward (host ClaudeShip.skills), and where
+# Bromure records the skillOverrides entries it wrote itself: skill -> the
+# user's value it replaced (None when there was none). Host
+# ClaudeShip.ownedOverridesFile, the same file.
+_SHIP_SKILLS = ("ship-local", "steward")
+_SHIP_OWNED_FILE = "bromure-skill-overrides.json"
+
+
+def _ship_skill_overrides(existing, allowed, owned):
+    """skillOverrides for the workspace's /ship switch, and the entries
+    Bromure owns afterwards (host ClaudeShip.skillOverrides). Off: both
+    skills "off", each value replaced remembered. On: only the "off" entries
+    Bromure wrote go, the user's earlier value put back. A user's own entry,
+    "off" included, is never taken back (CWE-693): turning the switch on must
+    not re-enable a skill the user turned off."""
+    o = dict(existing) if isinstance(existing, dict) else {}
+    mine = {}
+    for skill in _SHIP_SKILLS:
+        ours = skill in owned and o.get(skill) == "off"
+        if allowed:
+            if not ours:
+                continue
+            if owned[skill] is None:
+                o.pop(skill, None)
+            else:
+                o[skill] = owned[skill]
+        elif ours:
+            mine[skill] = owned[skill]
+        elif o.get(skill) != "off":
+            mine[skill] = o.get(skill)
+            o[skill] = "off"
+    return o, mine
+
+
+def _read_ship_owned(path):
+    try:
+        with open(path) as f:
+            obj = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    return {k: v for k, v in obj.items() if k in _SHIP_SKILLS}
+
+
+def _write_ship_owned(path, owned):
+    if not owned:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return
+    tmp = path + ".bromure-seed-tmp"
+    with open(tmp, "w") as f:
+        json.dump(owned, f, indent=2, sort_keys=True)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 def _fsck_home_if_needed(dev, info):

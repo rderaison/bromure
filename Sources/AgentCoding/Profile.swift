@@ -5589,9 +5589,12 @@ public final class ProfileStore {
             plugins[Self.claudeDiffPlugin] = false
             settings["enabledPlugins"] = plugins
             // /ship and /steward: off when the workspace says so, the user's
-            // other skill overrides kept (bromure-agentd's twin does the same).
-            if let o = ClaudeShip.skillOverrides(settings["skillOverrides"],
-                                                 allowed: !profile.claudeShipDisabled) {
+            // other skill overrides kept, and a skill the user turned off left
+            // off (bromure-agentd's twin does the same).
+            let ship = ClaudeShip.skillOverrides(settings["skillOverrides"],
+                                                 allowed: !profile.claudeShipDisabled,
+                                                 owned: ClaudeShip.readOwnedOverrides(in: claudeDir))
+            if let o = ship.overrides {
                 settings["skillOverrides"] = o
             } else {
                 settings.removeValue(forKey: "skillOverrides")
@@ -5655,6 +5658,8 @@ public final class ProfileStore {
             try data.write(to: claudeSettingsURL, options: .atomic)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
                                   ofItemAtPath: claudeSettingsURL.path)
+            // Recorded once settings.json holds what it describes.
+            ClaudeShip.writeOwnedOverrides(ship.owned, in: claudeDir)
 
             // Pre-approve the session's ANTHROPIC_API_KEY in ~/.claude.json
             // (customApiKeyResponses stores the key's last-20 suffix) so the

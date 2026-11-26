@@ -43,18 +43,116 @@ struct ClaudeShipTests {
 
     @Test("skillOverrides: both skills off, or Bromure's entries gone; the user's kept")
     func overrides() {
-        let off = ClaudeShip.skillOverrides(["my-skill": "name-only"], allowed: false)
-        #expect(off?["ship-local"] as? String == "off")
-        #expect(off?["steward"] as? String == "off")
-        #expect(off?["my-skill"] as? String == "name-only")
-        let on = ClaudeShip.skillOverrides(off, allowed: true)
-        #expect(on?["ship-local"] == nil && on?["steward"] == nil)
-        #expect(on?["my-skill"] as? String == "name-only")
-        #expect(ClaudeShip.skillOverrides(["ship-local": "off", "steward": "off"], allowed: true) == nil)
-        #expect(ClaudeShip.skillOverrides(nil, allowed: true) == nil)
-        // A user's own setting other than "off" isn't Bromure's to take back.
-        #expect(ClaudeShip.skillOverrides(["steward": "user-invocable-only"], allowed: true)?["steward"] as? String
-                == "user-invocable-only")
+        let off = ClaudeShip.skillOverrides(["my-skill": "name-only"], allowed: false, owned: [:])
+        #expect(off.overrides?["ship-local"] as? String == "off")
+        #expect(off.overrides?["steward"] as? String == "off")
+        #expect(off.overrides?["my-skill"] as? String == "name-only")
+        #expect(off.owned["ship-local"] is NSNull && off.owned["steward"] is NSNull)
+        let on = ClaudeShip.skillOverrides(off.overrides, allowed: true, owned: off.owned)
+        #expect(on.overrides?["ship-local"] == nil && on.overrides?["steward"] == nil)
+        #expect(on.overrides?["my-skill"] as? String == "name-only")
+        #expect(on.owned.isEmpty)
+        #expect(ClaudeShip.skillOverrides(nil, allowed: true, owned: [:]).overrides == nil)
+        // A user's own setting other than "off" isn't Bromure's to take back,
+        // and comes back once the switch is on again.
+        let mixed = ClaudeShip.skillOverrides(["steward": "user-invocable-only"], allowed: false, owned: [:])
+        #expect(mixed.overrides?["steward"] as? String == "off")
+        #expect(ClaudeShip.skillOverrides(mixed.overrides, allowed: true, owned: mixed.owned)
+                    .overrides?["steward"] as? String == "user-invocable-only")
+    }
+
+    @Test("A skill the user turned off stays off when the switch is on (CWE-693)")
+    func userOffKept() {
+        // The finding: switch on (the default), the user's own "off" entries
+        // were deleted, re-enabling /ship and /steward.
+        let user: [String: Any] = ["ship-local": "off", "steward": "off"]
+        let on = ClaudeShip.skillOverrides(user, allowed: true, owned: [:])
+        #expect(on.overrides?["ship-local"] as? String == "off")
+        #expect(on.overrides?["steward"] as? String == "off")
+        #expect(on.owned.isEmpty)
+        // Switched off then on again: the user's entries were never Bromure's.
+        let off = ClaudeShip.skillOverrides(user, allowed: false, owned: [:])
+        #expect(off.owned.isEmpty)
+        let back = ClaudeShip.skillOverrides(off.overrides, allowed: true, owned: off.owned)
+        #expect(back.overrides?["ship-local"] as? String == "off")
+        #expect(back.overrides?["steward"] as? String == "off")
+        // An entry Bromure wrote that the user changed since is theirs again.
+        let changed = ClaudeShip.skillOverrides(["ship-local": "name-only", "steward": "off"], allowed: true,
+                                                owned: ["ship-local": NSNull(), "steward": NSNull()])
+        #expect(changed.overrides?["ship-local"] as? String == "name-only")
+        #expect(changed.overrides?["steward"] == nil)
+    }
+
+    @Test("The host's settings writer leaves a user's own \"off\" alone, and takes back only its own")
+    func hostWriterKeepsUserOff() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("shipoff-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        let claudeDir = store.homeDirectory(for: p).appendingPathComponent(".claude")
+        let settingsURL = claudeDir.appendingPathComponent("settings.json")
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        try #"{"skillOverrides": {"ship-local": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        func overrides() -> [String: Any] {
+            guard let d = try? Data(contentsOf: settingsURL),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+            return o["skillOverrides"] as? [String: Any] ?? [:]
+        }
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        #expect(overrides()["ship-local"] as? String == "off")
+        #expect(overrides()["steward"] == nil)
+        p.claudeShipDisabled = true
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        #expect(overrides()["ship-local"] as? String == "off")
+        #expect(overrides()["steward"] as? String == "off")
+        p.claudeShipDisabled = false
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        #expect(overrides()["ship-local"] as? String == "off")
+        #expect(overrides()["steward"] == nil)
+        #expect(!FileManager.default.fileExists(
+            atPath: claudeDir.appendingPathComponent(ClaudeShip.ownedOverridesFile).path))
+    }
+
+    @Test("bromure-agentd's twin leaves a user's own \"off\" alone too",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func guestWriterKeepsUserOff() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("shipoff-g-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let guestHome = root.appendingPathComponent("guest-home"), seedIn = root.appendingPathComponent("guest-seed")
+        let settingsURL = guestHome.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: guestHome.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: seedIn, withIntermediateDirectories: true)
+        try #"{"skillOverrides": {"ship-local": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        func seed(ship: Bool) throws -> [String: Any] {
+            try #"{"usesClaude": true, "claudeShip": \#(ship)}"#
+                .write(to: seedIn.appendingPathComponent("claude-settings.spec.json"), atomically: true, encoding: .utf8)
+            let py = Process()
+            py.executableURL = URL(fileURLWithPath: Self.python)
+            py.arguments = ["-I", "-c", """
+                import importlib.util, sys, os
+                s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+                m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+                m.SEED_DIR = sys.argv[2]; m.HOME_MOUNT = sys.argv[3]; m.HOME = sys.argv[3]
+                m._approve_claude_api_key = lambda *a: None; m._preonboard_claude = lambda *a: None
+                m.log = lambda *a: None
+                os.chown = lambda *a, **k: None
+                m._seed_claude_settings()
+                """, Self.repo.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py").path,
+                seedIn.path, guestHome.path]
+            py.standardError = FileHandle.nullDevice
+            try py.run(); py.waitUntilExit()
+            guard let d = try? Data(contentsOf: settingsURL),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+            return o["skillOverrides"] as? [String: Any] ?? [:]
+        }
+        var o = try seed(ship: true)
+        #expect(o["ship-local"] as? String == "off")
+        #expect(o["steward"] == nil)
+        o = try seed(ship: false)
+        #expect(o["ship-local"] as? String == "off" && o["steward"] as? String == "off")
+        o = try seed(ship: true)
+        #expect(o["ship-local"] as? String == "off")
+        #expect(o["steward"] == nil)
     }
 
     @Test("/ship opens the pull request only on github.com, into the default branch, with a Claude Code that has it")
@@ -215,7 +313,8 @@ struct ClaudeShipTests {
             let o = settings(guestHome.appendingPathComponent(".claude/settings.json"))["skillOverrides"] as? [String: Any]
             #expect(o?["my-skill"] as? String == "off")
             if allowed {
-                #expect(o?["ship-local"] == nil && o?["steward"] == nil)
+                // The user's own "off" stays (CWE-693); nothing else is added.
+                #expect(o?["ship-local"] == nil && o?["steward"] as? String == "off")
             } else {
                 #expect(o?["ship-local"] as? String == "off" && o?["steward"] as? String == "off")
             }

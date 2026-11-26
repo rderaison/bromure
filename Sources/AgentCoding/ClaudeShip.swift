@@ -111,16 +111,53 @@ enum ClaudeShip {
         return ref
     }
 
-    /// `skillOverrides` with both skills off (`allowed` false), or without
-    /// Bromure's entries (`allowed`): the user's other overrides kept. nil
-    /// when nothing is left.
-    static func skillOverrides(_ existing: Any?, allowed: Bool) -> [String: Any]? {
+    /// Where Bromure records the `skillOverrides` entries it wrote itself,
+    /// next to `settings.json` in `~/.claude` (bromure-agentd's twin uses the
+    /// same file): skill name → the user's value it replaced (`NSNull` when
+    /// there was none).
+    static let ownedOverridesFile = "bromure-skill-overrides.json"
+
+    /// `skillOverrides` for the workspace switch, and the entries Bromure
+    /// owns afterwards. Off (`allowed` false): both skills "off", each value
+    /// it replaces remembered. On: only the "off" entries Bromure wrote go,
+    /// the user's earlier value put back. A user's own entry, "off" included,
+    /// is never taken back (CWE-693): turning the switch on must not re-enable
+    /// a skill the user turned off. An entry the user changed since Bromure
+    /// wrote it is theirs again. Overrides nil when nothing is left.
+    static func skillOverrides(_ existing: Any?, allowed: Bool,
+                               owned: [String: Any]) -> (overrides: [String: Any]?, owned: [String: Any]) {
         var o = existing as? [String: Any] ?? [:]
+        var mine: [String: Any] = [:]
         for s in skills {
-            if allowed { if o[s] as? String == "off" { o.removeValue(forKey: s) } }
-            else { o[s] = "off" }
+            let ours = owned[s] != nil && o[s] as? String == "off"
+            if allowed {
+                guard ours else { continue }
+                if let prior = owned[s], !(prior is NSNull) { o[s] = prior } else { o.removeValue(forKey: s) }
+            } else if ours {
+                mine[s] = owned[s]
+            } else if o[s] as? String != "off" {
+                mine[s] = o[s] ?? NSNull()
+                o[s] = "off"
+            }
         }
-        return o.isEmpty ? nil : o
+        return (o.isEmpty ? nil : o, mine)
+    }
+
+    /// The entries Bromure owns, read from `ownedOverridesFile` in `dir`.
+    static func readOwnedOverrides(in dir: URL) -> [String: Any] {
+        guard let d = try? Data(contentsOf: dir.appendingPathComponent(ownedOverridesFile)),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return o.filter { skills.contains($0.key) }
+    }
+
+    /// Record the entries Bromure owns in `dir` (the file removed when none).
+    static func writeOwnedOverrides(_ owned: [String: Any], in dir: URL) {
+        let url = dir.appendingPathComponent(ownedOverridesFile)
+        guard !owned.isEmpty,
+              let d = try? JSONSerialization.data(withJSONObject: owned, options: [.prettyPrinted, .sortedKeys])
+        else { try? FileManager.default.removeItem(at: url); return }
+        try? d.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
     }
 
     /// Reads a Claude Code transcript (argv[1]) and prints the watch it shows
