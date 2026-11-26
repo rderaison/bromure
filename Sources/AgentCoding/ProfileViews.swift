@@ -4641,11 +4641,14 @@ struct ProfileEditorView: View {
                                }))
                         .confirmationDialog("Turn /ship and /steward back on in Claude Code too?",
                                             isPresented: $askShipReclaim, titleVisibility: .visible) {
+                            // The safe answer first (the default).
+                            Button("Leave Claude Code's Settings") { draft.claudeShipLegacyOff = false }
                             Button("Turn Them Back On") {
+                                // Only while the switch is still on: the answer is for this re-enable.
+                                guard !draft.claudeShipDisabled else { return }
                                 draft.claudeShipReclaimToken = UUID().uuidString
                                 draft.claudeShipLegacyOff = false
                             }
-                            Button("Leave Claude Code's Settings") { draft.claudeShipLegacyOff = false }
                         } message: {
                             Text("An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself.")
                         }
