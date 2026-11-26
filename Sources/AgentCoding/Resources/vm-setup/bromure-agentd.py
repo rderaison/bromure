@@ -9714,14 +9714,21 @@ def task_docker_on_demand():
         log("session", "docker now starts on demand (docker.socket)")
 
 
+# As root: prints the first saved container with a restart policy, if any.
+_DOCKER_RESTART_POLICY_SCRIPT = (
+    "grep -lsE '\"RestartPolicy\":\\{\"Name\":\"(always|unless-stopped|on-failure)\"' "
+    "/var/lib/docker/containers/*/hostconfig.json 2>/dev/null | head -1")
+
+
 def task_docker_autostart():
     """Containers meant to come back by themselves (a restart policy) only do
     once dockerd runs: start it, after the boot's critical path, when there
-    is one. Nothing to do otherwise."""
+    is one. Nothing to do otherwise. Under the strict sandbox there's no sudo
+    left by now: its root script schedules the same start instead
+    (task_strict_sandbox)."""
     if not shutil.which("docker") or _docker_running() or not _have_sudo():
         return
-    script = ("grep -lsE '\"RestartPolicy\":\\{\"Name\":\"(always|unless-stopped|on-failure)\"' "
-              "/var/lib/docker/containers/*/hostconfig.json 2>/dev/null | head -1")
+    script = _DOCKER_RESTART_POLICY_SCRIPT
     try:
         p = subprocess.run(["sudo", "sh", "-c", script], capture_output=True, text=True,
                            timeout=30, env=_sys_env())
@@ -10105,6 +10112,16 @@ UNIT
   systemctl daemon-reload >/dev/null 2>&1
   systemctl start bromure-shutdown-phase.service >/dev/null 2>&1
 fi
+# Containers meant to come back by themselves (a restart policy) need dockerd,
+# which starts on demand now (task_docker_on_demand). After the revocation below
+# nothing in agentd can start it -- task_docker_autostart, which does it on
+# other workspaces after the shell, has no sudo left -- so it's scheduled here,
+# as root, a few seconds on: past the boot's critical path, like the other.
+if command -v docker >/dev/null 2>&1 && ! systemctl is-active --quiet docker.service \
+   && [ -n "$(%(docker_restart)s)" ]; then
+  systemctl reset-failed bromure-docker-autostart.timer bromure-docker-autostart.service >/dev/null 2>&1
+  systemd-run --unit=bromure-docker-autostart --collect --on-active=5 /bin/systemctl start --no-block docker.service >/dev/null 2>&1
+fi
 # Revoke regardless: without the attestor the host fails closed on binaries.
 #
 # RUNTIME ONLY. This used to edit the disk -- rm the NOPASSWD drop-in, write a
@@ -10124,7 +10141,8 @@ touch %(done)s
        "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
        "sentryunit": SENTRY_UNIT,
        "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
-       "strictd": shlex.quote(strictd), "done": STRICT_DONE}
+       "strictd": shlex.quote(strictd), "done": STRICT_DONE,
+       "docker_restart": _DOCKER_RESTART_POLICY_SCRIPT}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
     # The script just took sudo away. Anything in this incarnation that asks
     # again must get the new answer, not the one cached before the revocation --
