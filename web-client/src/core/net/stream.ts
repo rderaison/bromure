@@ -69,6 +69,8 @@ export interface ElectronNetBridge {
   onTcpAccept?(cb: (listenerID: number, socketID: number) => void): void;
 }
 
+type TcpEvent = [kind: string, data?: Uint8Array, message?: string];
+
 export class ElectronTcpStream implements ByteStream {
   onData: (data: Uint8Array) => void = () => {};
   onClose: (err?: Error) => void = () => {};
@@ -88,17 +90,33 @@ export class ElectronTcpStream implements ByteStream {
   /** Begin delivering data once onData/onClose are set. */
   start(): void { this.bridge.tcpResume?.(this.id); }
 
+  /** Events for an id `open` hasn't returned yet: main sends the socket's
+   *  first bytes (the SSH server's banner) as soon as it connects, which can
+   *  beat tcpOpen's reply. Kept until `open` claims them, never dropped. */
+  private static early = new Map<number, TcpEvent[]>();
+  /** While set, events queue here (behind the early ones) instead of firing. */
+  private backlog: TcpEvent[] | null = null;
+
   private static wire(bridge: ElectronNetBridge) {
     if (!ElectronTcpStream.wired) {
       ElectronTcpStream.wired = true;
       bridge.onTcpEvent((id, kind, data, message) => {
+        const ev: TcpEvent = [kind, data, message];
         const s = ElectronTcpStream.streams.get(id);
-        if (!s) return;
-        if (kind === 'data' && data) s.onData(data);
-        else if (kind === 'close') s.finish();
-        else if (kind === 'error') s.finish(new Error(message || 'connection error'));
+        if (!s) {
+          const q = ElectronTcpStream.early.get(id) ?? [];
+          if (q.length < 1024) q.push(ev);
+          ElectronTcpStream.early.set(id, q);
+          return;
+        }
+        if (s.backlog) s.backlog.push(ev); else s.deliver(ev);
       });
     }
+  }
+  private deliver([kind, data, message]: TcpEvent) {
+    if (kind === 'data' && data) this.onData(data);
+    else if (kind === 'close') this.finish();
+    else if (kind === 'error') this.finish(new Error(message || 'connection error'));
   }
 
   static async open(bridge: ElectronNetBridge, host: string, port: number): Promise<ElectronTcpStream> {
@@ -106,6 +124,14 @@ export class ElectronTcpStream implements ByteStream {
     const id = await bridge.tcpOpen(host, port);
     const s = new ElectronTcpStream(bridge, id);
     ElectronTcpStream.streams.set(id, s);
+    const early = ElectronTcpStream.early.get(id);
+    ElectronTcpStream.early.delete(id);
+    if (early) {
+      // After the caller has set onData/onClose (it does so right after this
+      // returns), in order, ahead of anything that arrives meanwhile.
+      s.backlog = early;
+      setTimeout(() => { const q = s.backlog ?? []; s.backlog = null; for (const ev of q) s.deliver(ev); }, 0);
+    }
     return s;
   }
   write(data: Uint8Array): void { if (!this.closed) this.bridge.tcpWrite(this.id, data); }
