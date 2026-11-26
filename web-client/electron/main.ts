@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { setupTunnel, stopTunnel } from './tunnel';
 import { setupBrowser, stopBrowser } from './browser';
 import { closeGracefully } from './sockClose';
+import { heldEvents } from './tcpEvents';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -219,13 +220,17 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
     // says so (tcp:resume), as an accepted socket is: bytes that beat
     // tcpOpen's reply wait in the kernel and this socket's buffer — TCP's
     // own backpressure — instead of piling up in the renderer.
+    // Its close / error wait too (heldEvents): the renderer never hears of
+    // an id before it has a stream for it.
+    const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
     s.once('connect', () => {
       sockets.set(id, { s, owner: wc.id });
-      accepted.set(id, () => s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); }));
+      accepted.set(id, () => { s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d))); ev.resume(); });
       resolve(id);
     });
-    s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else wc.send('tcp:event', id, 'error', null, err.message); });
-    s.on('close', () => { sockets.delete(id); accepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else ev.emit('error', null, err.message); });
+    // A connect that failed was rejected above; its close is nobody's.
+    s.on('close', () => { const known = sockets.delete(id); accepted.delete(id); if (known) ev.emit('close'); });
     s.setTimeout(15000, () => { if (!sockets.has(id)) { s.destroy(); reject(new Error(`Timed out reaching ${host}:${port}`)); } else s.setTimeout(0); });
   });
 });
@@ -250,14 +255,17 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
   const srv = net.createServer(s => {
     if (wc.isDestroyed()) { s.destroy(); return; }
     const id = nextSock++;
-    // Held paused (no 'data' listener yet) until the renderer has its stream.
+    // Held paused (no 'data' listener yet), and its close too, until the
+    // renderer has its stream (heldEvents).
+    const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
     sockets.set(id, { s, owner: wc.id });
     accepted.set(id, () => {
       s.setNoDelay(true);
-      s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); });
+      s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d)));
+      ev.resume();
     });
     s.on('error', () => {});
-    s.on('close', () => { sockets.delete(id); accepted.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    s.on('close', () => { sockets.delete(id); accepted.delete(id); ev.emit('close'); });
     wc.send('tcp:accept', lid, id);
   });
   await new Promise<void>((resolve, reject) => {
