@@ -1715,7 +1715,21 @@ def _file_op(spec):
                 shutil.copymode(dest, path)
             except OSError:
                 pass
-            os.replace(path, dest)
+            try:
+                os.replace(path, dest)
+            except OSError as e:
+                # A symlink's target on another filesystem (EXDEV) or a
+                # file mounted on its own (EBUSY) can't be renamed onto from
+                # beside the link: write it through instead, as a plain write
+                # did. Not atomic there, but the staged copy is complete and
+                # local, so only a full disk can stop it part-way.
+                if e.errno not in (errno.EXDEV, errno.EBUSY):
+                    raise
+                mode = "r+b" if os.path.exists(dest) else "wb"
+                with open(path, "rb") as src, open(dest, mode) as out:
+                    shutil.copyfileobj(src, out, 1 << 20)
+                    out.truncate()
+                os.unlink(path)
             return {"exit_code": 0}
         if op == "remove":
             if os.path.isdir(path) and not os.path.islink(path):
