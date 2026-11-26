@@ -39,6 +39,8 @@ struct DeviceChannelPresenceTests {
             .split(separator: "\n").map(String.init)
         channel.close()
         #expect(events.first == "open Bearer t0k", "the bearer on the upgrade: \(events.prefix(3))")
+        // bromure.io reads this server's release from the upgrade's User-Agent.
+        #expect(events.dropFirst().first == "agent \(ControlPlaneClient.userAgent)", "\(events.prefix(3))")
         let pings = events.filter { $0 == "ping" }.count, pongs = events.filter { $0 == "pong" }.count
         #expect(pings >= 4, "\(events)")
         #expect(pongs >= pings - 1, "every server ping answered (one may be in flight): \(pings) pings, \(pongs) pongs")

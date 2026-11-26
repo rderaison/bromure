@@ -8,7 +8,8 @@ to <port-file>), requires `Authorization: Bearer …` on the upgrade, then,
 as bromure.io's gateway does (shorter): sends a protocol ping every
 PING_EVERY seconds and terminates (no close frame) a client that didn't
 answer the previous ping with a pong. Each event goes to <event-log> as a
-line: open <auth>, ping, pong, text <payload>, terminate, close <code>.
+line: open <auth>, agent <user-agent>, ping, pong, text <payload>, terminate,
+close <code>.
 """
 import base64, hashlib, os, socket, struct, sys, threading, time
 
@@ -64,6 +65,7 @@ def serve(c):
     c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
     log("open " + auth)
+    log("agent " + headers.get("user-agent", ""))
     state = {"answered": True, "alive": True}
 
     def pinger():
