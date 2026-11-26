@@ -114,10 +114,11 @@ enum ClaudeShip {
     /// Where Bromure records the `skillOverrides` entries it wrote itself,
     /// next to `settings.json` in `~/.claude` (bromure-agentd's twin uses the
     /// same file): skill name → the user's value it replaced (`NSNull` when
-    /// there was none), plus `ownedVersionKey`. Written at every start, empty
-    /// or not, so its absence means no build that keeps it has run there yet.
+    /// there was none), plus `ownedVersionKey` and, once applied, the
+    /// user's re-enable (`reclaimedKey`, see `Profile.claudeShipReclaimToken`).
     static let ownedOverridesFile = "bromure-skill-overrides.json"
     static let ownedVersionKey = "_version"
+    static let reclaimedKey = "_reclaimed"
 
     /// `skillOverrides` for the workspace switch, and the entries Bromure
     /// owns afterwards. Off (`allowed` false): both skills "off", each value
@@ -127,14 +128,16 @@ enum ClaudeShip {
     /// a skill the user turned off. An entry the user changed since Bromure
     /// wrote it is theirs again. Overrides nil when nothing is left.
     ///
-    /// `legacyOff`: the home has no record yet and the workspace was off under
-    /// a build that kept none (`Profile.claudeShipLegacyOff`): its "off"
-    /// entries are that build's, so they're Bromure's to take back.
+    /// `reclaim`: the user asked, with the switch on, to turn both skills
+    /// back on in a workspace an earlier build switched off without keeping
+    /// a record (`Profile.claudeShipLegacyOff`). Its "off" entries can't be
+    /// told from the user's own, so only that explicit answer removes them --
+    /// never an inference (CWE-693).
     static func skillOverrides(_ existing: Any?, allowed: Bool, owned: [String: Any],
-                               legacyOff: Bool = false) -> (overrides: [String: Any]?, owned: [String: Any]) {
+                               reclaim: Bool = false) -> (overrides: [String: Any]?, owned: [String: Any]) {
         var o = existing as? [String: Any] ?? [:]
         var owned = owned
-        if legacyOff {
+        if reclaim && allowed {
             for s in skills where owned[s] == nil && o[s] as? String == "off" { owned[s] = NSNull() }
         }
         var mine: [String: Any] = [:]
@@ -153,23 +156,28 @@ enum ClaudeShip {
         return (o.isEmpty ? nil : o, mine)
     }
 
-    /// Whether a build that keeps the record has written it in `dir`.
-    static func hasOwnedRecord(in dir: URL) -> Bool {
-        FileManager.default.fileExists(atPath: dir.appendingPathComponent(ownedOverridesFile).path)
+    private static func readRecord(in dir: URL) -> [String: Any] {
+        guard let d = try? Data(contentsOf: dir.appendingPathComponent(ownedOverridesFile)),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return o
     }
 
     /// The entries Bromure owns, read from `ownedOverridesFile` in `dir`.
     static func readOwnedOverrides(in dir: URL) -> [String: Any] {
-        guard let d = try? Data(contentsOf: dir.appendingPathComponent(ownedOverridesFile)),
-              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
-        return o.filter { skills.contains($0.key) }
+        readRecord(in: dir).filter { skills.contains($0.key) }
     }
 
-    /// Record the entries Bromure owns in `dir` (an empty record too).
-    static func writeOwnedOverrides(_ owned: [String: Any], in dir: URL) {
+    /// The user's re-enable already applied in `dir`, if any.
+    static func reclaimed(in dir: URL) -> String? {
+        readRecord(in: dir)[reclaimedKey] as? String
+    }
+
+    /// Record the entries Bromure owns in `dir`, and the re-enable applied.
+    static func writeOwnedOverrides(_ owned: [String: Any], reclaimed: String?, in dir: URL) {
         let url = dir.appendingPathComponent(ownedOverridesFile)
         var record = owned
         record[ownedVersionKey] = 1
+        if let reclaimed { record[reclaimedKey] = reclaimed }
         guard let d = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
         else { return }
         try? d.write(to: url, options: .atomic)

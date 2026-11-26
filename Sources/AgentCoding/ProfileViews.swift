@@ -490,6 +490,10 @@ struct ProfileEditorView: View {
     static let idealWindowSize = CGSize(width: 880, height: 840)
     #endif
     @State private var draft: Profile
+    /// Asks, as /ship goes back on in a workspace an earlier build switched
+    /// off, whether to remove the "off" entries that build left in Claude
+    /// Code's settings (Profile.claudeShipLegacyOff).
+    @State private var askShipReclaim = false
     /// The saved home size, so picking the current size back leaves the
     /// profile unchanged (no restart prompt for a no-op).
     private var savedHomeImageGB: Int?
@@ -4629,7 +4633,22 @@ struct ProfileEditorView: View {
                     settingRow(caption: "Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge.",
                                info: "Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts.") {
                         Toggle("Allow /ship and /steward",
-                               isOn: Binding(get: { !draft.claudeShipDisabled }, set: { draft.claudeShipDisabled = !$0 }))
+                               isOn: Binding(get: { !draft.claudeShipDisabled }, set: { on in
+                                   if on, draft.claudeShipDisabled, draft.claudeShipLegacyOff { askShipReclaim = true }
+                                   draft.claudeShipDisabled = !on
+                                   // A re-enable not applied yet doesn't outlive the switch going off.
+                                   if !on { draft.claudeShipReclaimToken = nil }
+                               }))
+                        .confirmationDialog("Turn /ship and /steward back on in Claude Code too?",
+                                            isPresented: $askShipReclaim, titleVisibility: .visible) {
+                            Button("Turn Them Back On") {
+                                draft.claudeShipReclaimToken = UUID().uuidString
+                                draft.claudeShipLegacyOff = false
+                            }
+                            Button("Leave Claude Code's Settings") { draft.claudeShipLegacyOff = false }
+                        } message: {
+                            Text("An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself.")
+                        }
                     }
                     settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
                                info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {

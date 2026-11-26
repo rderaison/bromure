@@ -7985,12 +7985,17 @@ def _seed_claude_settings():
     # ClaudeShip.skillOverrides does the same).
     owned_path = os.path.join(claude_dir, _SHIP_OWNED_FILE)
     ship_owned = None
+    ship_reclaimed = None
     if isinstance(spec.get("claudeShip"), bool):
+        # The user's re-enable (host Profile.claudeShipReclaimToken), once.
+        applied = _read_ship_record(owned_path).get(_SHIP_RECLAIMED_KEY)
+        reclaim = spec.get("claudeShipReclaim")
+        if not spec["claudeShip"] or not isinstance(reclaim, str) or reclaim == applied:
+            reclaim = None
+        ship_reclaimed = reclaim or (applied if isinstance(applied, str) else None)
         overrides, ship_owned = _ship_skill_overrides(
             settings.get("skillOverrides"), spec["claudeShip"],
-            _read_ship_owned(owned_path),
-            legacy_off=spec.get("claudeShipLegacyOff") is True
-            and not os.path.exists(owned_path))
+            _read_ship_owned(owned_path), reclaim=reclaim is not None)
         if overrides:
             settings["skillOverrides"] = overrides
         else:
@@ -8036,20 +8041,20 @@ def _seed_claude_settings():
     _write(settings)
     # Recorded once settings.json holds what it describes.
     if ship_owned is not None:
-        _write_ship_owned(owned_path, ship_owned)
+        _write_ship_owned(owned_path, ship_owned, ship_reclaimed)
 
 
 # The skills behind /ship and /steward (host ClaudeShip.skills), and where
 # Bromure records the skillOverrides entries it wrote itself: skill -> the
-# user's value it replaced (None when there was none), plus a version key.
-# Written at every start, empty or not: its absence means no build that keeps
-# it has run in this home yet. Host ClaudeShip.ownedOverridesFile, the same
+# user's value it replaced (None when there was none), a version key, and the
+# user's re-enable once applied. Host ClaudeShip.ownedOverridesFile, the same
 # file.
 _SHIP_SKILLS = ("ship-local", "steward")
 _SHIP_OWNED_FILE = "bromure-skill-overrides.json"
+_SHIP_RECLAIMED_KEY = "_reclaimed"
 
 
-def _ship_skill_overrides(existing, allowed, owned, legacy_off=False):
+def _ship_skill_overrides(existing, allowed, owned, reclaim=False):
     """skillOverrides for the workspace's /ship switch, and the entries
     Bromure owns afterwards (host ClaudeShip.skillOverrides). Off: both
     skills "off", each value replaced remembered. On: only the "off" entries
@@ -8057,12 +8062,13 @@ def _ship_skill_overrides(existing, allowed, owned, legacy_off=False):
     "off" included, is never taken back (CWE-693): turning the switch on must
     not re-enable a skill the user turned off.
 
-    legacy_off: the home has no record yet and the workspace was off under a
-    build that kept none (spec claudeShipLegacyOff): its "off" entries are
-    that build's, so they're Bromure's to take back."""
+    reclaim: the user asked, with the switch on, to turn both skills back on
+    in a workspace an earlier build switched off without keeping a record.
+    Its "off" entries can't be told from the user's own, so only that
+    explicit answer removes them, never an inference (CWE-693)."""
     o = dict(existing) if isinstance(existing, dict) else {}
     owned = dict(owned)
-    if legacy_off:
+    if reclaim and allowed:
         for skill in _SHIP_SKILLS:
             if skill not in owned and o.get(skill) == "off":
                 owned[skill] = None
@@ -8084,20 +8090,24 @@ def _ship_skill_overrides(existing, allowed, owned, legacy_off=False):
     return o, mine
 
 
-def _read_ship_owned(path):
+def _read_ship_record(path):
     try:
         with open(path) as f:
             obj = json.load(f)
     except (OSError, ValueError):
         return {}
-    if not isinstance(obj, dict):
-        return {}
-    return {k: v for k, v in obj.items() if k in _SHIP_SKILLS}
+    return obj if isinstance(obj, dict) else {}
 
 
-def _write_ship_owned(path, owned):
+def _read_ship_owned(path):
+    return {k: v for k, v in _read_ship_record(path).items() if k in _SHIP_SKILLS}
+
+
+def _write_ship_owned(path, owned, reclaimed=None):
     record = dict(owned)
     record["_version"] = 1
+    if reclaimed:
+        record[_SHIP_RECLAIMED_KEY] = reclaimed
     tmp = path + ".bromure-seed-tmp"
     with open(tmp, "w") as f:
         json.dump(record, f, indent=2, sort_keys=True)

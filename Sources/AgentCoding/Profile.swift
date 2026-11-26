@@ -2005,10 +2005,15 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var claudeShipDisabled = false
     /// The switch was off under a build that kept no record of the
     /// `skillOverrides` entries it wrote, so this workspace's home may hold
-    /// that build's "off" entries, which ClaudeShip can't tell from the
-    /// user's own. Known from a profile saved without this key while off;
-    /// consulted only where the home has no record yet (ClaudeShip.legacyOff).
+    /// that build's "off" entries, which can't be told from the user's own.
+    /// Known from a profile saved without this key while off. Only asks: the
+    /// editor offers, when the switch goes back on, to remove them
+    /// (`claudeShipReclaimToken`); cleared once the user answers.
     public var claudeShipLegacyOff = false
+    /// The user's answer to that offer: remove the "off" entries for /ship
+    /// and /steward, once. A fresh token per answer; the home records the one
+    /// it applied, so a later "off" of the user's is never taken back.
+    public var claudeShipReclaimToken: String?
 
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
@@ -2592,6 +2597,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case squelch
         case claudeShipDisabled
         case claudeShipLegacyOff
+        case claudeShipReclaimToken
         case digitalOceanToken
         case linearToken
         case twilioCredential
@@ -2739,6 +2745,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // Saved off by a build before the record: that build wrote the "off"
         // entries. A later build always saves the key while off.
         claudeShipLegacyOff = try c.decodeIfPresent(Bool.self, forKey: .claudeShipLegacyOff) ?? claudeShipDisabled
+        claudeShipReclaimToken = try c.decodeIfPresent(String.self, forKey: .claudeShipReclaimToken)
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
@@ -2940,6 +2947,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if squelch != SquelchPolicy() { try c.encode(squelch, forKey: .squelch) }
         if claudeShipDisabled { try c.encode(true, forKey: .claudeShipDisabled) }
         if claudeShipDisabled || claudeShipLegacyOff { try c.encode(claudeShipLegacyOff, forKey: .claudeShipLegacyOff) }
+        try c.encodeIfPresent(claudeShipReclaimToken, forKey: .claudeShipReclaimToken)
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
@@ -5602,11 +5610,14 @@ public final class ProfileStore {
             // /ship and /steward: off when the workspace says so, the user's
             // other skill overrides kept, and a skill the user turned off left
             // off (bromure-agentd's twin does the same).
+            // The user's re-enable (see claudeShipReclaimToken), once.
+            let applied = ClaudeShip.reclaimed(in: claudeDir)
+            let reclaim = profile.claudeShipDisabled ? nil
+                : profile.claudeShipReclaimToken.flatMap { $0 == applied ? nil : $0 }
             let ship = ClaudeShip.skillOverrides(settings["skillOverrides"],
                                                  allowed: !profile.claudeShipDisabled,
                                                  owned: ClaudeShip.readOwnedOverrides(in: claudeDir),
-                                                 legacyOff: profile.claudeShipLegacyOff
-                                                     && !ClaudeShip.hasOwnedRecord(in: claudeDir))
+                                                 reclaim: reclaim != nil)
             if let o = ship.overrides {
                 settings["skillOverrides"] = o
             } else {
@@ -5672,7 +5683,7 @@ public final class ProfileStore {
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
                                   ofItemAtPath: claudeSettingsURL.path)
             // Recorded once settings.json holds what it describes.
-            ClaudeShip.writeOwnedOverrides(ship.owned, in: claudeDir)
+            ClaudeShip.writeOwnedOverrides(ship.owned, reclaimed: reclaim ?? applied, in: claudeDir)
 
             // Pre-approve the session's ANTHROPIC_API_KEY in ~/.claude.json
             // (customApiKeyResponses stores the key's last-20 suffix) so the
@@ -6464,7 +6475,9 @@ public final class ProfileStore {
         spec["autoModeEnvironment"] = ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText)
         // /ship and /steward allowed (skillOverrides; see ClaudeShip).
         spec["claudeShip"] = !profile.claudeShipDisabled
-        if profile.claudeShipLegacyOff { spec["claudeShipLegacyOff"] = true }
+        if !profile.claudeShipDisabled, let token = profile.claudeShipReclaimToken {
+            spec["claudeShipReclaim"] = token
+        }
         if profile.bedrockEnabled {
             var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
             if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }
