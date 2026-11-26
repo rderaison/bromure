@@ -40,6 +40,7 @@
 		B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */; };
 		0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4859F57204F5FFC9440A246F /* BulkLanePriority.swift */; };
 		C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */; };
+		6FFFBBDD8BEDB3BDE1836E76 /* ClaudeShip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */; };
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
 		269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */; };
@@ -203,6 +204,7 @@
 		D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BranchMergeCommands.swift"; path = "Sources/BromureRemote/_shared/BranchMergeCommands.swift"; sourceTree = "<group>"; };
 		4859F57204F5FFC9440A246F /* BulkLanePriority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BulkLanePriority.swift"; path = "Sources/BromureRemote/_shared/BulkLanePriority.swift"; sourceTree = "<group>"; };
 		000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeAutoMode.swift"; path = "Sources/BromureRemote/_shared/ClaudeAutoMode.swift"; sourceTree = "<group>"; };
+		6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeShip.swift"; path = "Sources/BromureRemote/_shared/ClaudeShip.swift"; sourceTree = "<group>"; };
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
 		395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTasks.swift"; path = "Sources/BromureRemote/_shared/CodingTasks.swift"; sourceTree = "<group>"; };
@@ -390,6 +392,7 @@
 				D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */,
 				4859F57204F5FFC9440A246F /* BulkLanePriority.swift */,
 				000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */,
+				6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */,
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
 				395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */,
@@ -631,6 +634,7 @@
 				B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */,
 				0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */,
 				C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */,
+				6FFFBBDD8BEDB3BDE1836E76 /* ClaudeShip.swift in Sources */,
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
 				269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */,
