@@ -199,6 +199,38 @@ struct ControlPlaneClient {
     let endpoint: ControlPlaneEndpoint
     let session: URLSession
 
+    /// Sent on every control-plane request and the device-channel upgrade:
+    /// how bromure.io learns which release a server runs (the admin app's
+    /// Connect button needs 5.6.0+). `bromure-ac/5.6.0 (macOS 26.1)` — always
+    /// a three-part version (bromure.io's parser requires one; URLSession's
+    /// default agent carries the build number instead). Bromure Sidecar
+    /// compiles this file too (AGENT_HOST) and says `bromure-sidecar/…`; the
+    /// iPhone/iPad/Vision clients say `bromure-remote/…`: they serve nothing.
+    /// Display only on the other side — never an authorization input.
+    static let userAgent: String = {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        let version = userAgentVersion(raw)
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let os = "\(v.majorVersion).\(v.minorVersion)"
+        #if AGENT_HOST
+        return "bromure-sidecar/\(version) (macOS \(os))"
+        #elseif os(macOS)
+        return "bromure-ac/\(version) (macOS \(os))"
+        #elseif os(Linux)
+        return "bromure-ac/\(version) (linux \(os))"   // the Linux server (its version must be in Bundle.main)
+        #else
+        return "bromure-remote/\(version) (\(os))"
+        #endif
+    }()
+
+    /// "5.6" → "5.6.0", "5" → "5.0.0", "5.6.0.1" → "5.6.0"; non-numeric → "0.0.0".
+    static func userAgentVersion(_ raw: String) -> String {
+        let parts = raw.split(separator: ".").map { Int($0) }
+        guard !parts.isEmpty, parts.allSatisfy({ $0 != nil }) else { return "0.0.0" }
+        let n = parts.compactMap { $0 } + [0, 0, 0]
+        return "\(n[0]).\(n[1]).\(n[2])"
+    }
+
     init(endpoint: ControlPlaneEndpoint, session: URLSession = .shared) {
         self.endpoint = endpoint
         self.session = session
@@ -404,6 +436,7 @@ struct ControlPlaneClient {
             req.httpBody = body
         }
         if let bearer { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+        req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 20
         return req
     }
