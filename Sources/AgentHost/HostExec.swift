@@ -107,7 +107,9 @@ enum HostExec {
                     guard fd >= 0 else { return ["error": String(cString: strerror(errno)), "exit_code": 1] }
                     let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                     defer { try? h.close() }
-                    _ = fchmod(fd, 0o600)
+                    guard fchmod(fd, 0o600) == 0 else {
+                        return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                    }
                     try h.write(contentsOf: data)
                 } else if spec["append"] as? Bool == true, let h = FileHandle(forWritingAtPath: path) {
                     defer { try? h.close() }
