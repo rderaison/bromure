@@ -193,6 +193,7 @@ struct BACEnrollmentStatusView: View {
     @State private var health: BACEnrollmentHealth = BACEnrollmentStore.loadHealth()
     @State private var renewing = false
     @State private var loggingOut = false
+    @State private var logOutError: String?
     @State private var renewError: String?
     /// Called after the user logs out (account sign-out and/or unenroll) so the
     /// host can swap this window's content back to the login sheet.
@@ -219,8 +220,8 @@ struct BACEnrollmentStatusView: View {
                     }
                 }
                 if health != .ok { healthBanner }
-                if let renewError {
-                    Text(renewError).font(.callout).foregroundStyle(.red)
+                if let msg = logOutError ?? renewError {
+                    Text(msg).font(.callout).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
@@ -325,18 +326,23 @@ struct BACEnrollmentStatusView: View {
     /// Fully log out of bromure.io: revoke this device server-side (needs a
     /// still-valid bearer, and it drops the device's SSH key), unenroll the
     /// device if it was enrolled for streaming, then forget the account
-    /// identity. Then hand back to the host to reset the window.
+    /// identity. Then hand back to the host to reset the window. Nothing is
+    /// erased unless bromure.io confirmed the revoke: on failure the user
+    /// stays logged in, with the error shown, and can try again.
     private func logOut() {
         loggingOut = true
+        logOutError = nil
         Task { @MainActor in
             defer { loggingOut = false }
-            if let (client, bearer) = ControlPlaneClient.current() {
-                try? await client.selfRevoke(bearer: bearer)
+            let done = await account.signOutRevoking(beforeErase: {
+                if BACEnrollmentStore.load() != nil {
+                    await BACEnrollment.shared.unenroll()
+                }
+            })
+            guard done else {
+                logOutError = account.error ?? "Couldn’t sign out of bromure.io. Try again."
+                return
             }
-            if BACEnrollmentStore.load() != nil {
-                await BACEnrollment.shared.unenroll()
-            }
-            account.signOut()
             install = nil
             onUnenroll()
         }

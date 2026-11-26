@@ -195,6 +195,56 @@ final class P2PEnrollmentCoordinator {
     /// Forget a browser-enrolled identity locally (server-side revoke is an
     /// admin action). No-op for the enterprise enrollment — that's owned by the
     /// managed-enrollment lifecycle, not this window.
+    /// The user's sign-out: retire this device on bromure.io (which revokes
+    /// its token and drops its SSH key from the user's servers), and only once
+    /// bromure.io confirmed it, forget the identity locally. Erasing it first
+    /// would leave the token live on bromure.io with nothing left to retry the
+    /// revoke with (CWE-613). On failure the identity is kept, `error` says
+    /// why, and the user can try again. Returns whether it signed out.
+    /// `beforeErase` runs once the revoke is done, before the identity is
+    /// forgotten (the log-out panel unenrolls there, so the identity doesn't
+    /// fall back to that enrollment's).
+    @discardableResult
+    func signOutRevoking(beforeErase: (() async -> Void)? = nil) async -> Bool {
+        guard !isEnterprise, !busy else { return false }
+        if let (client, bearer) = ControlPlaneClient.current() {
+            busy = true; error = nil
+            let failure = await Self.revokeForSignOut { try await client.selfRevoke(bearer: bearer) }
+            busy = false
+            if let failure {
+                error = failure
+                return false
+            }
+        }
+        await beforeErase?()
+        signOut()
+        return true
+    }
+
+    /// Run a sign-out revoke. nil when it's done: bromure.io confirmed it, or
+    /// answered 401 (the credential is already revoked or dead, so there is
+    /// nothing left to revoke). Otherwise the message to show.
+    nonisolated static func revokeForSignOut(_ revoke: () async throws -> Void) async -> String? {
+        do {
+            try await revoke()
+            return nil
+        } catch ControlPlaneError.http(status: 401, _) {
+            return nil
+        } catch {
+            let why: String
+            switch error as? ControlPlaneError {
+            case .transport(let m)?: why = m
+            case .http(let status, _)?: why = "HTTP \(status)"
+            case .decode?: why = "unexpected response"
+            default: why = error.localizedDescription
+            }
+            return "Couldn’t sign out of bromure.io (\(why)). This device is still registered there — check your connection and try again."
+        }
+    }
+
+    /// Forget the identity locally. The user's sign-out goes through
+    /// `signOutRevoking()`; this alone is for an identity bromure.io already
+    /// revoked.
     func signOut() {
         guard !isEnterprise else { return }
         DeviceIdentityStore.erase()
