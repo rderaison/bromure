@@ -7970,7 +7970,9 @@ def _seed_claude_settings():
     if isinstance(spec.get("claudeShip"), bool):
         overrides, ship_owned = _ship_skill_overrides(
             settings.get("skillOverrides"), spec["claudeShip"],
-            _read_ship_owned(owned_path))
+            _read_ship_owned(owned_path),
+            legacy_off=spec.get("claudeShipLegacyOff") is True
+            and not os.path.exists(owned_path))
         if overrides:
             settings["skillOverrides"] = overrides
         else:
@@ -8021,20 +8023,31 @@ def _seed_claude_settings():
 
 # The skills behind /ship and /steward (host ClaudeShip.skills), and where
 # Bromure records the skillOverrides entries it wrote itself: skill -> the
-# user's value it replaced (None when there was none). Host
-# ClaudeShip.ownedOverridesFile, the same file.
+# user's value it replaced (None when there was none), plus a version key.
+# Written at every start, empty or not: its absence means no build that keeps
+# it has run in this home yet. Host ClaudeShip.ownedOverridesFile, the same
+# file.
 _SHIP_SKILLS = ("ship-local", "steward")
 _SHIP_OWNED_FILE = "bromure-skill-overrides.json"
 
 
-def _ship_skill_overrides(existing, allowed, owned):
+def _ship_skill_overrides(existing, allowed, owned, legacy_off=False):
     """skillOverrides for the workspace's /ship switch, and the entries
     Bromure owns afterwards (host ClaudeShip.skillOverrides). Off: both
     skills "off", each value replaced remembered. On: only the "off" entries
     Bromure wrote go, the user's earlier value put back. A user's own entry,
     "off" included, is never taken back (CWE-693): turning the switch on must
-    not re-enable a skill the user turned off."""
+    not re-enable a skill the user turned off.
+
+    legacy_off: the home has no record yet and the workspace was off under a
+    build that kept none (spec claudeShipLegacyOff): its "off" entries are
+    that build's, so they're Bromure's to take back."""
     o = dict(existing) if isinstance(existing, dict) else {}
+    owned = dict(owned)
+    if legacy_off:
+        for skill in _SHIP_SKILLS:
+            if skill not in owned and o.get(skill) == "off":
+                owned[skill] = None
     mine = {}
     for skill in _SHIP_SKILLS:
         ours = skill in owned and o.get(skill) == "off"
@@ -8065,15 +8078,11 @@ def _read_ship_owned(path):
 
 
 def _write_ship_owned(path, owned):
-    if not owned:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        return
+    record = dict(owned)
+    record["_version"] = 1
     tmp = path + ".bromure-seed-tmp"
     with open(tmp, "w") as f:
-        json.dump(owned, f, indent=2, sort_keys=True)
+        json.dump(record, f, indent=2, sort_keys=True)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 

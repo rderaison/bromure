@@ -114,8 +114,10 @@ enum ClaudeShip {
     /// Where Bromure records the `skillOverrides` entries it wrote itself,
     /// next to `settings.json` in `~/.claude` (bromure-agentd's twin uses the
     /// same file): skill name → the user's value it replaced (`NSNull` when
-    /// there was none).
+    /// there was none), plus `ownedVersionKey`. Written at every start, empty
+    /// or not, so its absence means no build that keeps it has run there yet.
     static let ownedOverridesFile = "bromure-skill-overrides.json"
+    static let ownedVersionKey = "_version"
 
     /// `skillOverrides` for the workspace switch, and the entries Bromure
     /// owns afterwards. Off (`allowed` false): both skills "off", each value
@@ -124,9 +126,17 @@ enum ClaudeShip {
     /// is never taken back (CWE-693): turning the switch on must not re-enable
     /// a skill the user turned off. An entry the user changed since Bromure
     /// wrote it is theirs again. Overrides nil when nothing is left.
-    static func skillOverrides(_ existing: Any?, allowed: Bool,
-                               owned: [String: Any]) -> (overrides: [String: Any]?, owned: [String: Any]) {
+    ///
+    /// `legacyOff`: the home has no record yet and the workspace was off under
+    /// a build that kept none (`Profile.claudeShipLegacyOff`): its "off"
+    /// entries are that build's, so they're Bromure's to take back.
+    static func skillOverrides(_ existing: Any?, allowed: Bool, owned: [String: Any],
+                               legacyOff: Bool = false) -> (overrides: [String: Any]?, owned: [String: Any]) {
         var o = existing as? [String: Any] ?? [:]
+        var owned = owned
+        if legacyOff {
+            for s in skills where owned[s] == nil && o[s] as? String == "off" { owned[s] = NSNull() }
+        }
         var mine: [String: Any] = [:]
         for s in skills {
             let ours = owned[s] != nil && o[s] as? String == "off"
@@ -143,6 +153,11 @@ enum ClaudeShip {
         return (o.isEmpty ? nil : o, mine)
     }
 
+    /// Whether a build that keeps the record has written it in `dir`.
+    static func hasOwnedRecord(in dir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: dir.appendingPathComponent(ownedOverridesFile).path)
+    }
+
     /// The entries Bromure owns, read from `ownedOverridesFile` in `dir`.
     static func readOwnedOverrides(in dir: URL) -> [String: Any] {
         guard let d = try? Data(contentsOf: dir.appendingPathComponent(ownedOverridesFile)),
@@ -150,12 +165,13 @@ enum ClaudeShip {
         return o.filter { skills.contains($0.key) }
     }
 
-    /// Record the entries Bromure owns in `dir` (the file removed when none).
+    /// Record the entries Bromure owns in `dir` (an empty record too).
     static func writeOwnedOverrides(_ owned: [String: Any], in dir: URL) {
         let url = dir.appendingPathComponent(ownedOverridesFile)
-        guard !owned.isEmpty,
-              let d = try? JSONSerialization.data(withJSONObject: owned, options: [.prettyPrinted, .sortedKeys])
-        else { try? FileManager.default.removeItem(at: url); return }
+        var record = owned
+        record[ownedVersionKey] = 1
+        guard let d = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        else { return }
         try? d.write(to: url, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
     }

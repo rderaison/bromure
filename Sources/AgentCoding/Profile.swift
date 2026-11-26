@@ -2003,6 +2003,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// (hidden through `skillOverrides`): no commit, push or pull request
     /// from them, and no watch. Default: allowed (ClaudeShip).
     public var claudeShipDisabled = false
+    /// The switch was off under a build that kept no record of the
+    /// `skillOverrides` entries it wrote, so this workspace's home may hold
+    /// that build's "off" entries, which ClaudeShip can't tell from the
+    /// user's own. Known from a profile saved without this key while off;
+    /// consulted only where the home has no record yet (ClaudeShip.legacyOff).
+    public var claudeShipLegacyOff = false
 
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
@@ -2585,6 +2591,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case pii
         case squelch
         case claudeShipDisabled
+        case claudeShipLegacyOff
         case digitalOceanToken
         case linearToken
         case twilioCredential
@@ -2729,6 +2736,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         pii = try c.decodeIfPresent(PIIPolicy.self, forKey: .pii) ?? PIIPolicy()
         squelch = try c.decodeIfPresent(SquelchPolicy.self, forKey: .squelch) ?? SquelchPolicy()
         claudeShipDisabled = try c.decodeIfPresent(Bool.self, forKey: .claudeShipDisabled) ?? false
+        // Saved off by a build before the record: that build wrote the "off"
+        // entries. A later build always saves the key while off.
+        claudeShipLegacyOff = try c.decodeIfPresent(Bool.self, forKey: .claudeShipLegacyOff) ?? claudeShipDisabled
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
@@ -2929,6 +2939,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if pii != PIIPolicy() { try c.encode(pii, forKey: .pii) }
         if squelch != SquelchPolicy() { try c.encode(squelch, forKey: .squelch) }
         if claudeShipDisabled { try c.encode(true, forKey: .claudeShipDisabled) }
+        if claudeShipDisabled || claudeShipLegacyOff { try c.encode(claudeShipLegacyOff, forKey: .claudeShipLegacyOff) }
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
@@ -5593,7 +5604,9 @@ public final class ProfileStore {
             // off (bromure-agentd's twin does the same).
             let ship = ClaudeShip.skillOverrides(settings["skillOverrides"],
                                                  allowed: !profile.claudeShipDisabled,
-                                                 owned: ClaudeShip.readOwnedOverrides(in: claudeDir))
+                                                 owned: ClaudeShip.readOwnedOverrides(in: claudeDir),
+                                                 legacyOff: profile.claudeShipLegacyOff
+                                                     && !ClaudeShip.hasOwnedRecord(in: claudeDir))
             if let o = ship.overrides {
                 settings["skillOverrides"] = o
             } else {
@@ -6451,6 +6464,7 @@ public final class ProfileStore {
         spec["autoModeEnvironment"] = ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText)
         // /ship and /steward allowed (skillOverrides; see ClaudeShip).
         spec["claudeShip"] = !profile.claudeShipDisabled
+        if profile.claudeShipLegacyOff { spec["claudeShipLegacyOff"] = true }
         if profile.bedrockEnabled {
             var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
             if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }

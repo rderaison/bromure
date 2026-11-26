@@ -109,8 +109,112 @@ struct ClaudeShipTests {
         try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
         #expect(overrides()["ship-local"] as? String == "off")
         #expect(overrides()["steward"] == nil)
-        #expect(!FileManager.default.fileExists(
-            atPath: claudeDir.appendingPathComponent(ClaudeShip.ownedOverridesFile).path))
+        // The record stays, empty: a build that keeps it has run here.
+        #expect(ClaudeShip.hasOwnedRecord(in: claudeDir))
+        #expect(ClaudeShip.readOwnedOverrides(in: claudeDir).isEmpty)
+    }
+
+    // Regression: a build before the record wrote "off" for both skills with
+    // no record of it; after the upgrade those entries looked like the
+    // user's, so turning the switch on left /ship and /steward off for good.
+    @Test("An upgraded workspace that was off gets /ship back when the switch goes on")
+    func legacyOff() throws {
+        let legacy: [String: Any] = ["ship-local": "off", "steward": "off", "my-skill": "off"]
+        let on = ClaudeShip.skillOverrides(legacy, allowed: true, owned: [:], legacyOff: true)
+        #expect(on.overrides?["ship-local"] == nil && on.overrides?["steward"] == nil)
+        #expect(on.overrides?["my-skill"] as? String == "off")
+        // Left off for a start first: claimed, then taken back on.
+        let off = ClaudeShip.skillOverrides(legacy, allowed: false, owned: [:], legacyOff: true)
+        #expect(off.owned["ship-local"] is NSNull && off.owned["steward"] is NSNull)
+        let back = ClaudeShip.skillOverrides(off.overrides, allowed: true, owned: off.owned)
+        #expect(back.overrides?["ship-local"] == nil && back.overrides?["steward"] == nil)
+        // Without the legacy state they're the user's (CWE-693), as before.
+        #expect(ClaudeShip.skillOverrides(legacy, allowed: true, owned: [:]).overrides?["steward"] as? String == "off")
+    }
+
+    @Test("The profile knows the switch was off before the record existed")
+    func legacyProfile() throws {
+        let base = try JSONEncoder().encode(Profile(name: "ws", tool: .claude, authMode: .token))
+        func decode(_ patch: [String: Any]) throws -> Profile {
+            var o = try #require(try JSONSerialization.jsonObject(with: base) as? [String: Any])
+            for (k, v) in patch { o[k] = v }
+            return try JSONDecoder().decode(Profile.self, from: JSONSerialization.data(withJSONObject: o))
+        }
+        // Saved off by the earlier build (no key): legacy.
+        var p = try decode(["claudeShipDisabled": true])
+        #expect(p.claudeShipLegacyOff)
+        // Switched on and saved: still known.
+        p.claudeShipDisabled = false
+        #expect(try JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(p)).claudeShipLegacyOff)
+        // Off in a build that keeps the record: not legacy, and saved so.
+        var fresh = Profile(name: "ws", tool: .claude, authMode: .token)
+        fresh.claudeShipDisabled = true
+        #expect(try !JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(fresh)).claudeShipLegacyOff)
+        #expect(try !decode([:]).claudeShipLegacyOff)
+    }
+
+    @Test("The host's settings writer takes back the earlier build's \"off\" once, then keeps the user's")
+    func hostWriterLegacy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("shiplegacy-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.claudeShipLegacyOff = true
+        let claudeDir = store.homeDirectory(for: p).appendingPathComponent(".claude")
+        let settingsURL = claudeDir.appendingPathComponent("settings.json")
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        try #"{"skillOverrides": {"ship-local": "off", "steward": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        func overrides() -> [String: Any] {
+            guard let d = try? Data(contentsOf: settingsURL),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+            return o["skillOverrides"] as? [String: Any] ?? [:]
+        }
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        #expect(overrides()["ship-local"] == nil && overrides()["steward"] == nil)
+        #expect(ClaudeShip.hasOwnedRecord(in: claudeDir))
+        // The record exists now: a later "off" of the user's is theirs.
+        try #"{"skillOverrides": {"steward": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        try store.prepareHomeDirectory(for: p, terminalDefaults: .fallback)
+        #expect(overrides()["steward"] as? String == "off")
+    }
+
+    @Test("bromure-agentd's twin takes back the earlier build's \"off\" too",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func guestWriterLegacy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("shiplegacy-g-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let guestHome = root.appendingPathComponent("guest-home"), seedIn = root.appendingPathComponent("guest-seed")
+        let settingsURL = guestHome.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: guestHome.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: seedIn, withIntermediateDirectories: true)
+        try #"{"usesClaude": true, "claudeShip": true, "claudeShipLegacyOff": true}"#
+            .write(to: seedIn.appendingPathComponent("claude-settings.spec.json"), atomically: true, encoding: .utf8)
+        func seed() throws -> [String: Any] {
+            let py = Process()
+            py.executableURL = URL(fileURLWithPath: Self.python)
+            py.arguments = ["-I", "-c", """
+                import importlib.util, sys, os
+                s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+                m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+                m.SEED_DIR = sys.argv[2]; m.HOME_MOUNT = sys.argv[3]; m.HOME = sys.argv[3]
+                m._approve_claude_api_key = lambda *a: None; m._preonboard_claude = lambda *a: None
+                m.log = lambda *a: None
+                os.chown = lambda *a, **k: None
+                m._seed_claude_settings()
+                """, Self.repo.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py").path,
+                seedIn.path, guestHome.path]
+            py.standardError = FileHandle.nullDevice
+            try py.run(); py.waitUntilExit()
+            guard let d = try? Data(contentsOf: settingsURL),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+            return o["skillOverrides"] as? [String: Any] ?? [:]
+        }
+        try #"{"skillOverrides": {"ship-local": "off", "steward": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        var o = try seed()
+        #expect(o["ship-local"] == nil && o["steward"] == nil)
+        try #"{"skillOverrides": {"steward": "off"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        o = try seed()
+        #expect(o["steward"] as? String == "off")
     }
 
     @Test("bromure-agentd's twin leaves a user's own \"off\" alone too",
