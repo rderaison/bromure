@@ -13,6 +13,7 @@ import { type Run, automationsOf, runsOf, classify, liveRunTab, outcomeGlyph, ou
 import { MiniSpinner, confirm } from './kanban';
 import { Markdown } from './Markdown';
 import { requestResending } from './resend';
+import { isArchived, isDeleted, isSwitchboard } from '../sidebar/model';
 
 // ── Vocabulary (RepoFinding.Severity / .Status) ──────────────────────────
 
@@ -79,6 +80,28 @@ function HubCard({ title, trailing, children }: { title?: string; trailing?: Rea
   );
 }
 
+/** Every session a finding can go to — PeerMention.candidates over the
+ *  non-Switchboard sessions: not deleted, archived or with its folder gone.
+ *  All of them (the menu scrolls), sorted and labelled as
+ *  SwitchboardRouteItems does:
+ *  "@nick — title · workspace", or the title for one with no nickname. */
+export function sessionChoices(st: RemoteState): { id: string; label: string; short: string }[] {
+  const ws = (id: string) => (st.workspaces ?? []).find(w => w.id === id)?.name ?? '';
+  return (st.agentSessions ?? [])
+    .filter(s => !isSwitchboard(s) && !isDeleted(s) && !isArchived(s) && (s as any).folderMissing !== true)
+    // PeerMention.byName: by the name shown (nickname, else title) in
+    // Finder's order ("agent-2" before "agent-10", case aside), then workspace.
+    .map(s => ({ s, name: s.nickname || s.title, place: ws(s.profileID) }))
+    .sort((a, b) => byName.compare(a.name, b.name) || byName.compare(a.place, b.place))
+    .map(({ s, place }) => {
+      const at = place ? ' · ' + place : '';
+      return s.nickname
+        ? { id: s.id, label: `@${s.nickname} — ${s.title}${at}`, short: '@' + s.nickname }
+        : { id: s.id, label: s.title + at, short: `“${s.title}”` };
+    });
+}
+const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
 /** Hands a finding over to an agent (fix / Switchboard / a session), with
  *  the flagged-text confirmation — the hub's `fix` / `routeToSwitchboard` /
  *  `askSession` actions. */
@@ -115,10 +138,10 @@ export function useFindingActions(host: RemoteHost, st: RemoteState, showFlash: 
   const routeItems = (x: any): MenuItem[] => {
     const items: MenuItem[] = [{ label: 'Ask the Switchboard Who Should Fix It', icon: 'person.2.wave.2', action: () => route(x.id) }];
     for (const r of st.agentRooms ?? []) items.push({ label: `Ask #${r.name}'s Switchboard`, icon: 'square.grid.2x2', action: () => route(x.id, r.id) });
-    const sessions = (st.agentSessions ?? []).filter(s => !s.archivedAt && (s as any).role !== 'switchboard').slice(0, 20);
+    const sessions = sessionChoices(st);
     if (sessions.length) {
       items.push({ separator: true }, { header: 'Ask a session to fix it' });
-      for (const s of sessions) { const label = s.nickname ? '@' + s.nickname : `“${s.title}”`; items.push({ label, action: () => ask(x.id, { id: s.id, label }) }); }
+      for (const c of sessions) items.push({ label: c.label, action: () => ask(x.id, { id: c.id, label: c.short }) });
     }
     return items;
   };
