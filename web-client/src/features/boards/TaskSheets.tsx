@@ -9,27 +9,15 @@ import type { RemoteState } from '../../core/remote/types';
 import { SF } from '../../ui/icons';
 import { Button, Checkbox, Popover, Segmented, Sheet, Spinner, cx, useMenu, type MenuItem } from '../../ui/kit';
 import { isMod } from '../../platform';
-import { type CodingTask, type Assignment, assignmentIcon, toolName, NEW_AGENT, SWITCHBOARD, workspaceOf, isDemo } from './model';
+import { type CodingTask, type Assignment, assignmentIcon, toolName, NEW_AGENT, SWITCHBOARD, type Choices } from './model';
 import { Markdown } from './Markdown';
 import { TaskDate } from './TaskBoard';
 import { PrimaryButton } from './kanban';
 
-export interface Choices {
-  sessions: { id: string; label: string; workspace: string; busy: boolean; profileID?: string }[];
-  rooms: { id: string; name: string }[];
-}
+// The assignee list lives with the board's model (pure, and tested there).
+export type { Choices } from './model';
+export { assigneeChoices } from './model';
 
-export function assigneeChoices(st: RemoteState): Choices {
-  const byName = (a: string, b: string) => a.replace(/^@/, '').localeCompare(b.replace(/^@/, ''), undefined, { numeric: true, sensitivity: 'base' });
-  const sessions = (st.agentSessions ?? [])
-    .filter(s => !s.archivedAt && !(s as any).deletedAt && (s as any).role !== 'switchboard')
-    .slice(0, 40)
-    .map(s => ({ id: s.id, label: s.nickname ? '@' + s.nickname : s.title, workspace: workspaceOf(st, s.profileID)?.name ?? '', busy: false, profileID: s.profileID }))
-    .sort((a, b) => byName(a.label, b.label) || a.workspace.localeCompare(b.workspace));
-  const rooms = (st.agentRooms ?? []).filter(r => !(r as any).archivedAt).map(r => ({ id: r.id, name: r.name })).sort((a, b) => byName(a.name, b.name));
-  void isDemo;
-  return { sessions, rooms };
-}
 
 /** A title from the first words of a description (AgentSession.title(fromMessage:)). */
 function titleFrom(details: string) {

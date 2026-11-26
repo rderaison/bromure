@@ -45,10 +45,11 @@ final class TaskDispatcher {
         guard let delegate else { return TaskAssigneeChoices() }
         let model = delegate.unifiedWindow?.listModel
         // This host's sessions and its native machines' (Bromure Sidecar).
+        // Every one: a list cut to the most recent left the rest unassignable
+        // (not even found by typing their name).
         let sessions = delegate.allSessionRecords
             .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
             .sorted { SessionHome.lastActivity($0) > SessionHome.lastActivity($1) }
-            .prefix(40)
             .map { s -> TaskAssigneeChoices.Session in
                 let bucket = model.map { SessionHome.bucket(for: s, in: $0) }
                 return .init(id: s.id, label: delegate.delegationEngine.label(s),
