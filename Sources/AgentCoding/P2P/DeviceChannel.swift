@@ -147,6 +147,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     private func openSocket() {
         var req = URLRequest(url: endpoint.deviceChannelURL)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(ControlPlaneClient.userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 30
         let t = session.webSocketTask(with: req)
         lock.lock(); task = t; lock.unlock()
