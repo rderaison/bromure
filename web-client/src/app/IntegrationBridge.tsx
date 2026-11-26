@@ -11,6 +11,7 @@ import { showSheet, showAlert, RoomNameSheet } from '../features/sidebar/Dialogs
 import { NewBranchSheet } from '../features/stage/Sheets';
 import { Button, PopUp, TextField } from '../ui/kit';
 import { seg } from '../core/remote/host';
+import { hasBrowser, toggleBrowser } from '../features/browser/browserWindow';
 
 const TOOLS = ['claude', 'codex', 'kimi', 'grok', 'omp', 'hermes'];
 /** AgentSession.worktreeSlug: diacritics folded, ASCII alnum, dash runs, ≤40. */
@@ -99,13 +100,8 @@ export function IntegrationBridge() {
           break;
         }
         case 'toggle-browser':
-          showAlert('The browser pane isn\'t available here',
-            'On a Mac, Bromure runs a local browser VM next to the remote session. A browser or Linux/Windows client can\'t host one — open the address in your own browser instead.',
-            [{ label: 'OK', value: 'ok', default: true }]);
-          break;
-        case 'remote-access':
-          showAlert('Remote Access', 'Remote Access is configured on the Mac that runs this server (Bromure › Remote Access…), or with `bromure-ac remote` there.',
-            [{ label: 'OK', value: 'ok', default: true }]);
+          // The desktop app's built-in browser; the hosted app has no globe.
+          if (hasBrowser) void toggleBrowser(ref.current.host);
           break;
       }
     };

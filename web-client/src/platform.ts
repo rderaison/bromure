@@ -27,6 +27,8 @@ export interface ElectronAPI extends ElectronNetBridge {
    *  Windows and in the hosted app): the remote's workspace subnet routed
    *  from this machine, each flow carried over the window's SSH. */
   tunnel?: TunnelBridge;
+  /** The built-in browser window (desktop app): see electron/browser.ts. */
+  browser?: BrowserBridge;
   /** Smoke-test hook, only in Electron screenshot runs (see preload.ts). */
   shotTest?: { host: string; port: number; user: string; password: string };
 }
@@ -51,6 +53,25 @@ export interface TunnelBridge {
   flowData(id: number, data: Uint8Array): void;
   onFlowPause(cb: (id: number, paused: boolean) => void): void;
   /** The local side finished sending (half-close) / the remote side did. */
+  onFlowEnd(cb: (id: number) => void): void;
+  flowEnd(id: number): void;
+  onFlowClose(cb: (id: number) => void): void;
+  flowClose(id: number): void;
+}
+
+/** Main process ⇄ renderer for the built-in browser: its SOCKS proxy hands
+ *  each connection into the workspace subnet over as a flow, exactly like
+ *  TunnelBridge's (open the SSH channel, answer `flowOpened`, then bytes). */
+export interface BrowserBridge {
+  /** Open (or focus) the browser window; close it if it's the focused one. */
+  toggle(subnet: string, title: string): Promise<{ ok: boolean; open?: boolean }>;
+  setSubnet(subnet: string): void;
+  onFlow(cb: (id: number, verb: string) => void): void;
+  flowOpened(id: number, ok: boolean, error?: string): void;
+  onFlowData(cb: (id: number, data: Uint8Array) => void): void;
+  flowAck(id: number, bytes: number): void;
+  flowData(id: number, data: Uint8Array): void;
+  onFlowPause(cb: (id: number, paused: boolean) => void): void;
   onFlowEnd(cb: (id: number) => void): void;
   flowEnd(id: number): void;
   onFlowClose(cb: (id: number) => void): void;

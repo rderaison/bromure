@@ -46,6 +46,22 @@ contextBridge.exposeInMainWorld('bromureElectron', {
     onFlowClose: (cb: any) => { ipcRenderer.on('tunnel:flow-close', (_e, id) => cb(id)); },
     flowClose: (id: number) => ipcRenderer.send('tunnel:flow-destroy', id),
   } : undefined,
+  // The built-in browser window (electron/browser.ts): its page reaches the
+  // workspace subnet through flows this renderer carries over SSH.
+  browser: {
+    toggle: (subnet: string, title: string) => ipcRenderer.invoke('browser:toggle', subnet, title),
+    setSubnet: (subnet: string) => ipcRenderer.send('browser:subnet', subnet),
+    onFlow: (cb: any) => { ipcRenderer.on('browser:flow', (_e, id, verb) => cb(id, verb)); },
+    flowOpened: (id: number, ok: boolean, error?: string) => ipcRenderer.send('browser:flow-opened', id, ok, error),
+    onFlowData: (cb: any) => { ipcRenderer.on('browser:flow-data', (_e, id, data) => cb(id, data)); },
+    flowAck: (id: number, n: number) => ipcRenderer.send('browser:flow-ack', id, n),
+    flowData: (id: number, data: Uint8Array) => ipcRenderer.send('browser:flow-recv', id, data),
+    onFlowPause: (cb: any) => { ipcRenderer.on('browser:flow-pause', (_e, id, p) => cb(id, p)); },
+    onFlowEnd: (cb: any) => { ipcRenderer.on('browser:flow-end', (_e, id) => cb(id)); },
+    flowEnd: (id: number) => ipcRenderer.send('browser:flow-eof', id),
+    onFlowClose: (cb: any) => { ipcRenderer.on('browser:flow-close', (_e, id) => cb(id)); },
+    flowClose: (id: number) => ipcRenderer.send('browser:flow-destroy', id),
+  },
   // Screenshot/smoke-test runs only (BROMURE_SHOT set): connect to this host
   // unattended — trust its key, answer one password prompt (e.g. a one-time
   // code), which enrolls this run's key. Never present in a normal launch.

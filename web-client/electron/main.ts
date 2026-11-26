@@ -11,6 +11,7 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { setupTunnel, stopTunnel } from './tunnel';
+import { setupBrowser, stopBrowser } from './browser';
 import { closeGracefully } from './sockClose';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
@@ -344,9 +345,10 @@ app.whenReady().then(() => {
   const argLink = process.argv.find(a => a.startsWith(SCHEME + '://'));
   if (argLink) pendingDeepLink = argLink;
   mainWindow = createWindow(process.env.BROMURE_HASH || '');
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => { mainWindow = null; stopBrowser(); });
 });
 // Linux network tunnel (electron/tunnel.ts): torn down with the app.
 if (PRIMARY && !SHOT) setupTunnel(() => mainWindow);
-app.on('will-quit', () => stopTunnel());
+if (PRIMARY) setupBrowser(() => mainWindow);
+app.on('will-quit', () => { stopTunnel(); stopBrowser(); });
 app.on('window-all-closed', () => app.quit());

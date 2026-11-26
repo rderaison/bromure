@@ -106,7 +106,7 @@ function ToolbarBar() {
     if (hostedSession) { setViewMode('chat'); select({ kind: 'session', sessionID: hostedSession.id }); }
   };
 
-  const globeHelp = `Show or hide the agentic browser (${ctrlCmd}B)`;
+  const globeHelp = `Open the browser — reaches this server's workspaces (${ctrlCmd}B)`;
   const filesHelp = `Show or hide the Files pane (${ctrlCmd}E)`;
   return (
     <div className="tb-bar">
@@ -114,11 +114,11 @@ function ToolbarBar() {
       {placeholder && <>
         <LinuxPill back={false} disabled onClick={() => {}} help="The Linux machine behind this session — available while it runs" />
         {restingRow && <MachineMenu name={restingRow.name} accentHex={restingRow.accentHex} profileID={restingRow.id} running={false} />}
-        <HeaderIcon system="globe" help={globeHelp} disabled onClick={() => {}} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} disabled onClick={() => {}} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
       {selection.kind === 'room' && <>
-        <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
       {entry && selection.kind !== 'new-session' && <>
@@ -128,7 +128,7 @@ function ToolbarBar() {
           : hostedSession && <LinuxPill back onClick={toggleLinux} />}
         <MachineMenu name={entry.name} accentHex={m.rows.find(r => r.id === entry.id)?.accentHex ?? entry.accentHex} profileID={entry.id}
                      running ip={entry.ip} />
-        <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
     </div>
