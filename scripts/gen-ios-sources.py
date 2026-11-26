@@ -88,6 +88,7 @@ SHARED = [
     "BACDebug.swift",
     "TerminalAppDefaults.swift",
     "FileExplorer.swift",
+    "FolderUpload.swift",  # write(): atomic temp + rename upload (tar half is macOS-only)
     "FileExplorerViews.swift",
     "AutomationKanbanView.swift",
     "CodingKanbanView.swift",

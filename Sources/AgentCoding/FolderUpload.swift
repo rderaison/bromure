@@ -12,6 +12,7 @@ enum FolderUpload {
     /// Raw bytes per write — the base64 stays under the guest's request cap.
     private static let chunkBytes = 6 * 1024 * 1024
 
+#if os(macOS)   // tar runs as a Process: the iOS/visionOS clients share only write()
     /// The contents of `src` into `guestDir` (created if need be). Returns
     /// how many entries the guest refused to unpack (links pointing outside
     /// the folder, devices…). `progress` gets a line to show while it runs.
@@ -80,6 +81,7 @@ enum FolderUpload {
             return out
         }.value
     }
+#endif
 
     /// One file onto `guestPath`, never left half-written: the bytes go to a
     /// hidden temp file beside it, which replaces `guestPath` in one atomic
@@ -128,6 +130,7 @@ enum FolderUpload {
         }
     }
 
+#if os(macOS)
     /// The file-by-file copy: a folder per mkdir, a file per write.
     private static func loose(_ src: URL, to guestDir: String, op: FileOp,
                               progress: ((String) -> Void)?) async throws {
@@ -143,4 +146,5 @@ enum FolderUpload {
             }
         }
     }
+#endif
 }

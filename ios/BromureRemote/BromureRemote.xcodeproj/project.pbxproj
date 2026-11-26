@@ -62,6 +62,7 @@
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		CAEB25CBA64BEB60E01EB9FF /* FolderUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */; };
 		867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */; };
 		0A6E103CD91A1B11445707C2 /* HermesHook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A4678F54C1BBE97B742BB4A /* HermesHook.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
@@ -224,6 +225,7 @@
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FolderUpload.swift"; path = "Sources/BromureRemote/_shared/FolderUpload.swift"; sourceTree = "<group>"; };
 		3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestURLGate.swift"; path = "Sources/BromureRemote/_shared/GuestURLGate.swift"; sourceTree = "<group>"; };
 		9A4678F54C1BBE97B742BB4A /* HermesHook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HermesHook.swift"; path = "Sources/BromureRemote/_shared/HermesHook.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
@@ -410,6 +412,7 @@
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */,
 				3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */,
 				9A4678F54C1BBE97B742BB4A /* HermesHook.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
@@ -650,6 +653,7 @@
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				CAEB25CBA64BEB60E01EB9FF /* FolderUpload.swift in Sources */,
 				867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */,
 				0A6E103CD91A1B11445707C2 /* HermesHook.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
