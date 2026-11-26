@@ -192,6 +192,22 @@ log "chroot phase complete"
 CHROOT_EOF
 
 # ---------------------------------------------------------------------------
+# A workspace's first boot, prepared once for every workspace: the guest
+# agent (from the setup share, the file the host stages at boot) writes its
+# current unit, launcher, cached bytecode and /boot/efi nofail into the
+# image, and sweeps Claude Code's nudge keys the steps above installed.
+# Best effort: the agent does all of it at boot anyway, only later.
+# ---------------------------------------------------------------------------
+if [ -r /tmp/setup/bromure-agentd.py ]; then
+    mkdir -p /mnt/tmp/bromure-prepare
+    cp /tmp/setup/bromure-agentd.py /mnt/tmp/bromure-prepare/bromure-agentd.py
+    log "preparing the first boot (agent unit, launcher, bytecode, nudge keys)"
+    chroot /mnt /usr/bin/python3 -I /tmp/bromure-prepare/bromure-agentd.py --prepare-image \
+        || log "first-boot preparation failed (non-fatal: the agent does it at boot)"
+    rm -rf /mnt/tmp/bromure-prepare
+fi
+
+# ---------------------------------------------------------------------------
 # Restore runtime resolv.conf and tear down.
 # ---------------------------------------------------------------------------
 
