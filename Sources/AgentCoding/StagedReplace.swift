@@ -128,6 +128,28 @@ enum StagedReplace {
             && (got.st_mode & 0o7777) == (st.st_mode & 0o7777)
     }
 
+    /// The open file's mode when it has set-user-ID / set-group-ID bits —
+    /// what a write by a user who isn't root strips (macOS, as Linux) —
+    /// read before the write; nil when there are none to keep.
+    static func setIDMode(_ fd: Int32) -> mode_t? {
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & 0o6000 != 0 else { return nil }
+        return st.st_mode & 0o7777
+    }
+
+    /// Put back the set-id bits the write stripped, through the same
+    /// descriptor. nil when the file has its mode again; otherwise why not:
+    /// the bytes are in, but it isn't the file it was (CWE-732), so the
+    /// upload says so rather than succeed.
+    static func restoreSetID(_ fd: Int32, _ kept: mode_t?, path: String) -> String? {
+        guard let kept else { return nil }
+        var st = stat()
+        if fstat(fd, &st) == 0, st.st_mode & 0o7777 == kept { return nil }
+        _ = fchmod(fd, kept)
+        if fstat(fd, &st) == 0, st.st_mode & 0o7777 == kept { return nil }
+        return "\(path) was written, but its set-user-ID/set-group-ID permissions were cleared and could not be restored"
+    }
+
     /// Write `staged`'s bytes into `dest` itself (its inode, links and
     /// metadata stay). It needs only what a plain upload needs, write access
     /// to `dest` (CWE-732): the staged file — this user's own — is made
@@ -155,6 +177,8 @@ enum StagedReplace {
         guard fd >= 0 else { return String(cString: strerror(errno)) }
         let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? out.close() }
+        // Set-id bits a write strips: read now, put back after (CWE-732).
+        let kept = setIDMode(fd)
         var backup: String?
         let rfd = open(dest, O_RDONLY | O_CLOEXEC)
         if rfd >= 0 {
@@ -187,10 +211,12 @@ enum StagedReplace {
             if let again = fill(backup) {
                 return "\(dest): the write failed (\(failure)) and its old contents couldn't be put back (\(again)); they are saved in \(backup)"
             }
+            _ = restoreSetID(fd, kept, path: dest)   // the write's own error is the one to report
             unlink(backup)
             return failure
         }
         if let backup { unlink(backup) }
+        if let failure = restoreSetID(fd, kept, path: dest) { return failure }
         unlink(staged)
         return nil
     }
