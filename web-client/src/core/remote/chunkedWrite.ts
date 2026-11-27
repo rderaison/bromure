@@ -90,7 +90,9 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
   const cut = dest.lastIndexOf('/');
-  const tmp = `${dest.slice(0, cut + 1)}.${dest.slice(cut + 1)}.bromure-${crypto.randomUUID()}.part`;
+  // Fixed length, whatever the destination's name: a name near the 255-byte
+  // component limit is valid, and must not become an invalid temp name.
+  const tmp = `${dest.slice(0, cut + 1)}.bromure-${crypto.randomUUID()}.part`;
   let sent: number;
   // Did the guest accept a write to `tmp`? Only a write that SUCCEEDED counts,
   // so a refusal of the very first one — the create — leaves this false.
