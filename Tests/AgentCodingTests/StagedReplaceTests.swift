@@ -1,0 +1,143 @@
+import Testing
+import Foundation
+import Darwin
+@testable import bromure_ac
+
+// Regression: an upload's atomic replace (the file op `rename`, in HostExec
+// and bromure-agentd.py) carried only the destination's mode bits over and
+// renamed a new inode onto it, dropping its owner, ACL and extended
+// attributes, and splitting it from its other hard links.
+@Suite("Staged upload replace keeps the file's metadata", .serialized)
+struct StagedReplaceTests {
+    private static let python = "/usr/bin/python3"
+    private static let agentd = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py")
+
+    private func dir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("staged-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    private func write(_ s: String, _ u: URL) throws { try s.write(to: u, atomically: false, encoding: .utf8) }
+    private func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
+    private func xattr(_ u: URL, _ name: String) -> String? {
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = getxattr(u.path, name, &buf, buf.count, 0, 0)
+        return n < 0 ? nil : String(decoding: buf[..<n], as: UTF8.self)
+    }
+    private func setX(_ u: URL, _ name: String, _ v: String) {
+        _ = v.withCString { setxattr(u.path, name, $0, strlen($0), 0, 0) }
+    }
+    private func ino(_ u: URL) -> UInt64 { var st = stat(); stat(u.path, &st); return st.st_ino }
+    private func acl(_ u: URL) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ls")
+        p.arguments = ["-le", u.path]
+        let out = Pipe(); p.standardOutput = out
+        try? p.run(); p.waitUntilExit()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    @Test("A new destination is the staged file, renamed")
+    func newDest() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        #expect(read(dest) == "new")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("An existing file keeps its mode, ACL and extended attributes")
+    func keepsMetadata() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("old", dest)
+        chmod(dest.path, 0o640)
+        setX(dest, "com.bromure.test", "tag")
+        let chmodACL = Process()
+        chmodACL.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmodACL.arguments = ["+a", "everyone deny chown", dest.path]
+        try chmodACL.run(); chmodACL.waitUntilExit()
+        #expect(acl(dest).contains("deny chown"))
+        try write("new", staged)
+        setX(staged, "com.bromure.stray", "x")
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        #expect(read(dest) == "new")
+        var st = stat(); stat(dest.path, &st)
+        #expect(st.st_mode & 0o7777 == 0o640)
+        #expect(xattr(dest, "com.bromure.test") == "tag")
+        #expect(xattr(dest, "com.bromure.stray") == nil)
+        #expect(acl(dest).contains("deny chown"))
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("A file whose ACL lets it be written, not deleted, is updated in place")
+    func aclDeniesDelete() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("old contents", dest)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        p.arguments = ["+a", "everyone deny delete", dest.path]
+        try p.run(); p.waitUntilExit()
+        let before = ino(dest)
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        #expect(read(dest) == "new" && ino(dest) == before)
+        #expect(acl(dest).contains("deny delete"))
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+        let undo = Process()
+        undo.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        undo.arguments = ["-N", dest.path]
+        try undo.run(); undo.waitUntilExit()
+    }
+
+    @Test("A hard-linked file gets the new bytes in place: every link sees them")
+    func hardLink() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        let other = d.appendingPathComponent("other")
+        try write("old contents, longer", dest)
+        #expect(link(dest.path, other.path) == 0)
+        let before = ino(dest)
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        #expect(read(dest) == "new" && read(other) == "new")
+        #expect(ino(dest) == before)
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("bromure-agentd's twin: mode kept, a hard-linked file in place",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func guestTwin() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let dest = d.appendingPathComponent("f"), other = d.appendingPathComponent("other")
+        let plain = d.appendingPathComponent("plain")
+        try write("old contents, longer", dest)
+        #expect(link(dest.path, other.path) == 0)
+        try write("old", plain)
+        chmod(plain.path, 0o640)
+        let before = ino(dest)
+        let py = Process()
+        py.executableURL = URL(fileURLWithPath: Self.python)
+        py.arguments = ["-I", "-c", """
+            import importlib.util, sys, os
+            s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            d = sys.argv[2]
+            for name in ('f', 'plain'):
+                staged = os.path.join(d, '.' + name + '.part')
+                open(staged, 'w').write('new')
+                r = m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, name)})
+                assert r == {'exit_code': 0}, r
+                assert not os.path.exists(staged)
+            """, Self.agentd.path, d.path]
+        try py.run(); py.waitUntilExit()
+        #expect(py.terminationStatus == 0)
+        #expect(read(dest) == "new" && read(other) == "new" && ino(dest) == before)
+        var st = stat(); stat(plain.path, &st)
+        #expect(read(plain) == "new" && st.st_mode & 0o7777 == 0o640)
+    }
+}

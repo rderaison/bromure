@@ -134,7 +134,7 @@ enum HostExec {
             case "rename":
                 // An upload's last step (bromure-agentd.py's `rename`): the
                 // complete temp file replaces `dest` atomically; an existing
-                // file keeps its permissions, a symlink is written through.
+                // file keeps its metadata, a symlink is written through.
                 var dest = mapHome(spec["dest"] as? String ?? "")
                 guard dest.hasPrefix("/") else { return ["error": "dest must be absolute", "exit_code": 1] }
                 if (try? fm.destinationOfSymbolicLink(atPath: dest)) != nil {
@@ -144,31 +144,12 @@ enum HostExec {
                 if fm.fileExists(atPath: dest, isDirectory: &isDir), isDir.boolValue {
                     return ["error": "\(dest) is a folder", "exit_code": 1]
                 }
-                // The staged file is owner-only while it fills: its final
-                // mode only now, the existing file's, or a plain write's
-                // (0644 under the usual umask) for a new one.
-                let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] ?? NSNumber(value: 0o644)
-                try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
-                if Foundation.rename(path, dest) == 0 { return ["exit_code": 0] }
-                // A symlink's target on another volume (EXDEV) or a busy file
-                // can't be renamed onto from beside the link: write it through
-                // instead, as a plain write did. Not atomic there, but the
-                // staged copy is complete and local.
-                let e = errno
-                guard e == EXDEV || e == EBUSY else {
-                    return ["error": String(cString: strerror(e)), "exit_code": 1]
+                // Owner, mode, ACL and extended attributes kept; a new file
+                // gets a plain write's mode; a hard-linked file, or a target
+                // across volumes, updated in place (StagedReplace).
+                if let failure = StagedReplace.replace(path, onto: dest) {
+                    return ["error": failure, "exit_code": 1]
                 }
-                if !fm.fileExists(atPath: dest) { fm.createFile(atPath: dest, contents: nil) }
-                guard let src = FileHandle(forReadingAtPath: path),
-                      let out = FileHandle(forUpdatingAtPath: dest) else {
-                    return ["error": String(cString: strerror(e)), "exit_code": 1]
-                }
-                defer { try? src.close(); try? out.close() }
-                while let chunk = try src.read(upToCount: 1 << 20), !chunk.isEmpty {
-                    try out.write(contentsOf: chunk)
-                }
-                try out.truncate(atOffset: try out.offset())
-                try fm.removeItem(atPath: path)
                 return ["exit_code": 0]
             case "remove":
                 try fm.removeItem(atPath: path)
