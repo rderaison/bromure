@@ -80,12 +80,26 @@ enum StagedReplace {
             && (got.st_mode & 0o7777) == (st.st_mode & 0o7777)
     }
 
+    /// Needs only what a plain upload needs — write access to `dest`
+    /// (CWE-732): the staged file is this user's own, and readable again
+    /// first (`copyMetadata` may have given it `dest`'s mode and ACL, a
+    /// write-only 0200 say), and `dest` is opened write-only, never for
+    /// reading, truncated only once written.
     private static func writeInPlace(_ staged: String, into dest: String, create: Bool = false) -> String? {
-        if create, !FileManager.default.fileExists(atPath: dest) {
-            FileManager.default.createFile(atPath: dest, contents: nil)
+        // Its ACL (copied before a refused rename) may deny reading it, or
+        // deleting it afterwards: dropped.
+        if let empty = acl_init(0) {
+            _ = acl_set_file(staged, ACL_TYPE_EXTENDED, empty)
+            acl_free(UnsafeMutableRawPointer(empty))
         }
-        guard let src = FileHandle(forReadingAtPath: staged),
-              let out = FileHandle(forUpdatingAtPath: dest) else { return String(cString: strerror(errno)) }
+        _ = chmod(staged, 0o600)
+        let fd = open(dest, O_WRONLY | O_CLOEXEC | (create ? O_CREAT : 0), 0o644)
+        guard fd >= 0 else { return String(cString: strerror(errno)) }
+        let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        guard let src = FileHandle(forReadingAtPath: staged) else {
+            try? out.close()
+            return String(cString: strerror(errno))
+        }
         defer { try? src.close(); try? out.close() }
         do {
             while let chunk = try src.read(upToCount: 1 << 20), !chunk.isEmpty {
@@ -96,12 +110,7 @@ enum StagedReplace {
         } catch {
             return error.localizedDescription
         }
-        // The staged copy may carry the destination's ACL by now (copied
-        // before a refused rename), one that denies deleting it: drop it.
-        if let empty = acl_init(0) {
-            _ = acl_set_file(staged, ACL_TYPE_EXTENDED, empty)
-            acl_free(UnsafeMutableRawPointer(empty))
-        }
+        // (Its ACL, which may deny deleting it, went above.)
         unlink(staged)
         return nil
     }
