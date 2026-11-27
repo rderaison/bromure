@@ -114,9 +114,8 @@ const GUEST_ERROR_DUMP = /^commandFailed\(exitCode: -?\d+, stderr: "/;
  *  copy that fails part-way — the source became unreadable, a write was
  *  refused — leaves `dest` exactly as it was and removes the temp file.
  *  A guest too old for `rename` gets the direct write it always had
- *  (`open` is called again for that: a File can be read twice; a new file it
- *  fails to fill is removed again — writeLegacy), and so does a destination
- *  whose DIRECTORY we may not write — see below. */
+ *  (`open` is called again for that: a File can be read twice — writeLegacy),
+ *  and so does a destination whose DIRECTORY we may not write — see below. */
 export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
@@ -164,46 +163,28 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     await fileOp({ op: 'remove', path: tmp }).catch(() => {});
     if (!unknownOp(e)) throw e;
   }
-  // Straight onto `dest`, as such a guest always got it. A file that was
-  // there stays whatever happens (another drop of the same name may have
-  // finished there meanwhile: never this copy's to delete); one this copy
-  // created is removed again if it fails part-way (writeLegacy).
+  // Straight onto `dest`, as such a guest always got it, and never removed
+  // after (writeLegacy).
   return writeLegacy(open, dest, chunk, fileOp, encode, progress);
 }
 
-/** The size of guest file `path`; null when it can't be read — not there,
- *  or not this user's to read. A guest's `read` has said its size since
- *  long before `rename`. */
-async function guestSize(path: string, fileOp: GuestFileOp): Promise<number | null> {
-  try {
-    const r: any = await fileOp({ op: 'read', path, offset: 0, length: 1 });
-    return typeof r?.size === 'number' ? r.size : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A guest without `rename`: written straight onto `dest`. If `dest` wasn't
- *  there and the copy fails part-way, the truncated file it left under the
- *  final name is removed (CWE-459) — but only while it is still that copy's:
- *  its size exactly the bytes this copy had written. A file that was there
- *  before, or one another drop has since written over (its size differs),
- *  stays: a guest this old has no remove tied to a file's identity, so its
- *  size stands in for it (CWE-362). Mirrors FolderUpload.writeLegacy. */
+/** A guest without `rename`: written straight onto `dest`. Not atomic: a
+ *  copy that fails part-way leaves `dest` incomplete, and that is said
+ *  (console) as the error goes up. It is never removed, not even a file this
+ *  copy created: such a guest's `read` and `remove` go by path alone, so
+ *  nothing tells this copy's file from one another drop finished at the
+ *  same name since — a size that matches proves nothing (both empty, say),
+ *  and the name can change hands between the look and the remove (CWE-362).
+ *  An incomplete file is the user's to see and drop again; another drop's
+ *  finished one is not this copy's to delete. Mirrors FolderUpload.writeLegacy. */
 export async function writeLegacy(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                   fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                   progress?: (sent: number) => void): Promise<number> {
-  const existed = (await guestSize(dest, fileOp)) !== null;
-  let written = 0;
   try {
-    return await writeStreamChunked(open(), chunk, async (bytes, append) => {
-      await fileOp({ op: 'write', path: dest, data: encode(bytes), append }, 60);
-      written += bytes.length;
-    }, progress);
+    return await writeDirect(open(), dest, chunk, fileOp, encode, progress);
   } catch (e) {
-    if (!existed && (await guestSize(dest, fileOp)) === written) {
-      await fileOp({ op: 'remove', path: dest }).catch(() => {});
-    }
+    console.warn(`[upload] ${dest}: the copy failed part-way on a guest too old to replace files in one step; `
+      + 'the file may be incomplete (left as it is: it may not be this copy\'s any more).');
     throw e;
   }
 }
