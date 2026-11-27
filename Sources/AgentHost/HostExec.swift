@@ -99,7 +99,19 @@ enum HostExec {
                         "eof": offset + UInt64(data.count) >= size, "exit_code": 0]
             case "write":
                 let data = Data(base64Encoded: spec["data"] as? String ?? "") ?? Data()
-                if spec["append"] as? Bool == true, let h = FileHandle(forWritingAtPath: path) {
+                if spec["staged"] as? Bool == true, spec["append"] as? Bool != true {
+                    // An upload's staging file: owner-only while it fills
+                    // (CWE-200); `rename` gives it its final mode. Never
+                    // through a link planted at its name.
+                    let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                    guard fd >= 0 else { return ["error": String(cString: strerror(errno)), "exit_code": 1] }
+                    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                    defer { try? h.close() }
+                    guard fchmod(fd, 0o600) == 0 else {
+                        return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                    }
+                    try h.write(contentsOf: data)
+                } else if spec["append"] as? Bool == true, let h = FileHandle(forWritingAtPath: path) {
                     defer { try? h.close() }
                     try h.seekToEnd()
                     try h.write(contentsOf: data)
@@ -132,9 +144,11 @@ enum HostExec {
                 if fm.fileExists(atPath: dest, isDirectory: &isDir), isDir.boolValue {
                     return ["error": "\(dest) is a folder", "exit_code": 1]
                 }
-                if let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] {
-                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
-                }
+                // The staged file is owner-only while it fills: its final
+                // mode only now, the existing file's, or a plain write's
+                // (0644 under the usual umask) for a new one.
+                let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] ?? NSNumber(value: 0o644)
+                try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
                 if Foundation.rename(path, dest) == 0 { return ["exit_code": 0] }
                 // A symlink's target on another volume (EXDEV) or a busy file
                 // can't be renamed onto from beside the link: write it through

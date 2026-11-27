@@ -143,4 +143,16 @@ struct GuestDropTests {
         #expect(GuestDrop.imagePaths(in: "Look at \(native) please") == [native])
         #expect(GuestDrop.imagePaths(in: "notes at /Users/someone/.bromure/drops/0_a.txt").isEmpty)
     }
+
+    // Regression (CWE-200): an upload's staging file (a folder's archive)
+    // is created owner-only; only its first write asks for that.
+    @Test("writeOps marks only the first write of a staged file")
+    func stagedFirstWriteOnly() {
+        let data = Data(count: 6 * 1024 * 1024 * 2 + 1)   // writeChunk (6 MB) × 2, plus one
+        let ops = GuestDrop.writeOps(guestPath: "/tmp/a.tgz", data: data, staged: true)
+        #expect(ops.count == 3)
+        #expect(ops[0]["staged"] as? Bool == true)
+        #expect(ops.dropFirst().allSatisfy { $0["staged"] == nil })
+        #expect(GuestDrop.writeOps(guestPath: "/tmp/a", data: data).allSatisfy { $0["staged"] == nil })
+    }
 }

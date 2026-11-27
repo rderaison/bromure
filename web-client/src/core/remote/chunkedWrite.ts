@@ -52,11 +52,12 @@ export type GuestFileOp = (op: Record<string, unknown>, timeoutSec?: number) => 
  *  removed (a file already there stays). */
 export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
                                      fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
-                                     progress?: (sent: number) => void): Promise<number> {
+                                     progress?: (sent: number) => void, staged = false): Promise<number> {
   let created = false;
   try {
     return await writeStreamChunked(stream, chunk, async (bytes, append) => {
-      await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
+      // `staged`: an upload's staging file, created owner-only (CWE-200).
+      await fileOp({ op: 'write', path, data: encode(bytes), append, ...(staged && !append ? { staged: true } : {}) }, 60);
       created = true;
     }, progress);
   } catch (e) {
@@ -92,6 +93,8 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
   const cut = dest.lastIndexOf('/');
   const tmp = `${dest.slice(0, cut + 1)}.${dest.slice(cut + 1)}.bromure-${crypto.randomUUID()}.part`;
   let sent: number;
+  // Owner-only while it fills (CWE-200): `dest` may be private. `rename`
+  // gives it its final mode.
   // Did the guest accept a write to `tmp`? Only a write that SUCCEEDED counts,
   // so a refusal of the very first one — the create — leaves this false.
   let tmpCreated = false;
@@ -100,7 +103,7 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
       const r = await fileOp(o, timeoutSec);
       if (o.op === 'write') tmpCreated = true;
       return r;
-    }, encode, progress);
+    }, encode, progress, true);
   } catch (e) {
     // Writing a file does not require write access to its directory, but
     // CREATING a sibling of it does. A group-writable file in someone else's

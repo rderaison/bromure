@@ -348,9 +348,9 @@ export class FileExplorerModel {
   /** Stream into a guest file, one CHUNK in memory at a time. */
   /** Stream into a guest file, one CHUNK in memory at a time; a copy that
    *  fails part-way leaves no partial file (writeGuestFile). */
-  private async writeStream(stream: ReadableStream<Uint8Array>, guestPath: string, label: string) {
+  private async writeStream(stream: ReadableStream<Uint8Array>, guestPath: string, label: string, staged = false) {
     await writeGuestFile(stream, guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
-      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
+      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); }, staged);
   }
   /** A dropped file lands on its destination only once complete: a copy
    *  that fails part-way leaves a file already there untouched. */
@@ -361,7 +361,8 @@ export class FileExplorerModel {
   private async uploadFolder(name: string, entries: TarEntry[], guestDir: string): Promise<string | null> {
     this.transferText = `Packing ${name}…`; this.emit();
     const guestArchive = `/tmp/bromure-drop-${crypto.randomUUID().toUpperCase()}.tgz`;
-    await this.writeStream(tarGzStream(entries), guestArchive, name);
+    // Owner-only while it fills and until it's unpacked (CWE-200).
+    await this.writeStream(tarGzStream(entries), guestArchive, name, true);
     this.transferText = `Unpacking ${name}…`; this.emit();
     try {
       const r = await this.fileOp({ op: 'untar', path: guestDir, archive: guestArchive }, 600);
