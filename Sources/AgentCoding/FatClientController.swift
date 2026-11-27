@@ -5464,9 +5464,9 @@ final class RemoteHostWindow: NSWindow {
             land: { [weak self] id, mode, target, keep, push in
                 var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep, "push": push]
                 if let target { body["target"] = target }
-                self?.controller.taskCommand(id, "land", body: body)
+                self?.sendLanding(id, "land", body: body)
             },
-            retryLanding: { [weak self] id in self?.controller.taskCommand(id, "retry-landing") },
+            retryLanding: { [weak self] id in self?.sendLanding(id, "retry-landing") },
             cancelLanding: { [weak self] id in self?.controller.taskCommand(id, "cancel-landing") },
             markDone: { [weak self] id in self?.controller.taskCommand(id, "mark-done") },
             markMerged: { [weak self] id in self?.controller.taskCommand(id, "mark-merged") },
@@ -5712,7 +5712,68 @@ final class RemoteHostWindow: NSWindow {
               let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
                   AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
               }) else { return }
-        showWorkspace(task.profileID, window: tab.index)
+        // Its agent's session, as the local window opens it: the chat, where
+        // a question it asks is answered in line. The workspace's page was
+        // a VM dashboard, with no way to answer.
+        if let s = controller.sessionStore.session(profileID: task.profileID, windowIndex: tab.index) {
+            selectSession(s.id)
+        } else {
+            showWorkspace(task.profileID, window: tab.index)
+        }
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// A Merge (or Merge & Push, a batch, a Retry) the user is waiting on.
+    /// It went out once and was forgotten: a pooled connection that died
+    /// while idle failed it at once, and a refusal came back to no one —
+    /// the click did nothing. Now a request that got no answer is sent once
+    /// more (safe: the host starts one landing at a time and ignores the
+    /// same Merge while it runs), and one that still didn't go, or that the
+    /// host refused, says so.
+    private func sendLanding(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        let token = controller.beginOutgoing()
+        controller.request("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)",
+                           body: body, retryUnanswered: true) { [weak self] status, json in
+            guard let self else { return }
+            self.controller.endOutgoing(token)
+            guard let why = Self.landingFailure(status: status, json: json) else { return }
+            FatClientLog.log("landing \(action) \(id.uuidString): \(why)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = status == nil
+                ? NSLocalizedString("The merge may not have started", comment: "fat client: landing failed")
+                : NSLocalizedString("The merge didn't start", comment: "fat client: landing failed")
+            alert.informativeText = why
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            self.controller.presentSheet(alert)
+        }
+    }
+
+    /// What to tell the user about a landing request's answer; nil when it
+    /// went (an older host answers `{"ok": true}` whatever happened).
+    nonisolated static func landingFailure(status: Int?, json: [String: Any]) -> String? {
+        guard let status else {
+            return NSLocalizedString("The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again.",
+                                     comment: "fat client: landing failed")
+        }
+        if (200..<300).contains(status), json["ok"] as? Bool != false { return nil }
+        return (json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? String(format: NSLocalizedString("The host refused it (HTTP %d).", comment: "fat client: landing failed"), status)
+    }
+
+    /// The session (or room) a handed-off task was given to, as the local
+    /// window shows it. Not wired before: Open Session did nothing.
+    private func openAssignee(_ task: CodingTask) {
+        guard let a = task.assignment else { return }
+        switch a.kind {
+        case .session: selectSession(a.id)
+        case .room: showRoom(a.id)
+        case .worktree: jumpToTask(task)
+        case .switchboard:
+            if let sb = controller.sessionStore.sessions.first(where: { $0.isSwitchboard && !$0.isDeleted }) {
+                selectSession(sb.id)
+            }
+        }
         makeKeyAndOrderFront(nil)
     }
 
@@ -5752,10 +5813,10 @@ final class RemoteHostWindow: NSWindow {
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
-                    mergeBatch: { ids, push in
+                    mergeBatch: { [weak self] ids, push in
                         guard let first = ids.first else { return }
-                        c.taskCommand(first, "merge-batch",
-                                      body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
+                        self?.sendLanding(first, "merge-batch",
+                                          body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
                     },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
@@ -5811,7 +5872,8 @@ final class RemoteHostWindow: NSWindow {
                     },
                     answerAttachmentLimit: RemoteHostController.answerAttachmentLimit,
                     recall: { c.taskCommand($0, "recall") },
-                    retryLanding: { c.taskCommand($0, "retry-landing") }),
+                    openAssignee: { [weak self] task in self?.openAssignee(task) },
+                    retryLanding: { [weak self] id in self?.sendLanding(id, "retry-landing") }),
                 sessionStore: c.sessionStore)
             let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []

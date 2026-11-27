@@ -135,6 +135,11 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// After a merge: whether the task's branch and its checkout were
+    /// removed (true), or kept (false: asked to, not verified in git, still
+    /// holding changes, or git refused). nil: not looked at (older tasks, a
+    /// pull request, or still on its way).
+    var checkoutRemoved: Bool?
     /// Where the user put it in the Backlog (dragged): its place, between its
     /// neighbours' ranks. nil: where its creation put it (`backlogRank`).
     var queueRank: Double?
@@ -569,12 +574,13 @@ enum TaskLandingText {
             let into = target.isEmpty
                 ? NSLocalizedString("Merged", comment: "task card: done")
                 : String(format: NSLocalizedString("Merged into %@", comment: "task card: done"), target)
-            if verified { return into }
+            if verified { return into + Self.checkoutSuffix(t) }
             if by == "user" {
                 return into + " · " + NSLocalizedString("marked by you", comment: "task card: done")
             }
             return into + " · " + String(format: NSLocalizedString("reported by %@, not verified", comment: "task card: done"),
                                          by ?? NSLocalizedString("the agent", comment: "task card: done"))
+                + Self.checkoutSuffix(t)
         case .prOpened(let url)?:
             if let url, let n = URL(string: url)?.lastPathComponent, Int(n) != nil {
                 return String(format: NSLocalizedString("PR #%@ opened", comment: "task card: done"), n)
@@ -585,6 +591,15 @@ enum TaskLandingText {
                           : NSLocalizedString("All its phases are done", comment: "task card: done")
         case .closedWithoutMerge?, nil:
             return NSLocalizedString("Closed without merging", comment: "task card: done")
+        }
+    }
+
+    /// What became of a merged task's branch and checkout (`checkoutRemoved`).
+    static func checkoutSuffix(_ t: CodingTask) -> String {
+        switch t.checkoutRemoved {
+        case true?: return " · " + NSLocalizedString("branch and checkout removed", comment: "task card: done")
+        case false?: return " · " + NSLocalizedString("branch and checkout kept", comment: "task card: done")
+        case nil: return ""
         }
     }
 }
@@ -4697,12 +4712,70 @@ final class CodingTaskEngine {
                 remove = true
             }
             if remove, let branch, let root, !root.isEmpty {
-                _ = delegate.automationWorktreeCommand(
-                    profileNameOrID: profileID.uuidString,
-                    action: "remove", args: [root, branch])
-                BACDebug.log("tasks", "“\(task.title)”: worktree removed (\(branch))")
+                let removed = await self.removeCheckout(task, branch: branch, root: root, delegate: delegate)
+                self.store.mutate(taskID) { $0.checkoutRemoved = removed }
+                BACDebug.log("tasks", "“\(task.title)”: worktree \(removed ? "removed" : "kept") (\(branch))")
             }
         }
+    }
+
+    /// Remove a landed task's checkout and branch: through the workspace
+    /// agent when it's a running VM workspace (it also forgets the worktree
+    /// it reopens at boot), otherwise — an attached Mac (a delegated
+    /// session's), or a workspace the agent can't be handed it in — by a
+    /// command run there. True once git no longer has the branch.
+    private func removeCheckout(_ task: CodingTask, branch: String, root: String,
+                                delegate: ACAppDelegate) async -> Bool {
+        guard Self.isSafeBranchName(branch) else { return false }
+        if delegate.automationWorktreeCommand(profileNameOrID: task.profileID.uuidString,
+                                              action: "remove", args: [root, branch]) {
+            // The agent removes it in the background: look until it's gone.
+            for _ in 0..<12 {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if let out = try? await delegate.guestExec(
+                    profileID: task.profileID,
+                    command: Self.branchGoneCommand(root: root, branch: branch), timeout: 15),
+                   out.contains("GONE") { return true }
+            }
+            return false
+        }
+        let out = try? await delegate.guestExec(
+            profileID: task.profileID,
+            command: Self.removeCheckoutCommand(root: root, branch: branch), timeout: 180)
+        if let out, !out.contains("REMOVED") {
+            BACDebug.log("tasks", "“\(task.title)”: checkout kept: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        return out?.contains("REMOVED") == true
+    }
+
+    /// Prints GONE when `root` has no branch `branch` any more.
+    nonisolated static func branchGoneCommand(root: String, branch: String) -> String {
+        "\(pinnedGit(shellQuote(root))) rev-parse -q --verify \(shellQuote("refs/heads/" + branch)) >/dev/null 2>&1 || echo GONE"
+    }
+
+    /// Remove `branch`'s checkout (wherever `git worktree list` says it is —
+    /// never the repository's main one) and the branch itself, as the
+    /// workspace agent's `worktree-remove` does. Only a checkout with
+    /// nothing uncommitted besides build litter (`TaskLitter`) goes: work
+    /// written after the landing was verified stays. Prints REMOVED, or why
+    /// not: KEPT-MAIN (checked out in the main checkout), KEPT-DIRTY,
+    /// KEPT-FAILED (git refused), KEPT-BRANCH (the branch is still there).
+    nonisolated static func removeCheckoutCommand(root: String, branch: String) -> String {
+        let git = pinnedGit("\"$r\"")
+        return "r=\(shellQuote(root)); b=\(shellQuote(branch)); "
+            + "d=$(\(git) worktree list --porcelain 2>/dev/null | awk -v ref=\"branch refs/heads/$b\" "
+            + "'index($0, \"worktree \") == 1 { w = substr($0, 10) } $0 == ref { print w; exit }'); "
+            + "if [ -n \"$d\" ]; then "
+            // The list's first entry is the main checkout.
+            + "m=$(\(git) worktree list --porcelain 2>/dev/null | awk 'index($0, \"worktree \") == 1 { print substr($0, 10); exit }'); "
+            + "if [ \"$d\" = \"$m\" ] || [ \"$d\" = \"$r\" ]; then echo KEPT-MAIN; exit 0; fi; "
+            + "s=$(\(TaskLitter.status("\"$d\""))); if [ -n \"$s\" ]; then echo KEPT-DIRTY; exit 0; fi; "
+            + "\(git) worktree unlock \"$d\" >/dev/null 2>&1; "
+            + "\(git) worktree remove --force \"$d\" >/dev/null 2>&1 || { echo KEPT-FAILED; exit 0; }; "
+            + "fi; "
+            + "\(git) branch -D \"$b\" >/dev/null 2>&1; "
+            + "\(git) worktree prune >/dev/null 2>&1; "
+            + "if \(git) rev-parse -q --verify \"refs/heads/$b\" >/dev/null 2>&1; then echo KEPT-BRANCH; else echo REMOVED; fi"
     }
 
     /// Prints EMPTY when `branch` adds no commit to `parent` and its

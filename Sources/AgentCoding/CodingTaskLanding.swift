@@ -473,6 +473,35 @@ extension CodingTaskEngine {
         Task { [weak self] in await self?.runLanding(taskID, branch: branch, targetOverride: targetOverride) }
     }
 
+    /// Why a Merge asked for these tasks (from a client) starts nothing,
+    /// for the user — nil when it starts, or a landing is already under way
+    /// or done (a resend of a request whose answer was lost).
+    func landRefusal(_ ids: UUID...) -> String? { landRefusal(ids) }
+    func landRefusal(_ ids: [UUID]) -> String? {
+        let tasks = ids.map { store.task($0) }
+        return Self.landRefusal(tasks)
+    }
+
+    nonisolated static func landRefusal(_ tasks: [CodingTask?]) -> String? {
+        let known = tasks.compactMap { $0 }
+        guard !known.isEmpty else {
+            return NSLocalizedString("This task is no longer on the board.", comment: "task landing refused")
+        }
+        let startsOrStarted = known.contains { t in
+            switch t.stage {
+            case .testing: return true
+            case .done:
+                switch t.effectiveCompletion {
+                case .merged?, .prOpened?: return true
+                default: return false
+                }
+            default: return false
+            }
+        }
+        return startsOrStarted ? nil : NSLocalizedString(
+            "This task isn't in Review any more, so there is nothing to merge.", comment: "task landing refused")
+    }
+
     /// Land several approved tasks into their targets at once — merges
     /// only (a squash or a pull request stays one at a time). Each clean
     /// one Bromure merges itself, one after the other; what's left — the
@@ -675,6 +704,33 @@ extension CodingTaskEngine {
                   t.landing?.phase == .agentLanding || t.landing?.phase == .needsYou else { continue }
             needsYou(id, why)
         }
+    }
+
+    /// The question the assignee asked while landing is answered: it goes
+    /// on landing. Each card the question stopped (the lead, and a batch's
+    /// others) is landing again, its stall clock restarted — left on Needs
+    /// you, the card kept showing the answered question as what's wrong.
+    func landingAnswered(_ taskID: UUID, question: String) {
+        let ids = [taskID] + (store.task(taskID)?.landing?.batch ?? []).filter { $0 != taskID }
+        var resumed = false
+        for id in ids {
+            store.mutate(id) { if Self.resumeAfterAnswer(&$0, question: question, lead: taskID) { resumed = true } }
+        }
+        if resumed { watchLanding(taskID) }
+    }
+
+    /// `landingAnswered` on one card: only one the question itself put on
+    /// Needs you (a stall or another reason stays the user's).
+    @discardableResult
+    nonisolated static func resumeAfterAnswer(_ t: inout CodingTask, question: String, lead: UUID,
+                                              now: Date = Date()) -> Bool {
+        guard t.stage == .testing, var l = t.landing, l.phase == .needsYou, l.detail == question,
+              t.id == lead || l.batchLead == lead else { return false }
+        l.phase = .agentLanding
+        l.detail = nil
+        l.startedAt = now
+        t.landing = l
+        return true
     }
 
     private func needsYou(_ taskID: UUID, _ why: String) {
@@ -1221,8 +1277,12 @@ extension CodingTaskEngine {
         pumpQueue()
         // Only a landing seen in git removes the branch: one finished on
         // the agent's word (Bromure couldn't look) may not be in the
-        // target at all, and the branch would be its only copy.
-        let removeWorktree = l.mode != .pr && !l.keepBranch && task.delegationID == nil && verified
+        // target at all, and the branch would be its only copy. A delegated
+        // task's too: its checkout is on the assignee's machine, where the
+        // landing was just verified — left there, every landed task's
+        // checkout (and its build folder) piled up for good.
+        let removeWorktree = Self.removesCheckout(l, verified: verified)
+        if l.mode != .pr, !removeWorktree { store.mutate(taskID) { $0.checkoutRemoved = false } }
         guard grace > 0 else {
             putSessionAway(task, afterSeconds: 8)
             archiveTranscriptThenCleanup(taskID, removeWorktree: removeWorktree)
@@ -1247,6 +1307,12 @@ extension CodingTaskEngine {
                 self.archiveTranscriptThenCleanup(taskID, removeWorktree: removeWorktree)
             }
         }
+    }
+
+    /// Whether a finished landing removes the task's branch and checkout:
+    /// a merge seen in git, not asked to keep them.
+    nonisolated static func removesCheckout(_ l: TaskLanding, verified: Bool) -> Bool {
+        l.mode != .pr && !l.keepBranch && verified
     }
 
     /// A Done task still in its post-landing grace (see `landingGrace`).
