@@ -229,17 +229,64 @@ extension AgentSessionEngine {
         // Its checkout goes — with the guards a landed task's has: not one
         // holding uncommitted work or ignored files (a .env, notes) the
         // agent's forced remove would have taken unlooked (CWE-459).
-        Task { [weak self] in
-            // A beat for the closed tab's agent to let go of the folder.
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            let removed = await CodingTaskEngine.removeCheckoutGuarded(
+        scheduleCheckoutCleanup(id, root: root, branch: branch) { s in
+            await CodingTaskEngine.removeCheckoutGuarded(
                 profileID: s.profileID, root: root, branch: branch,
                 label: "sessions", title: s.title, delegate: delegate)
+        }
+    }
+
+    /// A merged session's checkout removal, after a beat for the closed
+    /// tab's agent to let go of the folder. That beat is a window: the ended
+    /// session offers Resume, and a resume then had its folder removed
+    /// under the relaunched agent, and was archived as it ran (CWE-362).
+    /// So the cleanup is this merge's alone (a token), a resume cancels it
+    /// (`cancelCheckoutCleanup`), and it goes ahead only for the session as
+    /// the merge left it: ended, no launch under way, same branch, same
+    /// checkout. Once the removal is running, a resume is refused until it
+    /// is done (the folder may be half gone).
+    func scheduleCheckoutCleanup(_ id: UUID, root: String, branch: String,
+                                 afterNanoseconds delay: UInt64 = 2_000_000_000,
+                                 remove: @escaping @MainActor (AgentSession) async -> Bool) {
+        let token = UUID()
+        checkoutCleanups[id] = CheckoutCleanup(token: token)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
             guard let self else { return }
+            let ours = { @MainActor in self.checkoutCleanups[id]?.token == token }
+            let asMergeLeftIt = { @MainActor (s: AgentSession?) -> AgentSession? in
+                guard let s, s.windowIndex == nil, !s.isLaunching, !s.isDeleted,
+                      s.worktreeBranch == branch, s.branchRoot == root else { return nil }
+                return s
+            }
+            guard ours() else { return }      // resumed (or merged again) meanwhile
+            guard let s = asMergeLeftIt(self.store.session(id)) else {
+                self.checkoutCleanups[id] = nil
+                BACDebug.log("sessions", "checkout cleanup of \(branch) dropped: the session moved on")
+                return
+            }
+            self.checkoutCleanups[id]?.removing = true
+            let removed = await remove(s)
+            guard ours() else { return }
+            self.checkoutCleanups[id] = nil
             // Readable either way; nothing to resume in once it's gone.
             if removed { self.store.mutate(id) { $0.folderMissing = true } }
-            self.store.setArchived(id, true)
+            if asMergeLeftIt(self.store.session(id)) != nil { self.store.setArchived(id, true) }
         }
+    }
+
+    /// A resume of `id`: a pending merge cleanup is called off. Nil = go
+    /// ahead; else why not (its removal is already running).
+    func cancelCheckoutCleanup(_ id: UUID) -> String? {
+        guard let c = checkoutCleanups[id] else { return nil }
+        if c.removing {
+            return NSLocalizedString(
+                "Its merged branch's checkout is being removed — try again in a moment.",
+                comment: "session resume")
+        }
+        checkoutCleanups[id] = nil
+        BACDebug.log("sessions", "checkout cleanup called off: the session was resumed")
+        return nil
     }
 
     /// Resume a merge watch that was under way when the app quit.

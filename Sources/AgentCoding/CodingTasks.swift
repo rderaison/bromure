@@ -4711,6 +4711,12 @@ final class CodingTaskEngine {
                out.contains("EMPTY") {
                 remove = true
             }
+            // The archive and the probe took a while: a card started over
+            // since (back to work, or on another branch) keeps the checkout.
+            if remove, let now = self.store.task(taskID), now.stage != .done || now.branch != branch {
+                BACDebug.log("tasks", "“\(task.title)”: cleanup dropped — the card moved on")
+                remove = false
+            }
             if remove, let branch, let root, !root.isEmpty {
                 let removed = await self.removeCheckout(task, branch: branch, root: root, delegate: delegate)
                 self.store.mutate(taskID) { $0.checkoutRemoved = removed }

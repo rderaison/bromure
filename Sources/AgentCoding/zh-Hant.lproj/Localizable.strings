@@ -4437,3 +4437,5 @@
 "The merge may not have started" = "合併可能未開始";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "主機兩次都沒有回應。請查看任務卡片：若仍在審閱中且未在合併，請檢查連線後再次合併。";
 "The host refused it (HTTP %d)." = "主機拒絕了此請求（HTTP %d）。";
+
+"Its merged branch's checkout is being removed — try again in a moment." = "正在移除其已合併分支的檢出目錄，請稍後再試。";

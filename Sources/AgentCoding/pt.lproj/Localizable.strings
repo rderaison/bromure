@@ -4434,3 +4434,5 @@
 "The merge may not have started" = "O merge pode não ter começado";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "O host não respondeu, nem à segunda tentativa. Veja o cartão da tarefa: se ainda estiver em Revisão e não estiver a ser integrada, verifique a ligação e faça o merge de novo.";
 "The host refused it (HTTP %d)." = "O host recusou (HTTP %d).";
+
+"Its merged branch's checkout is being removed — try again in a moment." = "O checkout do seu branch mesclado está a ser removido — tente novamente daqui a pouco.";

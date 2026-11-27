@@ -4436,3 +4436,5 @@
 "The merge may not have started" = "Puede que la fusión no se haya iniciado";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "El host no respondió, ni siquiera al segundo intento. Mira la tarjeta de la tarea: si sigue en Revisión y no se está fusionando, comprueba la conexión y vuelve a fusionarla.";
 "The host refused it (HTTP %d)." = "El host lo rechazó (HTTP %d).";
+
+"Its merged branch's checkout is being removed — try again in a moment." = "Se está eliminando el checkout de su rama fusionada; vuelve a intentarlo en un momento.";
