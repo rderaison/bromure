@@ -60,12 +60,17 @@ export interface ElectronNetBridge {
   tcpOpen(host: string, port: number): Promise<number>;
   tcpWrite(id: number, data: Uint8Array): void;
   tcpClose(id: number): void;
-  onTcpEvent(cb: (id: number, kind: 'data' | 'close' | 'error', data?: Uint8Array, message?: string) => void): void;
+  /** 'pause' / 'resume': an accepted connection's local side is full /
+   *  drained (stop / start feeding it). */
+  onTcpEvent(cb: (id: number, kind: 'data' | 'close' | 'error' | 'pause' | 'resume', data?: Uint8Array, message?: string) => void): void;
   /** Listen on 127.0.0.1:<port> (≥ 1024); connections arrive via onTcpAccept. */
   tcpListen?(port: number): Promise<number>;
   tcpUnlisten?(listenerID: number): void;
   /** Start delivering an accepted socket's data (once its stream is wired). */
   tcpResume?(socketID: number): void;
+  /** An accepted socket's data is consumed: main stops reading it with
+   *  ~1 MB unacked (see electron/acceptedFlow.ts). */
+  tcpAck?(socketID: number, bytes: number): void;
   onTcpAccept?(cb: (listenerID: number, socketID: number) => void): void;
 }
 
@@ -79,6 +84,8 @@ export class ElectronTcpStream implements ByteStream {
   set onData(f: (data: Uint8Array) => void) { this.dataHandler = f; this.releaseBacklog(); }
   get onClose() { return this.closeHandler; }
   set onClose(f: (err?: Error) => void) { this.closeHandler = f; this.releaseBacklog(); }
+  /** An accepted connection's local side is full (true) or drained (false). */
+  onPause: (paused: boolean) => void = () => {};
   private static streams = new Map<number, ElectronTcpStream>();
   private static wired = false;
   private closed = false;
@@ -94,6 +101,9 @@ export class ElectronTcpStream implements ByteStream {
   }
   /** Begin delivering data once onData/onClose are set. */
   start(): void { this.bridge.tcpResume?.(this.id); }
+  /** An accepted connection: `n` bytes delivered by onData were consumed
+   *  (main reads on only while little is unacked). */
+  ack(n: number): void { if (!this.closed && n > 0) this.bridge.tcpAck?.(this.id, n); }
 
   /** Events for an id `open` hasn't returned yet: main sends the socket's
    *  first bytes (the SSH server's banner) as soon as it connects, which can
@@ -120,6 +130,7 @@ export class ElectronTcpStream implements ByteStream {
   }
   private deliver([kind, data, message]: TcpEvent) {
     if (kind === 'data' && data) this.onData(data);
+    else if (kind === 'pause' || kind === 'resume') this.onPause(kind === 'pause');
     else if (kind === 'close') this.finish();
     else if (kind === 'error') this.finish(new Error(message || 'connection error'));
   }
