@@ -237,7 +237,8 @@ private actor ACMCPServerImpl {
         case "bromure_ac_vm_exec" where debug:
             let profile = try requireArg(args, "profile")
             let command = try requireArg(args, "command")
-            let timeout = (args["timeout"] as? Int) ?? Int((args["timeout"] as? Double) ?? 30)
+            // The agent's number: one Int can't hold is the default, not a trap.
+            let timeout = (args["timeout"] as? Int) ?? (args["timeout"] as? Double).flatMap { Int(exactly: $0.rounded()) } ?? 30
             let r = try await apiCall("POST", "/sessions/\(profile)/exec",
                                       body: ["command": command, "timeout": timeout])
             if let err = r["error"] as? String { throw MCPACError.api(err) }

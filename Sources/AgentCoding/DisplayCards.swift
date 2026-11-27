@@ -98,7 +98,11 @@ struct DisplayFileReader {
         // One byte: the guest reads a full chunk for a length of 0.
         guard let op, let r = await op(["op": "read", "path": path, "offset": 0, "length": 1]),
               r["error"] == nil else { return nil }
-        return (r["size"] as? Int64) ?? (r["size"] as? Int).map(Int64.init) ?? (r["size"] as? Double).map { Int64($0) }
+        // The guest's word: a size Int64 can't hold (1e100, NaN, a
+        // fraction, a negative) is no size, never a trap (CWE-20).
+        let n = (r["size"] as? Int64) ?? (r["size"] as? Int).map(Int64.init)
+            ?? (r["size"] as? Double).flatMap { Int64(exactly: $0) }
+        return n.flatMap { $0 >= 0 ? $0 : nil }
     }
 
     /// Stream a file off the machine into `dest`, a chunk at a time — any

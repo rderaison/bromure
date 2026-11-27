@@ -520,8 +520,9 @@ private actor MCPServerImpl {
         // viewport: {width, height [, deviceScaleFactor]}
         // {0,0} clears any existing override and restores native sizing.
         if let vp = args["viewport"] as? [String: Any] {
-            let w = (vp["width"] as? Int) ?? Int((vp["width"] as? Double) ?? 0)
-            let h = (vp["height"] as? Int) ?? Int((vp["height"] as? Double) ?? 0)
+            // The client's numbers: one Int can't hold is none, not a trap.
+            let w = (vp["width"] as? Int) ?? (vp["width"] as? Double).flatMap { Int(exactly: $0.rounded()) } ?? 0
+            let h = (vp["height"] as? Int) ?? (vp["height"] as? Double).flatMap { Int(exactly: $0.rounded()) } ?? 0
             if w == 0 && h == 0 {
                 _ = try? await conn.send("Emulation.clearDeviceMetricsOverride", params: [:])
             } else {
