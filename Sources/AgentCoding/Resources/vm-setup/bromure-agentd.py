@@ -1747,7 +1747,29 @@ def _current_umask():
                     return int(line.split()[1], 8)
     except (OSError, ValueError, IndexError):
         pass
-    return 0o022
+    # Unknown: owner-only, never wider than the user asked for (CWE-732).
+    return 0o077
+
+
+def _new_file_mode(folder):
+    """The mode a plain write would give a new file in `folder`: a probe
+    file created there the normal way (0666, the umask, and a default ACL
+    of the folder's, which the umask alone misses), then removed. Unknown
+    (no file can be made there): from the umask."""
+    probe = os.path.join(folder, ".bromure-%s.mode" % os.urandom(8).hex())
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+    except OSError:
+        return 0o666 & ~_current_umask()
+    try:
+        return os.fstat(fd).st_mode & 0o777
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
 
 
 def _replace_staged(staged, dest):
@@ -1769,7 +1791,7 @@ def _replace_staged(staged, dest):
         # The staged file is owner-only while it fills (`write`'s
         # `staged`): a new file gets what a plain write would have given.
         try:
-            os.chmod(staged, 0o666 & ~_current_umask())
+            os.chmod(staged, _new_file_mode(os.path.dirname(dest)))
         except OSError:
             pass
         try:

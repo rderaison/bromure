@@ -140,4 +140,56 @@ struct StagedReplaceTests {
         var st = stat(); stat(plain.path, &st)
         #expect(read(plain) == "new" && st.st_mode & 0o7777 == 0o640)
     }
+
+    // Regression (CWE-732): a new file from an upload got 0644, the usual
+    // umask's mode, whatever the process's own: under umask 077 a plain
+    // write gives 0600, the upload a world-readable file.
+    private func leftovers(_ d: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []).filter { $0.hasPrefix(".bromure-") }
+    }
+
+    @Test("A new file gets the mode a plain write would under the process's umask, 077 included")
+    func newFileHonorsUmask() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let old = umask(0o077)
+        let tight = StagedReplace.newFileMode(in: d.path)
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("new", staged)
+        chmod(staged.path, 0o600)
+        let r = StagedReplace.replace(staged.path, onto: dest.path)
+        umask(old)
+        #expect(tight == 0o600)
+        #expect(r == nil)
+        var st = stat(); stat(dest.path, &st)
+        #expect(st.st_mode & 0o777 == 0o600)
+        #expect(leftovers(d).isEmpty)
+        // The usual umask: what a plain write gives.
+        #expect(StagedReplace.newFileMode(in: d.path) == 0o666 & ~old)
+    }
+
+    @Test("bromure-agentd: a new file under umask 077 stays owner-only",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func guestNewFileHonorsUmask() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let py = Process()
+        py.executableURL = URL(fileURLWithPath: Self.python)
+        py.arguments = ["-I", "-c", """
+            import importlib.util, sys, os
+            s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            d = sys.argv[2]
+            os.umask(0o077)
+            staged = os.path.join(d, '.f.part'); open(staged, 'w').write('new'); os.chmod(staged, 0o600)
+            assert m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, 'f')}) == {'exit_code': 0}
+            assert os.stat(os.path.join(d, 'f')).st_mode & 0o777 == 0o600, oct(os.stat(os.path.join(d, 'f')).st_mode)
+            os.umask(0o022)
+            staged = os.path.join(d, '.g.part'); open(staged, 'w').write('new'); os.chmod(staged, 0o600)
+            assert m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, 'g')}) == {'exit_code': 0}
+            assert os.stat(os.path.join(d, 'g')).st_mode & 0o777 == 0o644
+            assert not [f for f in os.listdir(d) if f.startswith('.bromure-')]
+            """, Self.agentd.path, d.path]
+        let err = Pipe(); py.standardError = err
+        try py.run(); py.waitUntilExit()
+        #expect(py.terminationStatus == 0, Comment(rawValue: String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)))
+    }
 }
