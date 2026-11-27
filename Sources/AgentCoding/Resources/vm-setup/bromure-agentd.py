@@ -82,6 +82,7 @@ import termios
 import threading
 import time
 import traceback
+import uuid
 
 # See _UNIT_CONTENT: python children ignore the user site-packages too.
 os.environ["PYTHONNOUSERSITE"] = "1"
@@ -1750,7 +1751,7 @@ def _current_umask():
     return 0o022
 
 
-def _replace_staged(staged, dest):
+def _replace_staged(staged, dest, across=True):
     """Put the complete file `staged` (beside `dest`, same filesystem) in
     place of `dest`. A new destination is a rename. An existing one is too,
     once the staged file carries everything the file had besides its bytes:
@@ -1775,11 +1776,13 @@ def _replace_staged(staged, dest):
         try:
             os.replace(staged, dest)
         except OSError as e:
-            # A dangling symlink into another filesystem (EXDEV) or a busy
-            # target: write it through, as a plain write did.
+            # A dangling symlink into another filesystem (EXDEV): staged
+            # again over there, then renamed. A busy target: written
+            # through, as a plain write did.
             if e.errno not in (errno.EXDEV, errno.EBUSY):
                 raise
-            _write_in_place(staged, dest, create=True)
+            if e.errno != errno.EXDEV or not across or not _replace_across(staged, dest):
+                _write_in_place(staged, dest, create=True)
         return
     if st.st_nlink > 1 or not _copy_file_metadata(dest, staged, st):
         _write_in_place(staged, dest)
@@ -1795,6 +1798,10 @@ def _replace_staged(staged, dest):
         # staged copy is complete and local.
         if not isinstance(e, PermissionError) and e.errno not in (errno.EXDEV, errno.EBUSY):
             raise
+        # Across filesystems: staged again on the target's own one, so it
+        # still lands in one step (CWE-459).
+        if e.errno == errno.EXDEV and across and _replace_across(staged, dest):
+            return
         _write_in_place(staged, dest)
 
 
@@ -1819,11 +1826,92 @@ def _copy_file_metadata(src, dst, st):
         return False
 
 
+def _replace_across(staged, dest):
+    """`dest` is on another filesystem than `staged` (a symlink's target):
+    copy `staged` to a fresh file beside `dest`, on its filesystem, and
+    replace `dest` from there (`_replace_staged`) -- in one step, as on the
+    same filesystem. A copy that fails (a full disk, a read error) leaves
+    `dest` untouched (CWE-459). False when no file can be made there (the
+    folder isn't writable): the caller writes in place, with a backup."""
+    folder = os.path.dirname(dest)
+    tmp = os.path.join(folder, ".bromure-%s.part" % uuid.uuid4().hex)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "wb") as out, open(staged, "rb") as src:
+            shutil.copyfileobj(src, out, 1 << 20)
+        # Same filesystem now; never across again.
+        _replace_staged(tmp, dest, across=False)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.unlink(staged)
+    return True
+
+
 def _write_in_place(staged, dest, create=False):
-    mode = "wb" if create and not os.path.exists(dest) else "r+b"
-    with open(staged, "rb") as src, open(dest, mode) as out:
-        shutil.copyfileobj(src, out, 1 << 20)
-        out.truncate()
+    """Write `staged`'s bytes into `dest` itself (its inode, links and
+    metadata stay). Not atomic, so never destructive either: a new file
+    that fails part-way is removed again, and an existing one gets its old
+    bytes back from a copy taken first (CWE-459) -- a full disk, a write
+    refused, a read error on `staged` leave `dest` as it was. The copy is
+    owner-only, beside `staged`; if even putting it back fails, it is kept
+    and the error names it."""
+    if create and not os.path.exists(dest):
+        try:
+            out = open(dest, "xb")
+        except FileExistsError:
+            out = None
+        if out is not None:
+            try:
+                with out, open(staged, "rb") as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            except BaseException:
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
+                raise
+            os.unlink(staged)
+            return
+    backup = os.path.join(os.path.dirname(staged), ".bromure-%s.old" % uuid.uuid4().hex)
+    with open(dest, "r+b") as out:
+        bfd = os.open(backup, os.O_RDWR | os.O_CREAT | os.O_EXCL
+                      | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(bfd, "w+b") as old:
+            try:
+                shutil.copyfileobj(out, old, 1 << 20)
+                old.flush()
+            except BaseException:
+                os.unlink(backup)
+                raise
+            try:
+                out.seek(0)
+                with open(staged, "rb") as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+                out.truncate()
+                out.flush()
+            except BaseException as e:
+                try:
+                    old.seek(0)
+                    out.seek(0)
+                    shutil.copyfileobj(old, out, 1 << 20)
+                    out.truncate()
+                    out.flush()
+                except OSError as again:
+                    raise OSError(getattr(e, "errno", None) or errno.EIO,
+                                  "%s: the write failed (%s) and its old contents couldn't be "
+                                  "put back (%s); they are saved in %s"
+                                  % (dest, e, again, backup))
+                os.unlink(backup)
+                raise
+    os.unlink(backup)
     os.unlink(staged)
 
 
