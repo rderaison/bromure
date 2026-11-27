@@ -152,12 +152,14 @@ struct StagedReplaceTests {
     func newFileHonorsUmask() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let old = umask(0o077)
+        var restored = false
+        defer { if !restored { umask(old) } }
         let tight = StagedReplace.newFileMode(in: d.path)
         let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
         try write("new", staged)
         chmod(staged.path, 0o600)
         let r = StagedReplace.replace(staged.path, onto: dest.path)
-        umask(old)
+        umask(old); restored = true
         #expect(tight == 0o600)
         #expect(r == nil)
         var st = stat(); stat(dest.path, &st)
