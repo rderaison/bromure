@@ -71,7 +71,20 @@ final class P2PEnrollmentCoordinator {
     var webSignIn: WebSignIn?
 #endif
 
-    init() { identity = P2PIdentity.current() }
+    init() {
+        identity = P2PIdentity.current()
+        // The device channel found the bearer refused (P2PBroker): explain,
+        // and let the next Sign Out forget it on this device.
+        NotificationCenter.default.addObserver(forName: .p2pCredentialRefused, object: nil, queue: .main) { note in
+            guard let bearer = note.userInfo?["bearer"] as? String else { return }
+            MainActor.assumeIsolated {
+                let me = P2PEnrollmentCoordinator.shared
+                guard ControlPlaneClient.current()?.1 == bearer else { return }
+                me.noteCredentialRefused(bearer: bearer)
+                me.error = Self.directoryRefusedMessage
+            }
+        }
+    }
 
     var signedIn: Bool { identity != nil }
     var accountLabel: String? { identity?.orgSlug ?? (signedIn ? "bromure.io" : nil) }
