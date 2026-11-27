@@ -4435,4 +4435,4 @@
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "L’hôte n’a pas répondu, même à la seconde demande. Regardez la carte de la tâche : si elle est toujours en revue et pas en cours de fusion, vérifiez la connexion et fusionnez-la à nouveau.";
 "The host refused it (HTTP %d)." = "L’hôte l’a refusé (HTTP %d).";
 
-"Its merged branch's checkout is being removed — try again in a moment." = "Le checkout de sa branche fusionnée est en cours de suppression — réessayez dans un instant.";
+"Its checkout is being removed — try again in a moment." = "Son checkout est en cours de suppression — réessayez dans un instant.";

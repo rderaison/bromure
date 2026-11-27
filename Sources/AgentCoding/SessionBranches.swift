@@ -248,6 +248,9 @@ extension AgentSessionEngine {
     func scheduleCheckoutCleanup(_ id: UUID, root: String, branch: String,
                                  afterNanoseconds delay: UInt64 = 2_000_000_000,
                                  remove: @escaping @MainActor (AgentSession) async -> Bool) {
+        // One already removing stays in charge: replaced, its guard would
+        // be gone while its removal still runs.
+        if checkoutCleanups[id]?.removing == true { return }
         let token = UUID()
         checkoutCleanups[id] = CheckoutCleanup(token: token)
         Task { [weak self] in
@@ -275,15 +278,16 @@ extension AgentSessionEngine {
         }
     }
 
+    static var checkoutBeingRemoved: String {
+        NSLocalizedString("Its checkout is being removed — try again in a moment.",
+                          comment: "session/task resume refused while its worktree is removed")
+    }
+
     /// A resume of `id`: a pending merge cleanup is called off. Nil = go
     /// ahead; else why not (its removal is already running).
     func cancelCheckoutCleanup(_ id: UUID) -> String? {
         guard let c = checkoutCleanups[id] else { return nil }
-        if c.removing {
-            return NSLocalizedString(
-                "Its merged branch's checkout is being removed — try again in a moment.",
-                comment: "session resume")
-        }
+        if c.removing { return Self.checkoutBeingRemoved }
         checkoutCleanups[id] = nil
         BACDebug.log("sessions", "checkout cleanup called off: the session was resumed")
         return nil

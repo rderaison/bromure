@@ -4469,4 +4469,4 @@
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again.";
 "The host refused it (HTTP %d)." = "The host refused it (HTTP %d).";
 
-"Its merged branch's checkout is being removed — try again in a moment." = "Its merged branch's checkout is being removed — try again in a moment.";
+"Its checkout is being removed — try again in a moment." = "Its checkout is being removed — try again in a moment.";

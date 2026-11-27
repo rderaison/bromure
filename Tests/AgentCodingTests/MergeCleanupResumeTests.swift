@@ -101,4 +101,41 @@ struct MergeCleanupResumeTests {
         await settle()
         #expect(calls.removes == 1)
     }
+
+    @Test("a second merge while the first's removal runs doesn't drop its guard")
+    func secondMergeDuringRemoval() async {
+        let (store, engine, s, url) = setUp(); defer { try? FileManager.default.removeItem(at: url) }
+        let calls = Calls()
+        engine.scheduleCheckoutCleanup(s.id, root: "/w/repo", branch: "wt/b", afterNanoseconds: 1_000_000) { _ in
+            calls.removes += 1
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        engine.scheduleCheckoutCleanup(s.id, root: "/w/repo", branch: "wt/b", afterNanoseconds: 1_000_000) { _ in
+            calls.removes += 10; return true
+        }
+        #expect(engine.checkoutCleanups[s.id]?.removing == true)
+        engine.resume(s.id)
+        #expect(store.session(s.id)?.lastError == AgentSessionEngine.checkoutBeingRemoved)
+        await settle()
+        #expect(calls.removes == 1)
+    }
+
+    @Test("a Done task: a Resume calls its pending cleanup off, and is refused while the removal runs")
+    func taskResume() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("tasks-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CodingTaskStore(fileURL: url)
+        let engine = CodingTaskEngine(store: store, delegate: nil)
+        let t = CodingTask(profileID: UUID(), stage: .done, branchSlug: "task-x")
+        store.upsert(t)
+        engine.checkoutCleanups[t.id] = .init(token: UUID(), removing: true)
+        engine.resumeSession(t.id)
+        #expect(store.task(t.id)?.lastError == AgentSessionEngine.checkoutBeingRemoved)
+        #expect(engine.checkoutCleanups[t.id] != nil)
+        engine.checkoutCleanups[t.id] = .init(token: UUID())
+        engine.resumeSession(t.id)
+        #expect(engine.checkoutCleanups[t.id] == nil)
+    }
 }
