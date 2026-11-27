@@ -113,9 +113,10 @@ const GUEST_ERROR_DUMP = /^commandFailed\(exitCode: -?\d+, stderr: "/;
  *  atomic step (`rename`) only once the whole source was read and written. A
  *  copy that fails part-way — the source became unreadable, a write was
  *  refused — leaves `dest` exactly as it was and removes the temp file.
- *  A guest too old for `rename` gets the direct write it always had, with no
- *  cleanup (`open` is called again for that: a File can be read twice), and so
- *  does a destination whose DIRECTORY we may not write — see below. */
+ *  A guest too old for `rename` gets the direct write it always had
+ *  (`open` is called again for that: a File can be read twice; a new file it
+ *  fails to fill is removed again — writeLegacy), and so does a destination
+ *  whose DIRECTORY we may not write — see below. */
 export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
@@ -163,8 +164,46 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     await fileOp({ op: 'remove', path: tmp }).catch(() => {});
     if (!unknownOp(e)) throw e;
   }
-  // Straight onto `dest`, as such a guest always got it — and without the
-  // cleanup: `dest` isn't this copy's to delete (another drop of the same
-  // name may have finished there meanwhile), as FolderUpload.write on macOS.
-  return writeDirect(open(), dest, chunk, fileOp, encode, progress);
+  // Straight onto `dest`, as such a guest always got it. A file that was
+  // there stays whatever happens (another drop of the same name may have
+  // finished there meanwhile: never this copy's to delete); one this copy
+  // created is removed again if it fails part-way (writeLegacy).
+  return writeLegacy(open, dest, chunk, fileOp, encode, progress);
+}
+
+/** The size of guest file `path`; null when it can't be read — not there,
+ *  or not this user's to read. A guest's `read` has said its size since
+ *  long before `rename`. */
+async function guestSize(path: string, fileOp: GuestFileOp): Promise<number | null> {
+  try {
+    const r: any = await fileOp({ op: 'read', path, offset: 0, length: 1 });
+    return typeof r?.size === 'number' ? r.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A guest without `rename`: written straight onto `dest`. If `dest` wasn't
+ *  there and the copy fails part-way, the truncated file it left under the
+ *  final name is removed (CWE-459) — but only while it is still that copy's:
+ *  its size exactly the bytes this copy had written. A file that was there
+ *  before, or one another drop has since written over (its size differs),
+ *  stays: a guest this old has no remove tied to a file's identity, so its
+ *  size stands in for it (CWE-362). Mirrors FolderUpload.writeLegacy. */
+export async function writeLegacy(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
+                                  fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                                  progress?: (sent: number) => void): Promise<number> {
+  const existed = (await guestSize(dest, fileOp)) !== null;
+  let written = 0;
+  try {
+    return await writeStreamChunked(open(), chunk, async (bytes, append) => {
+      await fileOp({ op: 'write', path: dest, data: encode(bytes), append }, 60);
+      written += bytes.length;
+    }, progress);
+  } catch (e) {
+    if (!existed && (await guestSize(dest, fileOp)) === written) {
+      await fileOp({ op: 'remove', path: dest }).catch(() => {});
+    }
+    throw e;
+  }
 }

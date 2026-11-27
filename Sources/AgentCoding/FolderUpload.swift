@@ -141,8 +141,46 @@ enum FolderUpload {
                 _ = try? await op(["op": "remove", "path": tmp])
                 guard ("\(error) " + error.localizedDescription).localizedCaseInsensitiveContains("unknown file op") else { throw error }
             }
+            try await writeLegacy(src, to: guestPath, label: label, op: op, progress: progress)
+            return
         }
         try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
+    }
+
+    /// A guest without `rename`: written straight onto `guestPath`. If it
+    /// wasn't there and the copy fails part-way, the truncated file left
+    /// under the final name is removed (CWE-459) — but only while it is
+    /// still this copy's: its size exactly the bytes this copy had written.
+    /// A file that was there before, or one another drop has since written
+    /// over (its size differs), stays: a guest this old has no remove tied
+    /// to a file's identity, so its size stands in for it (CWE-362).
+    /// Mirrors writeLegacy in web-client/src/core/remote/chunkedWrite.ts.
+    private static func writeLegacy(_ src: URL, to guestPath: String, label: String, op: FileOp,
+                                    progress: ((String) -> Void)?) async throws {
+        let existed = await guestSize(guestPath, op: op) != nil
+        var written = 0
+        do {
+            try await writeChunks(src, to: guestPath, label: label, op: { spec in
+                let reply = try await op(spec)
+                if spec["op"] as? String == "write" {
+                    written += Data(base64Encoded: spec["data"] as? String ?? "")?.count ?? 0
+                }
+                return reply
+            }, progress: progress)
+        } catch {
+            if !existed, await guestSize(guestPath, op: op) == written {
+                _ = try? await op(["op": "remove", "path": guestPath])
+            }
+            throw error
+        }
+    }
+
+    /// The size of guest file `path`; nil when it can't be read — not
+    /// there, or not this user's to read. A guest's `read` has said its
+    /// size since long before `rename`.
+    private static func guestSize(_ path: String, op: FileOp) async -> Int? {
+        guard let reply = try? await op(["op": "read", "path": path, "offset": 0, "length": 1]) else { return nil }
+        return (reply["size"] as? NSNumber)?.intValue
     }
 
     /// The filesystem refused: EPERM (1) or EACCES (13), read from the

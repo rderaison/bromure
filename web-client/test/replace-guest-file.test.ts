@@ -39,6 +39,13 @@ function guest(opts: { rename?: 'ok' | 'unknown' | 'fail';
         throw new Error(`[Errno 28] No space left on device: "${o.path}"`);
       }
     }
+    if (o.op === 'read') {
+      // Its size: the chunk sizes it holds (an unbracketed fixture, its length).
+      const f = files.get(o.path);
+      if (f === undefined) throw new Error(`[Errno 2] No such file or directory: '${o.path}'`);
+      const parts = [...f.matchAll(/\[(\d+)\]/g)].map(m => Number(m[1]));
+      return { size: parts.length ? parts.reduce((a, b) => a + b, 0) : f.length };
+    }
     if (o.op === 'write') files.set(o.path, (o.append ? files.get(o.path) ?? '' : '') + `[${o.data}]`);
     else if (o.op === 'remove') files.delete(o.path);
     else if (o.op === 'rename') {
@@ -193,6 +200,37 @@ describe('replaceGuestFile', () => {
     const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
     await expect(replaceGuestFile(open, DEST, 4, g.op, enc)).rejects.toThrow('could not be read');
     expect(g.ops).not.toContain(`remove ${DEST}`);                              // dest isn't this copy's to delete
+  });
+
+  // Regression (CWE-459): on that path a NEW destination the copy created
+  // stayed under its final name, truncated, when the copy failed part-way.
+  const NEW = '/home/ubuntu/new.txt';
+  it('an old guest: a new file the direct write fails to fill is removed again', async () => {
+    const g = guest({ rename: 'unknown' });
+    let opens = 0;
+    const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
+    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
+    expect(g.files.has(NEW)).toBe(false);
+    expect([...g.files.keys()]).toEqual([DEST]);                                // no temp file either
+  });
+
+  it('an old guest: a new file another drop wrote over meanwhile is not removed', async () => {
+    const g = guest({ rename: 'unknown' });
+    let opens = 0;
+    const open = () => {
+      if (opens++ === 0) return bytes(8)();
+      let step = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (step++ === 0) { c.enqueue(new Uint8Array(4)); return; }
+          g.files.set(NEW, '[100]');                                           // the other drop finished
+          c.error(new DOMException('The file could not be read.', 'NotReadableError'));
+        },
+      });
+    };
+    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
+    expect(g.files.get(NEW)).toBe('[100]');
+    expect(g.ops).not.toContain(`remove ${NEW}`);
   });
 });
 
