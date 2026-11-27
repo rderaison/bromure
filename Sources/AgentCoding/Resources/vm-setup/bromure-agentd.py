@@ -1692,8 +1692,19 @@ def _file_op(spec):
                     os.fchmod(f.fileno(), 0o600)
                     f.write(data)
                 return {"exit_code": 0}
-            with open(path, "ab" if spec.get("append") else "wb") as f:
+            # Opened without truncating, then truncated through the same
+            # descriptor: an open(O_TRUNC) already strips set-id bits, before
+            # they could be read for `_restore_setid`.
+            append = bool(spec.get("append"))
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC
+                         | (os.O_APPEND if append else 0), 0o666)
+            with os.fdopen(fd, "wb") as f:
+                kept = _setid_snapshot(fd)
+                if not append:
+                    os.ftruncate(fd, 0)
                 f.write(data)
+                f.flush()
+                _restore_setid(fd, kept, path)
             return {"exit_code": 0}
         if op == "mkdir":
             os.makedirs(path, exist_ok=True)
@@ -1822,9 +1833,60 @@ def _copy_file_metadata(src, dst, st):
 def _write_in_place(staged, dest, create=False):
     mode = "wb" if create and not os.path.exists(dest) else "r+b"
     with open(staged, "rb") as src, open(dest, mode) as out:
+        kept = _setid_snapshot(out.fileno())
         shutil.copyfileobj(src, out, 1 << 20)
         out.truncate()
+        out.flush()
+        _restore_setid(out.fileno(), kept, dest)
     os.unlink(staged)
+
+
+def _setid_snapshot(fd):
+    """What writing the open file `fd` may make the kernel strip, read
+    before the write: its set-user-ID / set-group-ID bits (cleared when a
+    user without CAP_FSETID writes it, on Linux and macOS alike) and its
+    file capabilities (security.capability, removed on any write). None
+    when it has neither -- nothing to put back."""
+    mode = os.fstat(fd).st_mode & 0o7777
+    caps = None
+    if hasattr(os, "getxattr"):
+        try:
+            caps = os.getxattr(fd, "security.capability")
+        except OSError:
+            caps = None
+    if not mode & 0o6000 and caps is None:
+        return None
+    return (mode, caps)
+
+
+def _restore_setid(fd, kept, path):
+    """Put back what the write stripped (`_setid_snapshot`), through the
+    same descriptor. Raises when it can't (file capabilities need
+    CAP_SETFCAP; a set-group-ID bit, membership of the group): the bytes
+    are in, but the file is no longer what it was, so the upload must not
+    report a plain success (CWE-732)."""
+    if kept is None:
+        return
+    mode, caps = kept
+    if caps is not None:
+        try:
+            now = os.getxattr(fd, "security.capability")
+        except OSError:
+            now = None
+        if now != caps:
+            try:
+                os.setxattr(fd, "security.capability", caps)
+            except OSError as e:
+                raise OSError(e.errno, "%s was written, but its file capabilities "
+                              "were cleared and could not be restored: %s" % (path, e.strerror))
+    if os.fstat(fd).st_mode & 0o7777 != mode:
+        try:
+            os.fchmod(fd, mode)
+        except OSError:
+            pass
+    if os.fstat(fd).st_mode & 0o7777 != mode:
+        raise OSError(errno.EPERM, "%s was written, but its set-user-ID/set-group-ID "
+                      "permissions were cleared and could not be restored" % path)
 
 
 def _untar_confined(archive, dest):

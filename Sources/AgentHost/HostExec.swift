@@ -111,12 +111,22 @@ enum HostExec {
                         return ["error": String(cString: strerror(errno)), "exit_code": 1]
                     }
                     try h.write(contentsOf: data)
-                } else if spec["append"] as? Bool == true, let h = FileHandle(forWritingAtPath: path) {
-                    defer { try? h.close() }
-                    try h.seekToEnd()
-                    try h.write(contentsOf: data)
                 } else {
-                    try data.write(to: URL(fileURLWithPath: path))
+                    // Opened without truncating, then truncated through the
+                    // same descriptor: an open(O_TRUNC) already strips the
+                    // set-id bits a write by this user clears, before they
+                    // could be read to put back.
+                    let append = spec["append"] as? Bool == true
+                    let fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : 0), 0o666)
+                    guard fd >= 0 else { return ["error": String(cString: strerror(errno)), "exit_code": 1] }
+                    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                    defer { try? h.close() }
+                    let kept = StagedReplace.setIDMode(fd)
+                    if !append { try h.truncate(atOffset: 0) }
+                    try h.write(contentsOf: data)
+                    if let failure = StagedReplace.restoreSetID(fd, kept, path: path) {
+                        return ["error": failure, "exit_code": 1]
+                    }
                 }
                 return ["exit_code": 0]
             case "mkdir":

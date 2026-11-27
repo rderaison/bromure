@@ -140,4 +140,66 @@ struct StagedReplaceTests {
         var st = stat(); stat(plain.path, &st)
         #expect(read(plain) == "new" && st.st_mode & 0o7777 == 0o640)
     }
+
+    // Regression (CWE-732): writing a file in place as a user who isn't root
+    // makes the kernel clear its set-user-ID / set-group-ID bits (macOS and
+    // Linux alike). A hard-linked 04755 file came out 0755 from an upload.
+    private func mode(_ u: URL) -> mode_t { var st = stat(); stat(u.path, &st); return st.st_mode & 0o7777 }
+
+    @Test("A hard-linked set-user-ID file keeps its set-id bits through an in-place upload")
+    func hardLinkKeepsSetID() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        let other = d.appendingPathComponent("other")
+        try write("old contents, longer", dest)
+        #expect(chmod(dest.path, 0o4755) == 0)
+        #expect(link(dest.path, other.path) == 0)
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        #expect(read(dest) == "new" && read(other) == "new")
+        #expect(mode(dest) == 0o4755)
+    }
+
+    @Test("bromure-agentd: set-id bits survive an in-place upload and a plain write",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func guestTwinKeepsSetID() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let linked = d.appendingPathComponent("f"), other = d.appendingPathComponent("other")
+        let plain = d.appendingPathComponent("plain"), cross = d.appendingPathComponent("cross")
+        for f in [linked, plain, cross] {
+            try write("old contents, longer", f)
+            #expect(chmod(f.path, 0o4755) == 0)
+        }
+        #expect(link(linked.path, other.path) == 0)
+        let py = Process()
+        py.executableURL = URL(fileURLWithPath: Self.python)
+        py.arguments = ["-I", "-c", """
+            import importlib.util, sys, os, base64, errno
+            s = importlib.util.spec_from_file_location('agentd', sys.argv[1])
+            m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+            d = sys.argv[2]
+            # In place: the hard-linked file.
+            staged = os.path.join(d, '.f.part'); open(staged, 'w').write('new')
+            assert m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, 'f')}) == {'exit_code': 0}
+            # In place: a rename refused across filesystems.
+            staged = os.path.join(d, '.c.part'); open(staged, 'w').write('new')
+            real = os.replace
+            def xdev(a, b): raise OSError(errno.EXDEV, 'xdev')
+            m.os.replace = xdev
+            assert m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, 'cross')}) == {'exit_code': 0}
+            m.os.replace = real
+            # A plain (direct) write: truncating, then appending.
+            p = os.path.join(d, 'plain')
+            for data, app in ((b'ne', False), (b'w', True)):
+                r = m._file_op({'op': 'write', 'path': p, 'data': base64.b64encode(data).decode(), 'append': app})
+                assert r == {'exit_code': 0}, r
+            """, Self.agentd.path, d.path]
+        try py.run(); py.waitUntilExit()
+        #expect(py.terminationStatus == 0)
+        for f in [linked, plain, cross] {
+            #expect(read(f) == "new")
+            #expect(mode(f) == 0o4755)
+        }
+        #expect(read(other) == "new")
+    }
 }
