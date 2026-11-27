@@ -180,6 +180,22 @@ describe('account.signOut', () => {
     expect(account.get().record).toBeNull();
   });
 
+  // Regression (CWE-362): two sign-outs started before the first 401 came
+  // back both captured the record; the first showed the warning, and the
+  // second took that as acknowledged and erased the credential unseen.
+  it('concurrent sign-outs share one result: the warning, with nothing erased', async () => {
+    await signedIn();
+    outcome.selfRevoke = 401;
+    const [a, b] = await Promise.all([account.signOut(), account.signOut()]);
+    expect([a, b]).toEqual([false, false]);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke']);
+    expect(account.get().record?.deviceToken).toBe('tok');
+    // Asked again once the warning is up: forgotten on this device only.
+    calls.length = 0;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
+  });
+
   it('a 401 that clears once the credential propagates signs out', async () => {
     await signedIn(undefined, false);
     queue.selfRevoke = [401, 401];
