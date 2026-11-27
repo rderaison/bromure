@@ -4434,3 +4434,5 @@
 "The merge may not have started" = "合并可能未开始";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "主机两次都没有响应。请查看任务卡片：如果它仍在审阅中且未在合并，请检查连接后再次合并。";
 "The host refused it (HTTP %d)." = "主机拒绝了该请求（HTTP %d）。";
+
+"Its checkout is being removed — try again in a moment." = "正在删除其检出目录，请稍后再试。";

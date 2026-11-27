@@ -2167,6 +2167,10 @@ final class CodingTaskEngine {
     /// for a grace period, so the agent's own `board_report_landing` lands
     /// as a no-op success instead of "isn't bound to a board task".
     var landingGrace: Set<UUID> = []
+    /// A Done card's pending checkout removal (archiveTranscriptThenCleanup):
+    /// its token, and whether the removal is running. A Resume calls a
+    /// pending one off, and waits out a running one (CWE-362).
+    var checkoutCleanups: [UUID: AgentSessionEngine.CheckoutCleanup] = [:]
     /// Grace periods the agent ended early (it reported, or its turn ended).
     var landingGraceEnded: Set<UUID> = []
     /// The agent's last pane line when the landing brief went in — the
@@ -3749,8 +3753,18 @@ final class CodingTaskEngine {
     func resumeSession(_ taskID: UUID) {
         guard let task = store.task(taskID),
               task.stage == .inProgress || task.stage == .testing || task.stage == .done,
-              let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
-              delegate != nil else { return }
+              let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }) else { return }
+        // Done, its checkout about to go: that's called off — or, once the
+        // removal is running, the resume waits for it (CWE-362).
+        if let c = checkoutCleanups[taskID] {
+            if c.removing {
+                store.mutate(taskID) { $0.lastError = AgentSessionEngine.checkoutBeingRemoved }
+                return
+            }
+            checkoutCleanups[taskID] = nil
+            BACDebug.log("tasks", "“\(task.title)”: checkout cleanup called off — resumed")
+        }
+        guard delegate != nil else { return }
         let unsent = task.comments.filter { $0.sentAt == nil }
         let ids = Set(unsent.map(\.id))
         store.mutate(taskID) { $0.lastError = nil; $0.restartNeeded = nil }
@@ -4689,8 +4703,18 @@ final class CodingTaskEngine {
         let branch = task.branch
         let root = task.rootRepo
         let profileID = task.profileID
+        // This cleanup's alone — unless one is already removing, which this
+        // one then leaves be (it would only drop the running one's guard).
+        let mayRemove = removeWorktree || removeIfEmpty
+        let token = UUID()
+        if mayRemove, checkoutCleanups[taskID]?.removing != true {
+            checkoutCleanups[taskID] = AgentSessionEngine.CheckoutCleanup(token: token)
+        }
         Task { [weak self] in
-            guard let self, let delegate = self.delegate else { return }
+            guard let self else { return }
+            let ours = { @MainActor in self.checkoutCleanups[taskID]?.token == token }
+            defer { if ours() { self.checkoutCleanups[taskID] = nil } }
+            guard let delegate = self.delegate else { return }
             // A beat for the Stop hook's final transcript lines to land
             // (same courtesy as the automation pull).
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -4711,7 +4735,15 @@ final class CodingTaskEngine {
                out.contains("EMPTY") {
                 remove = true
             }
+            // The archive and the probe took a while: a card resumed or
+            // started over since (back to work, or on another branch) keeps
+            // the checkout. From here a Resume is refused until it's done.
+            if remove, !ours() || self.store.task(taskID).map({ $0.stage != .done || $0.branch != branch }) == true {
+                BACDebug.log("tasks", "“\(task.title)”: cleanup dropped — the card moved on")
+                remove = false
+            }
             if remove, let branch, let root, !root.isEmpty {
+                self.checkoutCleanups[taskID]?.removing = true
                 let removed = await self.removeCheckout(task, branch: branch, root: root, delegate: delegate)
                 self.store.mutate(taskID) { $0.checkoutRemoved = removed }
                 BACDebug.log("tasks", "“\(task.title)”: worktree \(removed ? "removed" : "kept") (\(branch))")

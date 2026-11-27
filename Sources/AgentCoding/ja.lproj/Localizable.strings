@@ -4434,3 +4434,5 @@
 "The merge may not have started" = "マージが開始されていない可能性があります";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "2回送信してもホストから応答がありませんでした。タスクのカードを確認し、まだレビュー中でマージ中でなければ、接続を確認してもう一度マージしてください。";
 "The host refused it (HTTP %d)." = "ホストに拒否されました（HTTP %d）。";
+
+"Its checkout is being removed — try again in a moment." = "チェックアウトを削除中です。しばらくしてからもう一度お試しください。";

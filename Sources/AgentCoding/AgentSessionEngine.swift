@@ -58,6 +58,9 @@ final class AgentSessionEngine {
     var branchProbing: Set<UUID> = []
     var branchProbeAt: [UUID: Date] = [:]
     var mergeWatching: Set<UUID> = []
+    /// A merged session's pending checkout removal (scheduleCheckoutCleanup).
+    struct CheckoutCleanup { let token: UUID; var removing = false }
+    var checkoutCleanups: [UUID: CheckoutCleanup] = [:]
     /// Sessions to `git init` their folder for before branching.
     var initGitBeforeBranching: Set<UUID> = []
     /// Branch sessions asked to start from another branch than the
@@ -231,6 +234,12 @@ final class AgentSessionEngine {
     /// `remotely`: a fat client asked — see `start`.
     func resume(_ id: UUID, message: String? = nil, quietly: Bool = false, remotely: Bool = false) {
         guard let s = store.session(id) else { return }
+        // Just merged, its checkout about to go: that's called off — or,
+        // once the removal is running, the resume waits for it.
+        if let busy = cancelCheckoutCleanup(id) {
+            store.mutate(id) { $0.lastError = busy }
+            return
+        }
         // Its workspace was deleted: nothing to wake. It stays archived
         // (a resume used to clear that first, and a failed boot left it
         // un-archived — back in every peer's list).

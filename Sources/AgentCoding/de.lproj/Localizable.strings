@@ -4434,3 +4434,5 @@
 "The merge may not have started" = "Der Merge wurde möglicherweise nicht gestartet";
 "The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "Der Host hat auch auf die zweite Anfrage nicht geantwortet. Sieh dir die Karte der Aufgabe an: Ist sie noch in Prüfung und wird nicht gemergt, prüfe die Verbindung und merge sie erneut.";
 "The host refused it (HTTP %d)." = "Der Host hat es abgelehnt (HTTP %d).";
+
+"Its checkout is being removed — try again in a moment." = "Sein Checkout wird gerade entfernt – versuchen Sie es gleich noch einmal.";
