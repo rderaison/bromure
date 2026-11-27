@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Claude Code's /ship and /steward (2.1.330+): the watch read off the
 /// transcript in the guest and carried on the tab's status line, the session
@@ -9,7 +13,7 @@ import Testing
 @Suite("Claude Code /ship support", .serialized)
 struct ClaudeShipTests {
     private static let python = "/usr/bin/python3"
-    private static let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    private static let repo = URL(fileURLWithPath: #filePath).resolvingSymlinksInPath().deletingLastPathComponent()
         .deletingLastPathComponent().deletingLastPathComponent()
 
     // MARK: Pure parts
@@ -283,6 +287,7 @@ struct ClaudeShipTests {
         #expect(store.session(s.id)?.shipWatch == nil)
     }
 
+    #if canImport(IOKit)   // the assertion is IOKit's: nothing is held where there is none
     @MainActor
     @Test("The keep-awake follows the live watches")
     func keepAwake() {
@@ -296,6 +301,7 @@ struct ClaudeShipTests {
         awake.refresh()
         #expect(!awake.isHolding)
     }
+    #endif
 
     // MARK: The workspace switch
 
@@ -428,6 +434,9 @@ struct ClaudeShipTests {
         ["type": "assistant", "message": ["role": "assistant", "content": [["type": "text", "text": text]]]]
     }
 
+    // The hook run from a stand-in meta share (PolicySteeringTests' installHook,
+    // which finds the share by macOS's device numbers): the macOS tests' only.
+    #if !canImport(ACLinux)
     /// agent-status.sh as staged, run for one hook event; the tab's status file.
     private func runStatusHook(arg: String, event: String, transcript: URL?, scanner: Bool = true) throws -> String {
         let fm = FileManager.default
@@ -489,6 +498,7 @@ struct ClaudeShipTests {
         #expect(try runStatusHook(arg: "stop", event: "Stop", transcript: watching, scanner: false) == "done\ns-1")
         #expect(try runStatusHook(arg: "stop", event: "Stop", transcript: nil) == "done\ns-1")
     }
+    #endif
 
     @Test("The scanner reads the watch Claude Code's own markers show",
           .enabled(if: FileManager.default.isExecutableFile(atPath: python)))

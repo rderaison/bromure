@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// "Coding tasks → Merge: 3 issues": a merge from a fat client that did
 /// nothing, a question asked while landing that couldn't be answered from
@@ -189,6 +193,7 @@ struct TaskMergeFollowUpTests {
     }
     #endif
 
+    #if !canImport(ACLinux)   // the board's card menu: no board on screen on a Linux server
     @Test("a card's own items go first in its menu, ids by position")
     func menuPrepending() {
         let menu = CardMenuItem.list([.init(title: "A"), .divider, .init(title: "B")])
@@ -196,4 +201,5 @@ struct TaskMergeFollowUpTests {
         #expect(all.map(\.title) == ["Answer…", "", "A", "", "B"])
         #expect(all.map(\.id) == Array(0..<5))
     }
+    #endif
 }

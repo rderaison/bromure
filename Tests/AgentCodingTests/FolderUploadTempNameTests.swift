@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Regression: FolderUpload.write staged a file at `.<name>.bromure-<UUID>.part`
 /// — 51 bytes longer than its name, so a valid name over ~204 bytes made the
