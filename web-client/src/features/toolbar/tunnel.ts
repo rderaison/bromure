@@ -45,7 +45,9 @@ export class TunnelController {
   /** The window opened: check the helper, then resume an opt-in. */
   async attach() {
     if (!bridge) return;
-    const a = await bridge.available();
+    // A main process without the tunnel's handlers (screenshot runs) or any
+    // other failure: unavailable, not an unhandled rejection.
+    const a = await bridge.available().catch((e: any) => ({ ok: false, reason: String(e?.message ?? e) }));
     if (!a.ok) { this.set('unavailable', a.reason ?? ''); return; }
     this.offState = this.host.onState(() => this.followSubnet());
     if (this.enabled) this.startIfNeeded(false);
