@@ -83,15 +83,23 @@ function writeDirect(stream: ReadableStream<Uint8Array>, path: string, chunk: nu
 /** The guest agent's answer when it predates an op (bromure-agentd.py). */
 const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.message ?? e));
 
-/** The filesystem refused. bromure-agentd.py's file ops end in
- *  `except Exception as e: return {"error": str(e)}`, so an OSError arrives as
- *  Python's own text — `[Errno 13] Permission denied: '/path/.f.bromure-…'`.
- *  Only the text before the path counts: a file named `permission-denied`
- *  that failed for another reason isn't a refusal. Mirrors
- *  FolderUpload.refusedByFilesystem in Swift; keep the two in step. */
-export const permissionDenied = (e: unknown) =>
-  /\[errno (1|13)\]|permission denied|operation not permitted/i
-    .test(String((e as any)?.message ?? e).split(": '")[0]);
+/** The filesystem refused: EPERM (1) or EACCES (13), read from the error's
+ *  own shape, never from text that may hold a filename (CWE-20).
+ *  - bromure-agentd.py's file ops end in `except Exception as e: return
+ *    {"error": str(e)}`, so an OSError arrives as Python's own text, which
+ *    STARTS with its errno: `[Errno 13] Permission denied: '/d/.f…'`. The
+ *    path after it is quoted with ' or " (Python picks " when the name holds
+ *    an apostrophe) and may say anything, "permission denied" included.
+ *  - A Sidecar Mac (HostExec.swift) answers a refused write with strerror's
+ *    text alone, `Permission denied` / `Operation not permitted`, no path.
+ *  Anything else (ENOSPC on a file named `permission denied's.txt`, an
+ *  exception that merely mentions a path) is not a refusal: the direct-write
+ *  fallback truncates the destination, so it must never run on a guess.
+ *  Mirrors FolderUpload.refusedByFilesystem in Swift; keep the two in step. */
+export const permissionDenied = (e: unknown) => {
+  const text = String((e as any)?.message ?? e).trim();
+  return /^\[errno (1|13)\] /i.test(text) || /^(permission denied|operation not permitted)$/i.test(text);
+};
 
 /** Copy a dropped file OVER `dest` without ever leaving it half-written: the
  *  bytes go to a hidden temp file beside it, which replaces `dest` in one

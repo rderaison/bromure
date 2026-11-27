@@ -145,19 +145,26 @@ enum FolderUpload {
         try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
     }
 
-    /// The guest's answer when the filesystem refused. bromure-agentd.py's
-    /// file ops end in `except Exception as e: return {"error": str(e)}`, so
-    /// an OSError arrives as Python's own text — `[Errno 13] Permission
-    /// denied: '/path/.f.bromure-….part'`. Mirrors permissionDenied() in
-    /// web-client/src/core/remote/chunkedWrite.ts; keep the two in step.
-    /// Only the text before the path counts: a file named
-    /// `permission-denied` that failed for another reason isn't a refusal.
+    /// The filesystem refused: EPERM (1) or EACCES (13), read from the
+    /// error's own shape, never from text that may hold a filename (CWE-20).
+    /// - bromure-agentd.py's file ops end in `except Exception as e: return
+    ///   {"error": str(e)}`, so an OSError arrives as Python's own text, which
+    ///   STARTS with its errno: `[Errno 13] Permission denied: '/d/.f…'`. The
+    ///   path after it is quoted with ' or " (Python picks " when the name
+    ///   holds an apostrophe) and may say anything.
+    /// - A Sidecar Mac (HostExec.swift) answers with strerror's text alone,
+    ///   `Permission denied` / `Operation not permitted`, no path.
+    /// Anything else is not a refusal: the direct-write fallback truncates the
+    /// destination, so it must never run on a guess. Only the guest's message
+    /// is read (`commandFailed`'s stderr, which is its localizedDescription),
+    /// not `"\(error)"`, whose enum dump puts it mid-string. Mirrors
+    /// permissionDenied() in web-client/src/core/remote/chunkedWrite.ts; keep
+    /// the two in step.
     static func refusedByFilesystem(_ error: Error) -> Bool {
-        ["\(error)", error.localizedDescription].contains { full in
-            let text = full.components(separatedBy: ": '")[0]
-            return text.range(of: #"\[errno (1|13)\]|permission denied|operation not permitted"#,
-                              options: [.regularExpression, .caseInsensitive]) != nil
-        }
+        let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.range(of: #"^\[errno (1|13)\] "#, options: [.regularExpression, .caseInsensitive]) != nil
+            || text.range(of: #"^(permission denied|operation not permitted)$"#,
+                          options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// One file, chunked: a truncating first write, then appends. `staged`:

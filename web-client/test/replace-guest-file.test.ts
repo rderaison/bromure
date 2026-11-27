@@ -16,8 +16,12 @@ function guest(opts: { rename?: 'ok' | 'unknown' | 'fail';
                       roDir?: string;
                       /** Refuse the Nth write (1-based), to prove a denial
                        *  part-way through does NOT become a direct write. */
-                      denyWriteNo?: number } = {}) {
-  const files = new Map<string, string>([['/home/ubuntu/notes.txt', 'ORIGINAL']]);
+                      denyWriteNo?: number;
+                      /** Fail the Nth write with ENOSPC, path double-quoted
+                       *  as Python does when it holds an apostrophe. */
+                      noSpaceNo?: number;
+                      dest?: string } = {}) {
+  const files = new Map<string, string>([[opts.dest ?? '/home/ubuntu/notes.txt', 'ORIGINAL']]);
   const ops: string[] = [];
   let writes = 0;
   const op = async (o: Record<string, any>) => {
@@ -30,6 +34,9 @@ function guest(opts: { rename?: 'ok' | 'unknown' | 'fail';
       }
       if (opts.denyWriteNo === writes) {
         throw new Error(`[Errno 13] Permission denied: '${o.path}'`);
+      }
+      if (opts.noSpaceNo === writes) {
+        throw new Error(`[Errno 28] No space left on device: "${o.path}"`);
       }
     }
     if (o.op === 'write') files.set(o.path, (o.append ? files.get(o.path) ?? '' : '') + `[${o.data}]`);
@@ -189,6 +196,20 @@ describe('replaceGuestFile', () => {
   });
 });
 
+// Regression (CWE-20): ENOSPC creating the temp file, its path double-quoted
+// (it holds an apostrophe) and naming a "permission denied's" folder, read as
+// a refusal: the fallback then wrote straight onto the destination, whose
+// first write truncates it.
+describe('replaceGuestFile: a non-refusal error is never a direct write', () => {
+  it("ENOSPC under a folder named permission denied's leaves the destination untouched", async () => {
+    const dest = "/home/permission denied's/notes.txt";
+    const g = guest({ noSpaceNo: 1, dest });
+    await expect(replaceGuestFile(bytes(10), dest, 4, g.op, enc)).rejects.toThrow('No space left');
+    expect(g.files.get(dest)).toBe('ORIGINAL');
+    expect(g.ops.some(o => o === `write ${dest}`)).toBe(false);
+  });
+});
+
 describe('permissionDenied', () => {
   it('reads the refusal from the message, not from the path it names', () => {
     expect(permissionDenied(new Error("[Errno 13] Permission denied: '/d/.f.bromure-1.part'"))).toBe(true);
@@ -196,6 +217,17 @@ describe('permissionDenied', () => {
     expect(permissionDenied('Permission denied')).toBe(true);
     expect(permissionDenied(new Error("[Errno 28] No space left on device: '/d/permission-denied.txt'"))).toBe(false);
     expect(permissionDenied(new Error("[Errno 130] Owner died: '/d/x'"))).toBe(false);
+  });
+
+  // Regression (CWE-20): the parser cut the message at `: '`, but Python
+  // quotes a path holding an apostrophe with ", so the path stayed in and its
+  // words counted: ENOSPC on `permission denied's.txt` read as a refusal.
+  it("a double-quoted path's words never make a refusal", () => {
+    expect(permissionDenied(new Error(`[Errno 28] No space left on device: "/d/.permission denied's.txt.bromure-abc.part"`))).toBe(false);
+    expect(permissionDenied(new Error(`[Errno 5] Input/output error: "/d/[Errno 13] it's"`))).toBe(false);
+    expect(permissionDenied(new Error('unknown file op: Operation not permitted'))).toBe(false);
+    expect(permissionDenied(new Error(`[Errno 13] Permission denied: "/d/.it's.bromure-1.part"`))).toBe(true);
+    expect(permissionDenied(new Error('Operation not permitted'))).toBe(true);   // a Sidecar Mac (strerror)
   });
 });
 

@@ -16,6 +16,8 @@ struct FolderUploadWriteTests {
         var lockedDir: String?
         /// Refuse the n-th write (1-based), whatever its path.
         var failWrite: Int?
+        /// What that refused write says (Python's str(OSError)).
+        var failMessage = "[Errno 5] Input/output error"
         var failRename = false
         var writes = 0
 
@@ -25,7 +27,7 @@ struct FolderUploadWriteTests {
             switch kind {
             case "write":
                 writes += 1
-                if writes == failWrite { throw E("[Errno 5] Input/output error") }
+                if writes == failWrite { throw E(failMessage.replacingOccurrences(of: "{path}", with: path)) }
                 let isTmp = (path as NSString).lastPathComponent.hasPrefix(".")
                 if isTmp, let d = lockedDir, (path as NSString).deletingLastPathComponent == d, files[path] == nil {
                     throw E("[Errno 13] Permission denied: '\(path)'")
@@ -42,7 +44,13 @@ struct FolderUploadWriteTests {
             return ["ok": true]
         }
     }
-    struct E: Error, CustomStringConvertible { let description: String; init(_ s: String) { description = s } }
+    /// Like ACAppDelegate.GuestExecError.commandFailed: a LocalizedError whose
+    /// description is the guest's message.
+    struct E: LocalizedError, CustomStringConvertible {
+        let description: String
+        init(_ s: String) { description = s }
+        var errorDescription: String? { description }
+    }
 
     func source(_ s: String) throws -> URL {
         let u = FileManager.default.temporaryDirectory.appendingPathComponent("fu-\(UUID().uuidString)")
@@ -92,5 +100,33 @@ struct FolderUploadWriteTests {
         #expect(FolderUpload.refusedByFilesystem(E("Permission denied")))
         #expect(!FolderUpload.refusedByFilesystem(E("[Errno 28] No space left on device: '/d/permission-denied.txt'")))
         #expect(!FolderUpload.refusedByFilesystem(E("[Errno 130] Owner died: '/d/x'")))
+    }
+
+    // Regression (CWE-20): the parser cut the message at `: '`, but Python
+    // quotes a path holding an apostrophe with ", so the path stayed in and
+    // its words counted. ENOSPC on `permission denied's.txt` read as a
+    // refusal, and the direct-write fallback truncated the existing file.
+    @Test("a double-quoted path's words never make a refusal")
+    func doubleQuotedPath() {
+        #expect(!FolderUpload.refusedByFilesystem(E(#"[Errno 28] No space left on device: "/d/.permission denied's.txt.bromure-abc.part""#)))
+        #expect(!FolderUpload.refusedByFilesystem(E(#"[Errno 5] Input/output error: "/d/[Errno 13] it's""#)))
+        #expect(!FolderUpload.refusedByFilesystem(E("unknown file op: Operation not permitted")))
+        #expect(FolderUpload.refusedByFilesystem(E(#"[Errno 13] Permission denied: "/d/.it's.bromure-1.part""#)))
+        #expect(FolderUpload.refusedByFilesystem(E("Operation not permitted")))     // a Sidecar Mac (strerror)
+        #expect(FolderUpload.refusedByFilesystem(ACAppDelegate.GuestExecError.commandFailed(
+            exitCode: 1, stderr: "[Errno 13] Permission denied: '/d/x'\n")))
+        #expect(!FolderUpload.refusedByFilesystem(ACAppDelegate.GuestExecError.commandFailed(
+            exitCode: 1, stderr: #"[Errno 28] No space left on device: "/d/permission denied's""#)))
+    }
+
+    @Test("ENOSPC creating the temp in a double-quoted folder leaves the destination untouched")
+    func noSpaceKeepsDestination() async throws {
+        let g = Guest(); g.files["/permission denied's/f.txt"] = Data("old".utf8)
+        g.failWrite = 1
+        g.failMessage = #"[Errno 28] No space left on device: "{path}""#
+        await #expect(throws: (any Error).self) {
+            try await FolderUpload.write(try source("new"), to: "/permission denied's/f.txt", label: "f", op: g.op, progress: nil)
+        }
+        #expect(g.files["/permission denied's/f.txt"] == Data("old".utf8))
     }
 }
