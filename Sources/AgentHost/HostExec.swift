@@ -135,9 +135,26 @@ enum HostExec {
                 if let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] {
                     try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
                 }
-                guard Foundation.rename(path, dest) == 0 else {
-                    return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                if Foundation.rename(path, dest) == 0 { return ["exit_code": 0] }
+                // A symlink's target on another volume (EXDEV) or a busy file
+                // can't be renamed onto from beside the link: write it through
+                // instead, as a plain write did. Not atomic there, but the
+                // staged copy is complete and local.
+                let e = errno
+                guard e == EXDEV || e == EBUSY else {
+                    return ["error": String(cString: strerror(e)), "exit_code": 1]
                 }
+                if !fm.fileExists(atPath: dest) { fm.createFile(atPath: dest, contents: nil) }
+                guard let src = FileHandle(forReadingAtPath: path),
+                      let out = FileHandle(forUpdatingAtPath: dest) else {
+                    return ["error": String(cString: strerror(e)), "exit_code": 1]
+                }
+                defer { try? src.close(); try? out.close() }
+                while let chunk = try src.read(upToCount: 1 << 20), !chunk.isEmpty {
+                    try out.write(contentsOf: chunk)
+                }
+                try out.truncate(atOffset: try out.offset())
+                try fm.removeItem(atPath: path)
                 return ["exit_code": 0]
             case "remove":
                 try fm.removeItem(atPath: path)
