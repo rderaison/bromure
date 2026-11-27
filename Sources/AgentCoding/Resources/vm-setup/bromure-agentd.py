@@ -82,6 +82,7 @@ import termios
 import threading
 import time
 import traceback
+import uuid
 
 # See _UNIT_CONTENT: python children ignore the user site-packages too.
 os.environ["PYTHONNOUSERSITE"] = "1"
@@ -1772,7 +1773,7 @@ def _new_file_mode(folder):
             pass
 
 
-def _replace_staged(staged, dest):
+def _replace_staged(staged, dest, across=True):
     """Put the complete file `staged` (beside `dest`, same filesystem) in
     place of `dest`. A new destination is a rename. An existing one is too,
     once the staged file carries everything the file had besides its bytes:
@@ -1797,11 +1798,13 @@ def _replace_staged(staged, dest):
         try:
             os.replace(staged, dest)
         except OSError as e:
-            # A dangling symlink into another filesystem (EXDEV) or a busy
-            # target: write it through, as a plain write did.
+            # A dangling symlink into another filesystem (EXDEV): staged
+            # again over there, then renamed. A busy target: written
+            # through, as a plain write did.
             if e.errno not in (errno.EXDEV, errno.EBUSY):
                 raise
-            _write_in_place(staged, dest, create=True)
+            if e.errno != errno.EXDEV or not across or not _replace_across(staged, dest):
+                _write_in_place(staged, dest, create=True)
         return
     if st.st_nlink > 1 or not _copy_file_metadata(dest, staged, st):
         _write_in_place(staged, dest)
@@ -1817,6 +1820,10 @@ def _replace_staged(staged, dest):
         # staged copy is complete and local.
         if not isinstance(e, PermissionError) and e.errno not in (errno.EXDEV, errno.EBUSY):
             raise
+        # Across filesystems: staged again on the target's own one, so it
+        # still lands in one step (CWE-459).
+        if e.errno == errno.EXDEV and across and _replace_across(staged, dest):
+            return
         _write_in_place(staged, dest)
 
 
@@ -1841,21 +1848,114 @@ def _copy_file_metadata(src, dst, st):
         return False
 
 
-def _write_in_place(staged, dest, create=False):
-    """Write `staged`'s bytes into `dest` itself. Needs only what a plain
-    upload needs -- write access to `dest` (CWE-732): the staged file is
-    this user's own, and readable again first (`_copy_file_metadata` may
-    have given it `dest`'s mode, a write-only 0200 say), and `dest` is
-    opened write-only, never for reading, truncated only once written."""
-    os.chmod(staged, 0o600)
-    flags = os.O_WRONLY | os.O_CLOEXEC
-    if create and not os.path.exists(dest):
-        flags |= os.O_CREAT
-    with open(staged, "rb") as src:
-        with os.fdopen(os.open(dest, flags, 0o666), "wb") as out:
+def _replace_across(staged, dest):
+    """`dest` is on another filesystem than `staged` (a symlink's target):
+    copy `staged` to a fresh file beside `dest`, on its filesystem, and
+    replace `dest` from there (`_replace_staged`) -- in one step, as on the
+    same filesystem. A copy that fails (a full disk, a read error) leaves
+    `dest` untouched (CWE-459). False when no file can be made there (the
+    folder isn't writable): the caller writes in place, with a backup."""
+    folder = os.path.dirname(dest)
+    tmp = os.path.join(folder, ".bromure-%s.part" % uuid.uuid4().hex)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return False
+    try:
+        # Readable again: it may carry `dest`'s write-only mode by now.
+        os.chmod(staged, 0o600)
+        with os.fdopen(fd, "wb") as out, open(staged, "rb") as src:
             shutil.copyfileobj(src, out, 1 << 20)
-            out.truncate()
+        # Same filesystem now; never across again.
+        _replace_staged(tmp, dest, across=False)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     os.unlink(staged)
+    return True
+
+
+def _write_in_place(staged, dest, create=False):
+    """Write `staged`'s bytes into `dest` itself (its inode, links and
+    metadata stay). It needs only what a plain upload needs, write access to
+    `dest` (CWE-732): the staged file -- this user's own, which
+    `_copy_file_metadata` may have given `dest`'s mode, a write-only 0200
+    say -- is made readable first, and `dest` is opened write-only. And it
+    is never destructive (CWE-459): a new file that fails part-way is
+    removed again, an existing one gets its old bytes back from a copy taken
+    first (owner-only, beside `staged`; kept and named in the error if even
+    that fails). A `dest` this user may not read can't be copied aside: it
+    is written as a plain upload would, without."""
+    os.chmod(staged, 0o600)
+    if create and not os.path.exists(dest):
+        try:
+            out = open(dest, "xb")
+        except FileExistsError:
+            out = None
+        if out is not None:
+            try:
+                with out, open(staged, "rb") as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            except BaseException:
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
+                raise
+            os.unlink(staged)
+            return
+    with open(staged, "rb") as src:
+        with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CLOEXEC), "wb") as out:
+            backup = _copy_aside(dest, staged)
+            try:
+                shutil.copyfileobj(src, out, 1 << 20)
+                out.truncate()
+                out.flush()
+            except BaseException as e:
+                if backup is None:
+                    raise
+                try:
+                    out.seek(0)
+                    with open(backup, "rb") as old:
+                        shutil.copyfileobj(old, out, 1 << 20)
+                    out.truncate()
+                    out.flush()
+                except OSError as again:
+                    raise OSError(getattr(e, "errno", None) or errno.EIO,
+                                  "%s: the write failed (%s) and its old contents couldn't be "
+                                  "put back (%s); they are saved in %s"
+                                  % (dest, e, again, backup))
+                os.unlink(backup)
+                raise
+            if backup is not None:
+                os.unlink(backup)
+    os.unlink(staged)
+
+
+def _copy_aside(dest, staged):
+    """A copy of `dest`'s bytes in an owner-only file beside `staged`, to put
+    back if writing it fails; its path. None when `dest` may not be read
+    (write-only): nothing to copy, as a plain upload had none. Any other
+    failure raises before `dest` is touched."""
+    try:
+        src = open(dest, "rb")
+    except PermissionError:
+        return None
+    backup = os.path.join(os.path.dirname(staged), ".bromure-%s.old" % uuid.uuid4().hex)
+    with src:
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as old:
+                shutil.copyfileobj(src, old, 1 << 20)
+        except BaseException:
+            os.unlink(backup)
+            raise
+    return backup
 
 
 def _untar_confined(archive, dest):
