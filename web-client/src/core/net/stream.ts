@@ -90,26 +90,15 @@ export class ElectronTcpStream implements ByteStream {
   /** Begin delivering data once onData/onClose are set. */
   start(): void { this.bridge.tcpResume?.(this.id); }
 
-  /** Events for an id `open` hasn't returned yet: main sends the socket's
-   *  first bytes (the SSH server's banner) as soon as it connects, which can
-   *  beat tcpOpen's reply. Kept until `open` claims them, never dropped. */
-  private static early = new Map<number, TcpEvent[]>();
-  /** While set, events queue here (behind the early ones) instead of firing. */
-  private backlog: TcpEvent[] | null = null;
-
   private static wire(bridge: ElectronNetBridge) {
     if (!ElectronTcpStream.wired) {
       ElectronTcpStream.wired = true;
       bridge.onTcpEvent((id, kind, data, message) => {
-        const ev: TcpEvent = [kind, data, message];
-        const s = ElectronTcpStream.streams.get(id);
-        if (!s) {
-          const q = ElectronTcpStream.early.get(id) ?? [];
-          if (q.length < 1024) q.push(ev);
-          ElectronTcpStream.early.set(id, q);
-          return;
-        }
-        if (s.backlog) s.backlog.push(ev); else s.deliver(ev);
+        // Main sends a socket's events only once its stream exists (it holds
+        // them until tcpResume — electron/tcpEvents.ts). One for an unknown
+        // id is a straggler for a stream already finished (main's close
+        // after ours): dropped, never stored — nothing to accumulate.
+        ElectronTcpStream.streams.get(id)?.deliver([kind, data, message]);
       });
     }
   }
@@ -124,14 +113,9 @@ export class ElectronTcpStream implements ByteStream {
     const id = await bridge.tcpOpen(host, port);
     const s = new ElectronTcpStream(bridge, id);
     ElectronTcpStream.streams.set(id, s);
-    const early = ElectronTcpStream.early.get(id);
-    ElectronTcpStream.early.delete(id);
-    if (early) {
-      // After the caller has set onData/onClose (it does so right after this
-      // returns), in order, ahead of anything that arrives meanwhile.
-      s.backlog = early;
-      setTimeout(() => { const q = s.backlog ?? []; s.backlog = null; for (const ev of q) s.deliver(ev); }, 0);
-    }
+    // Main holds the socket until this: after the caller has set
+    // onData/onClose (it does so right after open returns).
+    setTimeout(() => { if (!s.closed) bridge.tcpResume?.(id); }, 0);
     return s;
   }
   write(data: Uint8Array): void { if (!this.closed) this.bridge.tcpWrite(this.id, data); }
