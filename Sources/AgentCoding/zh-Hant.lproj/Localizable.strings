@@ -4427,3 +4427,13 @@
 "An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself." = "早期版本的 Bromure 在此工作區的 Claude Code 設定中關閉了它們，方式與您自己關閉某個技能相同，因此 Bromure 無法分辨是誰關閉的。僅在不是您自己關閉時才重新開啟。";
 "Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code 會提交、推送、建立提取要求，並持續修正直到你合併。";
 "Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "Claude Code 的 /ship 會提交你的工作、推送、在 GitHub 上建立提取要求並進行審查，然後監看它：修正失敗的檢查、衝突和審查意見，並再次推送，直到你合併。/steward 會開始監看一個已開啟的提取要求。推送使用此工作區的 GitHub 權杖，以你的名義進行。監看期間，工作階段顯示「正在監看 PR #…」，你的 Mac 保持喚醒；按一下右鍵於工作階段即可停止。關閉此項後，這裡的 Claude Code 將不再有這兩個指令。在此工作區下次啟動時生效。";
+
+/* Coding tasks: merge from a client, checkout cleanup */
+"branch and checkout removed" = "分支與檢出已刪除";
+"branch and checkout kept" = "分支與檢出已保留";
+"This task is no longer on the board." = "此任務已不在看板上。";
+"This task isn't in Review any more, so there is nothing to merge." = "此任務已不在審閱中，沒有可合併的內容。";
+"The merge didn't start" = "合併未開始";
+"The merge may not have started" = "合併可能未開始";
+"The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "主機兩次都沒有回應。請查看任務卡片：若仍在審閱中且未在合併，請檢查連線後再次合併。";
+"The host refused it (HTTP %d)." = "主機拒絕了此請求（HTTP %d）。";

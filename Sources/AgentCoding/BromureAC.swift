@@ -6620,6 +6620,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "merge", "land":
                     // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
                     // legacy merge body ({squash, cleanup}) still works.
+                    // One it won't start says why: the client tells the user
+                    // (it showed nothing at all).
+                    if let why = self.codingTaskEngine.landRefusal(id) { return ["ok": false, "error": why] }
                     let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
                         ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
@@ -6629,6 +6632,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {with: [ids], push?, keepBranch?}: this task and those,
                     // one batch (CodingTaskEngine.landBatch).
                     let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+                    if let why = self.codingTaskEngine.landRefusal([id] + others) { return ["ok": false, "error": why] }
                     self.codingTaskEngine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
                                                     push: body["push"] as? Bool ?? false)
                 case "open-pr":
