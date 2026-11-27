@@ -2,6 +2,11 @@
 // src/platform.ts ElectronAPI. No Node in the page.
 import { contextBridge, ipcRenderer } from 'electron';
 
+// A new document: main releases the sockets, listeners and pending resumes
+// the one before it held (a reload keeps the window). Sent before any page
+// script runs, so it precedes this document's own tcp calls.
+ipcRenderer.send('tcp:reset');
+
 const tcpListeners: Array<(id: number, kind: string, data?: Uint8Array, message?: string) => void> = [];
 ipcRenderer.on('tcp:event', (_e, id, kind, data, message) => { for (const l of tcpListeners) l(id, kind, data, message); });
 const acceptListeners: Array<(listenerID: number, socketID: number) => void> = [];

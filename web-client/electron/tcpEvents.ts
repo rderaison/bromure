@@ -22,13 +22,14 @@ export function heldEvents(send: TcpEventSend) {
 }
 
 /** The sockets main handed to a renderer as an id and that are still
- *  waiting for its tcp:resume, each with its owner (a webContents id).
+ *  waiting for its tcp:resume, each with its owner (a document id).
  *
  *  Kept apart from the live-socket table on purpose: a socket that closes
  *  (a peer reset, a local client gone) before the renderer resumes it has
  *  left that table, but its held close / error must still reach the
  *  renderer, or its stream never ends (CWE-362). An entry goes once claimed,
- *  dropped by its owner, or when its owner is destroyed. */
+ *  dropped by its owner, or when its owner (a document: documents()) is
+ *  gone. */
 export function resumeTable() {
   const pending = new Map<number, { owner: number; resume: () => void }>();
   return {
@@ -44,5 +45,35 @@ export function resumeTable() {
     drop(id: number, owner: number) { if (pending.get(id)?.owner === owner) pending.delete(id); },
     dropOwner(owner: number) { for (const [id, p] of pending) if (p.owner === owner) pending.delete(id); },
     get size() { return pending.size; },
+  };
+}
+
+/** Which document each webContents shows, as the owner of its sockets.
+ *
+ *  A reload or a renderer restart replaces the document but keeps the
+ *  webContents (and its id), so owning by webContents kept the old
+ *  document's sockets, listeners and pending resumes for the window's life:
+ *  nothing left could claim or close them (CWE-401). The preload starts each
+ *  document with tcp:reset (before any page script, on the same channel as
+ *  its tcp calls), which gives it a new id and hands back the old one to
+ *  release. */
+export function documents() {
+  const current = new Map<number, number>();
+  let next = 1;
+  return {
+    /** The document `wc` shows now. */
+    of(wc: number) {
+      let d = current.get(wc);
+      if (d === undefined) { d = next++; current.set(wc, d); }
+      return d;
+    },
+    /** Whether `doc` is still the document `wc` shows. Checked when a
+     *  socket arrives (a connect, an accept) or a listen completes for it:
+     *  one that outlived its document is destroyed, not handed over. */
+    isCurrent(wc: number, doc: number) { return current.get(wc) === doc; },
+    /** `wc` started a new document: the one it replaces, if any. */
+    reset(wc: number) { const old = current.get(wc); current.set(wc, next++); return old; },
+    /** `wc` is destroyed: its last document, if any. */
+    forget(wc: number) { const d = current.get(wc); current.delete(wc); return d; },
   };
 }
