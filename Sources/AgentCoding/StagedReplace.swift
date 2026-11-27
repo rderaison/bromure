@@ -92,6 +92,19 @@ enum StagedReplace {
         return Done(failure: nil)
     }
 
+    /// Flush `out` to disk and close it; nil when both went. A write the
+    /// volume deferred (a full or remote one) is only reported here, so a
+    /// copy isn't complete until this says so.
+    static func finish(_ out: FileHandle) -> String? {
+        do {
+            try out.synchronize()
+            try out.close()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// `src`'s bytes, written from `out`'s offset on; nil when all went.
     private static func copyAll(from src: String, to out: FileHandle) -> String? {
         guard let input = FileHandle(forReadingAtPath: src) else { return String(cString: strerror(errno)) }
@@ -188,9 +201,12 @@ enum StagedReplace {
             let bfd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard bfd >= 0 else { return String(cString: strerror(errno)) }
             let old = FileHandle(fileDescriptor: bfd, closeOnDealloc: true)
-            let copied = copyAll(from: dest, to: old)
-            try? old.close()
-            if let copied { unlink(path); return copied }
+            // A backup cut short would put the wrong bytes back.
+            if let copied = copyAll(from: dest, to: old) ?? finish(old) {
+                try? old.close()
+                unlink(path)
+                return copied
+            }
             backup = path
         } else if errno != EACCES && errno != EPERM {
             return String(cString: strerror(errno))

@@ -1971,6 +1971,9 @@ def _copy_aside(dest, staged):
         try:
             with os.fdopen(fd, "wb") as old:
                 shutil.copyfileobj(src, old, 1 << 20)
+                # A backup cut short would put the wrong bytes back.
+                old.flush()
+                os.fsync(old.fileno())
         except BaseException:
             os.unlink(backup)
             raise
