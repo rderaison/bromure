@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ElectronTcpStream, type ElectronNetBridge } from '../src/core/net/stream';
-import { heldEvents } from '../electron/tcpEvents';
+import { heldEvents, resumeTable } from '../electron/tcpEvents';
 
 // The renderer learns a socket's id from tcpOpen's reply (or tcp:accept)
 // before its stream exists. Main holds the socket's bytes AND its close /
@@ -65,5 +65,55 @@ describe('heldEvents (main)', () => {
     ev.emit('data', new Uint8Array(3));
     ev.resume();                                     // a second resume is a no-op
     expect(sent).toEqual(['error:reset', 'close', 'data:3']);
+  });
+});
+
+// Regression (CWE-362): a socket that closed before the renderer's tcp:resume
+// left main's socket table, and the resume (which required a live, owned
+// socket) never ran, so its held close never reached the renderer. The
+// renderer's stream stayed open forever, and so did the SSH channel of a
+// loopback callback whose client gave up while the forward was opening.
+describe('resumeTable (main)', () => {
+  it('a close before resume is still delivered when the owner resumes', () => {
+    const sent: string[] = [];
+    const ev = heldEvents(k => sent.push(k));
+    const t = resumeTable();
+    t.hold(7, 1, () => ev.resume());
+    ev.emit('error', null, 'ECONNRESET');
+    ev.emit('close');                       // the socket is gone from main's table now
+    expect(sent).toEqual([]);
+    expect(t.claim(7, 2)).toBe(false);      // another window can't claim it
+    expect(sent).toEqual([]);
+    expect(t.claim(7, 1)).toBe(true);
+    expect(sent).toEqual(['error', 'close']);
+    expect(t.claim(7, 1)).toBe(false);      // once
+    expect(t.size).toBe(0);
+  });
+
+  it('end to end: the renderer stream ends when main held the close', async () => {
+    const t = resumeTable();
+    const ev = heldEvents((k, d, m) => emitter(905, k, d ?? undefined, m));
+    t.hold(905, 1, () => ev.resume());
+    ev.emit('close');                       // peer reset before the renderer resumed
+    const resumeBridge = { ...bridge, tcpResume: (id: number) => { t.claim(id, 1); } } as ElectronNetBridge;
+    nextID = 905;
+    const s = await ElectronTcpStream.open(resumeBridge, '127.0.0.1', 22);
+    let closed = 0;
+    s.onClose = () => { closed++; };
+    await tick();
+    expect(closed).toBe(1);
+    expect((ElectronTcpStream as any).streams.has(905)).toBe(false);
+  });
+
+  it('pending entries go when dropped by their owner or when the owner is destroyed', () => {
+    const t = resumeTable();
+    t.hold(1, 1, () => {}); t.hold(2, 1, () => {}); t.hold(3, 2, () => {});
+    t.drop(3, 1);                           // not its owner: kept
+    expect(t.size).toBe(3);
+    t.drop(1, 1);
+    t.dropOwner(1);
+    expect(t.size).toBe(1);
+    expect(t.claim(3, 2)).toBe(true);
+    expect(t.size).toBe(0);
   });
 });
