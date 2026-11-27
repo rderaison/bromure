@@ -117,9 +117,12 @@ export class RemoteHost {
       // device's key: this one only checks the pin (no prompts, no password).
       await this.ensureConnection();
       const pin = this.target.pinnedFingerprint;
+      // The key first: nothing may be awaited between the dial and handing
+      // the stream to the SSH client (it reads the server's banner).
+      const key = await this.cb.clientKey();
       const conn = await SSHConnection.connect(await this.target.dial(), {
         username: this.target.username,
-        key: await this.cb.clientKey(),
+        key,
         verifyHostKey: async info => !!pin && info.fingerprint === pin,
       });
       if (this.stopped) { conn.close(); throw new Error('disconnected'); }

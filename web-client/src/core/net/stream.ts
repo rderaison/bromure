@@ -72,8 +72,13 @@ export interface ElectronNetBridge {
 type TcpEvent = [kind: string, data?: Uint8Array, message?: string];
 
 export class ElectronTcpStream implements ByteStream {
-  onData: (data: Uint8Array) => void = () => {};
-  onClose: (err?: Error) => void = () => {};
+  private dataHandler: (data: Uint8Array) => void = () => {};
+  private closeHandler: (err?: Error) => void = () => {};
+  /** Setting a handler releases what arrived early (see `open`). */
+  get onData() { return this.dataHandler; }
+  set onData(f: (data: Uint8Array) => void) { this.dataHandler = f; this.releaseBacklog(); }
+  get onClose() { return this.closeHandler; }
+  set onClose(f: (err?: Error) => void) { this.closeHandler = f; this.releaseBacklog(); }
   private static streams = new Map<number, ElectronTcpStream>();
   private static wired = false;
   private closed = false;
@@ -126,14 +131,25 @@ export class ElectronTcpStream implements ByteStream {
     ElectronTcpStream.streams.set(id, s);
     const early = ElectronTcpStream.early.get(id);
     ElectronTcpStream.early.delete(id);
-    if (early) {
-      // After the caller has set onData/onClose (it does so right after this
-      // returns), in order, ahead of anything that arrives meanwhile.
-      s.backlog = early;
-      setTimeout(() => { const q = s.backlog ?? []; s.backlog = null; for (const ev of q) s.deliver(ev); }, 0);
-    }
+    // Held until the caller sets its handlers — however long that takes
+    // (a timer guessed "right after this returns" and lost the banner when
+    // the caller awaited something first) — then delivered in order, ahead
+    // of anything that arrives meanwhile.
+    if (early) s.backlog = early;
     return s;
   }
+  private releaseBacklog() {
+    if (!this.backlog || this.releasing) return;
+    this.releasing = true;
+    // A microtask: the caller sets onData and onClose together.
+    queueMicrotask(() => {
+      this.releasing = false;
+      const q = this.backlog ?? [];
+      this.backlog = null;
+      for (const ev of q) this.deliver(ev);
+    });
+  }
+  private releasing = false;
   write(data: Uint8Array): void { if (!this.closed) this.bridge.tcpWrite(this.id, data); }
   close(): void { if (!this.closed) { this.bridge.tcpClose(this.id); this.finish(); } }
   private finish(err?: Error) {

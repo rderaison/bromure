@@ -32,6 +32,19 @@ describe('ElectronTcpStream', () => {
     emit('data', enc('C'));
     expect(got.join('')).toBe('SSH-2.0-x\r\nABC');
   });
+  it('holds early bytes until the caller sets onData, however long it awaits first', async () => {
+    // The tunnel's forward lane awaited the device key between the dial and
+    // handing the stream to the SSH client: a replay timer fired in that gap
+    // and the banner went to the default no-op handler.
+    const enc = (t: string) => new TextEncoder().encode(t);
+    const { bridge } = fakeBridge(903, [['data', enc('SSH-2.0-y\r\n')]]);
+    const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
+    await new Promise(r => setTimeout(r, 30));   // e.g. loading a key from IndexedDB
+    const got: string[] = [];
+    s.onData = d => got.push(new TextDecoder().decode(d));
+    await new Promise(r => setTimeout(r, 5));
+    expect(got.join('')).toBe('SSH-2.0-y\r\n');
+  });
   it('an early close still closes', async () => {
     const { bridge } = fakeBridge(902, [['data', new Uint8Array([1])], ['close']]);
     const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
