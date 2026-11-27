@@ -4589,7 +4589,7 @@ final class CodingTaskEngine {
     /// forget the worktree it reopens at boot. True once git no longer has
     /// the branch.
     private func removeCheckout(_ task: CodingTask, branch: String, root: String,
-                                delegate: ACAppDelegate) async -> Bool {
+                                delegate: any CodingTaskHost) async -> Bool {
         guard Self.isSafeBranchName(branch) else { return false }
         let out = (try? await delegate.guestExec(
             profileID: task.profileID,
