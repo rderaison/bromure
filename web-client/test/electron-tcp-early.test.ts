@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ElectronTcpStream, type ElectronNetBridge } from '../src/core/net/stream';
-import { heldEvents, resumeTable } from '../electron/tcpEvents';
+import { documents, heldEvents, resumeTable } from '../electron/tcpEvents';
 
 // The renderer learns a socket's id from tcpOpen's reply (or tcp:accept)
 // before its stream exists. Main holds the socket's bytes AND its close /
@@ -115,5 +115,40 @@ describe('resumeTable (main)', () => {
     expect(t.size).toBe(1);
     expect(t.claim(3, 2)).toBe(true);
     expect(t.size).toBe(0);
+  });
+});
+
+// Regression (CWE-401): sockets were owned by their webContents, and a reload
+// keeps it. A socket that closed before resume kept its pending entry, which
+// the new document can't know to claim or close, so each interrupted attempt
+// plus a reload grew main's table for the window's life. Main now owns by
+// document; the preload's tcp:reset hands back the old one to release.
+describe('documents (main)', () => {
+  it("a reload releases the old document's pending resumes, and repeated reloads don't grow the table", () => {
+    const docs = documents(), t = resumeTable();
+    for (let reload = 0; reload < 5; reload++) {
+      const doc = docs.of(5);
+      expect(docs.of(5)).toBe(doc);          // stable within a document
+      const ev = heldEvents(() => {});
+      t.hold(100 + reload, doc, () => ev.resume());
+      ev.emit('close');                       // closed before its resume
+      const old = docs.reset(5);              // the preload of the next document
+      expect(old).toBe(doc);
+      t.dropOwner(old!);
+      expect(t.size).toBe(0);
+      expect(t.claim(100 + reload, docs.of(5))).toBe(false);   // not the new document's
+    }
+  });
+
+  it('documents are per window, and a destroyed window hands back its last one', () => {
+    const docs = documents();
+    const a = docs.of(1), b = docs.of(2);
+    expect(a).not.toBe(b);
+    expect(docs.reset(3)).toBeUndefined();    // a first document: nothing to release
+    const c = docs.of(3);
+    expect(docs.forget(1)).toBe(a);
+    expect(docs.forget(1)).toBeUndefined();
+    expect(docs.of(1)).not.toBe(a);           // ids are never reused
+    expect(docs.of(3)).toBe(c);
   });
 });
