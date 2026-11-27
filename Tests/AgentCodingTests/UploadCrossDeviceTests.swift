@@ -61,6 +61,7 @@ struct UploadCrossDeviceTests {
             staged = os.path.join(d, '.hl.part'); open(staged, 'w').write('new')
             r = m._file_op({'op': 'rename', 'path': staged, 'dest': hl})
             assert r == {'exit_code': 0}, r
+            assert os.stat(hl).st_mode & 0o7777 == 0o200
             os.chmod(hl, 0o600); assert open(os.path.join(d, 'hl2')).read() == 'new'
             # Any other failure is still an error, the destination untouched.
             staged = os.path.join(d, '.link.part'); open(staged, 'w').write('nope')

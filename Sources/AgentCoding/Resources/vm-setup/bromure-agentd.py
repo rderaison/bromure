@@ -1829,10 +1829,10 @@ def _write_in_place(staged, dest, create=False):
     flags = os.O_WRONLY | os.O_CLOEXEC
     if create and not os.path.exists(dest):
         flags |= os.O_CREAT
-    fd = os.open(dest, flags, 0o666)
-    with open(staged, "rb") as src, os.fdopen(fd, "wb") as out:
-        shutil.copyfileobj(src, out, 1 << 20)
-        out.truncate()
+    with open(staged, "rb") as src:
+        with os.fdopen(os.open(dest, flags, 0o666), "wb") as out:
+            shutil.copyfileobj(src, out, 1 << 20)
+            out.truncate()
     os.unlink(staged)
 
 
