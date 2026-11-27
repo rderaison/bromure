@@ -1878,6 +1878,10 @@ def _replace_across(staged, dest):
         os.chmod(staged, 0o600)
         with os.fdopen(fd, "wb") as out, open(staged, "rb") as src:
             shutil.copyfileobj(src, out, 1 << 20)
+            # A write the filesystem deferred (full, remote) fails here or
+            # at the close: the copy failed, `dest` stays (CWE-459).
+            out.flush()
+            os.fsync(out.fileno())
         # Same filesystem now; never across again.
         _replace_staged(tmp, dest, across=False)
     except BaseException:
@@ -1911,6 +1915,8 @@ def _write_in_place(staged, dest, create=False):
             try:
                 with out, open(staged, "rb") as src:
                     shutil.copyfileobj(src, out, 1 << 20)
+                    out.flush()
+                    os.fsync(out.fileno())
             except BaseException:
                 try:
                     os.unlink(dest)
@@ -1971,6 +1977,9 @@ def _copy_aside(dest, staged):
         try:
             with os.fdopen(fd, "wb") as old:
                 shutil.copyfileobj(src, old, 1 << 20)
+                # A backup cut short would put the wrong bytes back.
+                old.flush()
+                os.fsync(old.fileno())
         except BaseException:
             os.unlink(backup)
             raise
