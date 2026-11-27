@@ -202,16 +202,37 @@ describe('replaceGuestFile', () => {
     expect(g.ops).not.toContain(`remove ${DEST}`);                              // dest isn't this copy's to delete
   });
 
-  // Regression (CWE-459): on that path a NEW destination the copy created
-  // stayed under its final name, truncated, when the copy failed part-way.
+  // Regression (CWE-362): on that path a NEW destination the failed copy
+  // created was removed when its size still matched the bytes written — but
+  // another drop may have finished there since with that very size (both
+  // empty, say). A guest this old can't tell files apart: nothing is removed.
   const NEW = '/home/ubuntu/new.txt';
-  it('an old guest: a new file the direct write fails to fill is removed again', async () => {
+  it('an old guest: a new file the direct write fails to fill stays (never removed by path)', async () => {
     const g = guest({ rename: 'unknown' });
     let opens = 0;
     const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
     await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
-    expect(g.files.has(NEW)).toBe(false);
-    expect([...g.files.keys()]).toEqual([DEST]);                                // no temp file either
+    expect(g.ops).not.toContain(`remove ${NEW}`);
+    expect(g.files.get(NEW)).toBe('[4]');                                       // incomplete, and said so
+  });
+
+  it('an old guest: another drop finished at the same name with the same size is not removed', async () => {
+    const g = guest({ rename: 'unknown' });
+    let opens = 0;
+    const open = () => {
+      if (opens++ === 0) return bytes(8)();
+      let step = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (step++ === 0) { c.enqueue(new Uint8Array(4)); return; }
+          g.files.set(NEW, '[4]');                                             // the other drop: same size, finished
+          c.error(new DOMException('The file could not be read.', 'NotReadableError'));
+        },
+      });
+    };
+    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
+    expect(g.files.get(NEW)).toBe('[4]');
+    expect(g.ops).not.toContain(`remove ${NEW}`);
   });
 
   it('an old guest: a new file another drop wrote over meanwhile is not removed', async () => {

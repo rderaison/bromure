@@ -152,18 +152,31 @@ struct FolderUploadWriteTests {
         #expect(g.files["/permission denied's/f.txt"] == Data("old".utf8))
     }
 
-    // Regression (CWE-459): on a guest without `rename` the upload falls back
-    // to writing the destination straight; a NEW destination that copy
-    // created stayed under its final name, truncated, when it failed part-way.
+    // Regression (CWE-362): on a guest without `rename` the failed direct
+    // write's NEW destination was removed when its size matched the bytes
+    // written — another drop may have finished there with that very size.
+    // A guest this old can't tell files apart: nothing is removed.
     // The temp copy is 2 writes (7 MB), so the direct write's 2nd is the 4th.
-    @Test("an old guest: a new file the direct write fails to fill is removed again")
-    func legacyNewFileRemoved() async throws {
+    @Test("an old guest: a new file the direct write fails to fill stays (never removed by path)")
+    func legacyNewFileKept() async throws {
         let g = Guest(); g.noRename = true; g.failWrite = 4
         let big = String(repeating: "x", count: 7 << 20)
         await #expect(throws: (any Error).self) {
             try await FolderUpload.write(try source(big), to: "/d/new", label: "new", op: g.op, progress: nil)
         }
-        #expect(g.files.isEmpty, "no truncated file, no temp file")
+        #expect(g.files["/d/new"]?.count == 6 << 20, "incomplete, left as it is")
+        #expect(!g.ops.contains("remove new"))
+    }
+
+    @Test("an old guest: another drop finished at the same name with the same size stays")
+    func legacySameSizeKept() async throws {
+        let big = String(repeating: "x", count: 7 << 20)
+        let g = Guest(); g.noRename = true; g.failWrite = 4
+        g.beforeWrite = (4, { $0.files["/d/new"] = Data(repeating: 0x41, count: 6 << 20) })
+        await #expect(throws: (any Error).self) {
+            try await FolderUpload.write(try source(big), to: "/d/new", label: "new", op: g.op, progress: nil)
+        }
+        #expect(g.files["/d/new"] == Data(repeating: 0x41, count: 6 << 20))
     }
 
     @Test("an old guest: a file that was there, or that another drop wrote over meanwhile, stays")
