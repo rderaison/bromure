@@ -16,7 +16,7 @@ trap 'kill $FAKE 2>/dev/null; rm -f "$LOG"' EXIT
 sleep 1
 # The page is served by the fake cloud itself (same origin as /api, like
 # bromure.io/client), so the httpOnly-cookie device identity works for real.
-RES=$(node scripts/shot.mjs "$OUT" --web --url http://127.0.0.1:5190/client/index.html --query "devRelay=ws://127.0.0.1:5179" --delay 5000 --after 46000 --js "void (async()=>{
+RES=$(node scripts/shot.mjs "$OUT" --web --url http://127.0.0.1:5190/client/index.html --query "devRelay=ws://127.0.0.1:5179" --delay 5000 --after 58000 --js "void (async()=>{
   const A = window.__bromure.account;
   sessionStorage.setItem('bromure.enroll.state', JSON.stringify({state:'S1', api:'http://127.0.0.1:5190/api'}));
   await A.complete('#enroll?code=X&api=https://evil.example&state=S1');
@@ -55,11 +55,19 @@ RES=$(node scripts/shot.mjs "$OUT" --web --url http://127.0.0.1:5190/client/inde
   location.hash = '#connect?device=not-a-server';
   await sleep(3000);
   console.error('E2E deeplink-unknown=' + (!mirrored() && !location.hash.includes('connect') && document.body.innerText.includes(\"isn't in your bromure.io account\")));
+  // A link arriving WHILE another connects replaces that attempt: the
+  // earlier server must not open late over the new link's error.
+  location.hash = '#connect?device=srv-demo-0001';
+  await sleep(30);
+  const wasConnecting = /Connecting|Verifying|Authenticating/.test(document.body.innerText);
+  location.hash = '#connect?device=not-a-server';
+  await sleep(9000);
+  console.error('E2E deeplink-cancels-attempt=' + (wasConnecting && !mirrored() && !location.hash.startsWith('#/peer/') && document.body.innerText.includes(\"isn't in your bromure.io account\")));
 })()" 2>&1)
 echo "$RES" | grep -o 'E2E [a-z-]*=[a-z]*'
 grep -q 'relay paired' "$LOG" && echo "E2E relay-paired=true" || echo "E2E relay-paired=false"
 grep -q 'cookie delivery' "$LOG" && echo "E2E cookie-delivery=true" || echo "E2E cookie-delivery=false"
 grep -q 'CSRF rejected' "$LOG" && echo "E2E csrf-ok=false" || echo "E2E csrf-ok=true"
 grep -q 'csrf fetched' "$LOG" && echo "E2E csrf-refetched=true" || echo "E2E csrf-refetched=false"
-echo "$RES" | grep -q 'mirrored=true' && grep -q 'menu-connect-another=true' <<<"$RES" && grep -q 'menu-disconnect=true' <<<"$RES" && grep -q 'deeplink-connect=true' <<<"$RES" && grep -q 'deeplink-unknown=true' <<<"$RES" && grep -q 'refused=true' <<<"$RES" && grep -q 'token-not-readable=true' <<<"$RES" \
+echo "$RES" | grep -q 'mirrored=true' && grep -q 'menu-connect-another=true' <<<"$RES" && grep -q 'menu-disconnect=true' <<<"$RES" && grep -q 'deeplink-connect=true' <<<"$RES" && grep -q 'deeplink-unknown=true' <<<"$RES" && grep -q 'deeplink-cancels-attempt=true' <<<"$RES" && grep -q 'refused=true' <<<"$RES" && grep -q 'token-not-readable=true' <<<"$RES" \
   && grep -q 'relay paired' "$LOG" && grep -q 'cookie delivery' "$LOG" && grep -q 'csrf fetched' "$LOG" && ! grep -q 'CSRF rejected' "$LOG"

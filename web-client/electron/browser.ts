@@ -4,13 +4,17 @@
 // literal addresses (http://192.168.64.x:port), everything else directly.
 //
 //   the page's session: in memory (nothing persists past the app), its proxy
-//     a PAC sending only the workspace subnet to our SOCKS5 server, the rest
+//     a PAC sending only the workspace subnet to our HTTP proxy, the rest
 //     DIRECT — as FatClientPAC.script does for the browser VM;
-//   the SOCKS5 server (127.0.0.1, ephemeral port): each CONNECT inside that
-//     subnet becomes a flow to the main window's renderer, which owns the SSH
-//     connection and the device key, and opens `bromure-fatclient/1 forward
-//     <ip> <port>` on its forward connection; the bytes ride IPC both ways.
-//     Anything outside the subnet is refused (the PAC never sends it here).
+//   the HTTP proxy (127.0.0.1, ephemeral port) answers only requests that
+//     carry this session's random credential (Proxy-Authorization), which
+//     only the browser page's `login` handler supplies — another process or
+//     local user can reach the port but not use it (CWE-306). Each CONNECT
+//     (or plain http:// request) inside the subnet becomes a flow to the main
+//     window's renderer, which owns the SSH connection and the device key,
+//     and opens `bromure-fatclient/1 forward <ip> <port>` on its forward
+//     connection; the bytes ride IPC both ways. Anything outside the subnet
+//     is refused (the PAC never sends it here).
 //
 // Backpressure as in tunnel.ts: local → remote at most FLOW_HIGH bytes in
 // flight before the socket is paused; remote → local the renderer pauses the
@@ -18,19 +22,23 @@
 
 import { BrowserWindow, WebContentsView, ipcMain, session, shell, type WebContents } from 'electron';
 import net from 'node:net';
-import { cidrMatch, validSubnet, pacScript, socksHandshake, toURL } from './browserProxy';
+import { randomBytes } from 'node:crypto';
+import { cidrMatch, validSubnet, pacScript, toURL, readProxyHead, parseProxyRequest, PROXY_USER, PROXY_200, PROXY_403, PROXY_502 } from './browserProxy';
 
 const FLOW_HIGH = 1 << 20;
 const FLOW_LOW = 256 << 10;
 const PARTITION = 'bromure-browser';     // no `persist:` — gone when the app quits
 const BAR_H = 40;
 
-interface Flow { sock: net.Socket; inflight: number; paused: boolean; opened: boolean }
+interface Flow { sock: net.Socket; inflight: number; paused: boolean; opened: boolean; tunnel: boolean; initial: Buffer }
 
 let owner: WebContents | null = null;
 let cidr = '';
 let server: net.Server | null = null;
 let port = 0;
+/** This proxy's credential: random per start, never leaves main except to
+ *  the browser page's own proxy-auth prompt. */
+let secret = '';
 let win: BrowserWindow | null = null;
 let page: WebContentsView | null = null;
 let bar: WebContentsView | null = null;
@@ -41,21 +49,21 @@ function send(channel: string, ...args: unknown[]) {
   if (owner && !owner.isDestroyed()) owner.send(channel, ...args);
 }
 
-function acceptSocks(sock: net.Socket) {
+function acceptProxy(sock: net.Socket) {
   sock.on('error', () => {});
   // Generous: the first flow also sets up the SSH forward connection.
   sock.setTimeout(60000, () => sock.destroy());
-  socksHandshake(sock, (ip, p, rest) => {
-    const refuse = (code: number) => { try { sock.end(Buffer.from([5, code, 0, 1, 0, 0, 0, 0, 0, 0])); } catch {} };
+  readProxyHead(sock, (head, rest) => {
+    const r = parseProxyRequest(head, rest, secret);
+    if (r.kind === 'denied') { try { sock.end(r.reply); } catch {} return; }
     // Only the workspace subnet, only while a renderer serves the flows.
-    if (!cidrMatch(ip, cidr) || p < 1 || p > 65535) { refuse(2); return; }
-    if (!owner || owner.isDestroyed()) { refuse(1); return; }
+    if (!cidrMatch(r.ip, cidr) || r.port < 1 || r.port > 65535) { try { sock.end(PROXY_403); } catch {} return; }
+    if (!owner || owner.isDestroyed()) { try { sock.end(PROXY_502); } catch {} return; }
     const id = nextFlow++;
-    flows.set(id, { sock, inflight: 0, paused: false, opened: false });
-    if (rest.length) sock.unshift(rest);
+    flows.set(id, { sock, inflight: 0, paused: false, opened: false, tunnel: r.kind === 'connect', initial: r.initial });
     sock.on('close', () => { if (flows.delete(id)) send('browser:flow-close', id); });
-    if (process.env.BROMURE_BROWSER_DEBUG) console.error(`[browser] flow ${id} → ${ip}:${p}`);
-    send('browser:flow', id, `forward ${ip} ${p}`);
+    if (process.env.BROMURE_BROWSER_DEBUG) console.error(`[browser] flow ${id} → ${r.ip}:${r.port} (${r.kind})`);
+    send('browser:flow', id, `forward ${r.ip} ${r.port}`);
   });
 }
 
@@ -63,10 +71,17 @@ function flowOpened(id: number, ok: boolean, error?: string) {
   if (process.env.BROMURE_BROWSER_DEBUG) console.error(`[browser] flow ${id} ${ok ? 'open' : 'refused: ' + error}`);
   const f = flows.get(id);
   if (!f) return;
-  if (!ok) { flows.delete(id); try { f.sock.end(Buffer.from([5, 5, 0, 1, 0, 0, 0, 0, 0, 0])); } catch {} return; }
+  if (!ok) { flows.delete(id); try { f.sock.end(PROXY_502); } catch {} return; }
   f.opened = true;
   f.sock.setTimeout(0);
-  f.sock.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+  if (f.tunnel) f.sock.write(PROXY_200);
+  // What came with the request head: the rewritten request (plain http) or
+  // the first tunnelled bytes.
+  if (f.initial.length) {
+    send('browser:flow-data', id, new Uint8Array(f.initial.buffer, f.initial.byteOffset, f.initial.length));
+    f.inflight += f.initial.length;
+    f.initial = Buffer.alloc(0);
+  }
   f.sock.on('data', (d: Buffer) => {
     send('browser:flow-data', id, new Uint8Array(d.buffer, d.byteOffset, d.length));
     f.inflight += d.length;
@@ -79,10 +94,12 @@ function flowOpened(id: number, ok: boolean, error?: string) {
 
 async function ensureServer() {
   if (server) return;
-  const s = net.createServer({ allowHalfOpen: true }, acceptSocks);
+  secret = randomBytes(24).toString('hex');
+  const s = net.createServer({ allowHalfOpen: true }, acceptProxy);
   await new Promise<void>((resolve, reject) => { s.once('error', reject); s.listen(0, '127.0.0.1', () => resolve()); });
   server = s;
   port = (s.address() as net.AddressInfo).port;
+  if (process.env.BROMURE_BROWSER_DEBUG) console.error(`[browser] proxy on 127.0.0.1:${port}`);
 }
 
 async function applyProxy() {
@@ -156,7 +173,7 @@ function openWindow(parent: BrowserWindow | null, title: string) {
     win = null; page = null; bar = null;
     for (const f of flows.values()) f.sock.destroy();
     flows.clear();
-    server?.close(); server = null; port = 0;
+    server?.close(); server = null; port = 0; secret = '';
   });
 
   const ses = session.fromPartition(PARTITION);
@@ -180,6 +197,13 @@ function openWindow(parent: BrowserWindow | null, title: string) {
   bwc.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(BAR_HTML));
 
   const pwc = page.webContents;
+  // Our proxy's 407: answer with this session's credential — only for our
+  // own proxy on loopback, never for a site's or another proxy's prompt.
+  pwc.on('login', (e, _details, authInfo, callback) => {
+    if (!authInfo.isProxy || authInfo.host !== '127.0.0.1' || authInfo.port !== port || !secret) return;
+    e.preventDefault();
+    callback(PROXY_USER, secret);
+  });
   // Links that open a window load here instead; other schemes go to the OS.
   pwc.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) pwc.loadURL(url).catch(() => {});
@@ -241,5 +265,5 @@ export function stopBrowser() {
   for (const f of flows.values()) f.sock.destroy();
   flows.clear();
   if (win && !win.isDestroyed()) win.close();
-  server?.close(); server = null; port = 0; owner = null;
+  server?.close(); server = null; port = 0; secret = ''; owner = null;
 }

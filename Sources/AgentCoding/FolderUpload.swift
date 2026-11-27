@@ -100,8 +100,10 @@ enum FolderUpload {
     static func write(_ src: URL, to guestPath: String, label: String, op: FileOp,
                       progress: ((String) -> Void)?) async throws {
         let dir = (guestPath as NSString).deletingLastPathComponent
-        let name = (guestPath as NSString).lastPathComponent
-        let tmp = (dir as NSString).appendingPathComponent(".\(name).bromure-\(UUID().uuidString).part")
+        // Fixed length, whatever the destination's name: a name near the
+        // 255-byte component limit is valid, and must not become an invalid
+        // temp name (ENAMETOOLONG).
+        let tmp = (dir as NSString).appendingPathComponent(".bromure-\(UUID().uuidString).part")
         // Did the guest accept a write to `tmp`? Only a write that SUCCEEDED
         // counts, so a refusal of the very first one — the create — leaves
         // this false.

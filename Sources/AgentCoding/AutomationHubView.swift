@@ -1652,7 +1652,10 @@ struct HubFindingsTab: View {
             Divider()
             HStack(spacing: 0) {
                 table
-                if let id = hub.selectedFindingID, let f = findingStore.finding(id) {
+                // Only a finding the filters show: one they exclude (another
+                // repository picked since…) must not stay on the panel with
+                // live Fix / status / delete beside a table scoped elsewhere.
+                if let id = hub.selectedFindingID, let f = filtered.first(where: { $0.id == id }) {
                     Divider()
                     FindingDetailPanel(
                         finding: f,

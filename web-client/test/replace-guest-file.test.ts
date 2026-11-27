@@ -68,7 +68,7 @@ describe('replaceGuestFile', () => {
     expect(g.files.get(DEST)).toBe('[4][4][2]');
     expect([...g.files.keys()]).toEqual([DEST]);
     const tmp = g.ops[0].slice('write '.length);
-    expect(tmp).toMatch(/^\/home\/ubuntu\/\.notes\.txt\.bromure-[0-9a-f-]+\.part$/);  // beside it: same filesystem
+    expect(tmp).toMatch(/^\/home\/ubuntu\/\.bromure-[0-9a-f-]{36}\.part$/);  // beside it: same filesystem
     expect(g.ops.at(-1)).toBe(`rename ${tmp} -> ${DEST}`);
   });
 
@@ -96,7 +96,7 @@ describe('replaceGuestFile', () => {
     expect(g.files.get(DEST)).toBe('[4][4][2]');
     expect([...g.files.keys()]).toEqual([DEST]);          // no temp file left
     // It tried the atomic path first, and only then wrote directly.
-    expect(g.ops[0]).toMatch(/^write \/home\/ubuntu\/\.notes\.txt\.bromure-/);
+    expect(g.ops[0]).toMatch(/^write \/home\/ubuntu\/\.bromure-/);
     expect(g.ops.filter(o => o === `write ${DEST}`).length).toBe(3);
     expect(g.ops.some(o => o.startsWith('rename'))).toBe(false);  // never got that far
   });
@@ -130,6 +130,62 @@ describe('replaceGuestFile', () => {
     await expect(replaceGuestFile(bytes(10), DEST, 4, g.op, enc)).rejects.toThrow('Permission denied');
     expect(g.files.get(DEST)).toBe('ORIGINAL');
     expect(g.ops.filter(o => o === `write ${DEST}`).length).toBe(0);
+  });
+
+  // Regression: the temp name was `.<name>.bromure-<uuid>.part` — 51 bytes
+  // more than the name, so a valid name over ~204 bytes made the first write
+  // fail with ENAMETOOLONG on a 255-byte-component filesystem.
+  it('a long (valid) name still gets a temp name within the 255-byte limit', async () => {
+    const g = guest();
+    const dest = '/home/ubuntu/' + 'n'.repeat(250);
+    expect(await replaceGuestFile(bytes(3), dest, 4, g.op, enc)).toBe(3);
+    const tmp = g.ops[0].slice('write '.length);
+    expect(new TextEncoder().encode(tmp.slice(tmp.lastIndexOf('/') + 1)).length).toBeLessThanOrEqual(255);
+    expect(tmp.startsWith('/home/ubuntu/.bromure-')).toBe(true);
+    expect(g.files.has(dest)).toBe(true);
+  });
+  // CWE-362: two drops of the same name overlap; B finishes while A is
+  // part-way, then A's source fails. A's cleanup must never remove `dest` —
+  // it's B's finished file. (Each copy's temp name is its own, so A only
+  // ever deletes its temp; the next test is the path that used to delete.)
+  for (const rename of ['ok', 'unknown'] as const) {
+    it(`a failed copy never deletes a concurrent copy's finished file (rename ${rename})`, async () => {
+      const g = guest({ rename });
+      let release!: () => void;
+      const bDone = new Promise<void>(r => { release = r; });
+      // A: one chunk, then waits for B to land, then the source fails.
+      const a = () => {
+        let step = 0;
+        return new ReadableStream<Uint8Array>({
+          async pull(c) {
+            if (step++ === 0) { c.enqueue(new Uint8Array(4)); return; }
+            await bDone;
+            c.error(new DOMException('The file could not be read.', 'NotReadableError'));
+          },
+        });
+      };
+      const pA = replaceGuestFile(a, DEST, 4, g.op, enc).catch(e => e);
+      await new Promise(r => setTimeout(r, 0));
+      expect(await replaceGuestFile(bytes(6), DEST, 4, g.op, enc)).toBe(6);   // B
+      const bContent = g.files.get(DEST);
+      release();
+      expect(await pA).toBeInstanceOf(Error);
+      expect(g.files.get(DEST)).toBe(bContent);                                 // B's file survives
+      expect(g.ops).not.toContain(`remove ${DEST}`);
+    });
+  }
+
+  // Regression (CWE-362): on a guest too old for `rename` the copy falls back
+  // to writing `dest` directly — and its failure cleanup removed `dest`,
+  // i.e. possibly another drop's finished file. That path no longer cleans up.
+  it('an old guest: a direct-write fallback that fails leaves dest for whoever wrote it last', async () => {
+    const g = guest({ rename: 'unknown' });
+    let opens = 0;
+    // First open (the temp copy) completes; the second (the direct write onto
+    // dest) fails after one chunk.
+    const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
+    await expect(replaceGuestFile(open, DEST, 4, g.op, enc)).rejects.toThrow('could not be read');
+    expect(g.ops).not.toContain(`remove ${DEST}`);                              // dest isn't this copy's to delete
   });
 });
 

@@ -1,42 +1,69 @@
 import { describe, it, expect } from 'vitest';
 import { ElectronTcpStream, type ElectronNetBridge } from '../src/core/net/stream';
+import { heldEvents } from '../electron/tcpEvents';
 
-// Regression: main sends a socket's first bytes (an SSH server's banner) as
-// soon as it connects, and that IPC event can beat tcpOpen's reply. They
-// were dropped (no stream for the id yet), so the SSH client waited 25 s for
-// a banner that had already come — the browser's / tunnel's forward lane
-// failed with "no SSH banner".
+// The renderer learns a socket's id from tcpOpen's reply (or tcp:accept)
+// before its stream exists. Main holds the socket's bytes AND its close /
+// error until the renderer resumes it, so the renderer never needs to store
+// events for an id it doesn't know.
+//
+// Regressions: a renderer-side early-event store dropped events past 1,024
+// (a truncated stream, a lost close), and stored main's close that follows a
+// stream it had already finished — one entry per connection, forever (CWE-401).
 
 // One bridge for the file: the stream wires its event handler once.
 let emitter: (id: number, kind: any, data?: Uint8Array, message?: string) => void = () => {};
-let nextOpen: { id: number; before: [string, Uint8Array?][] } = { id: 0, before: [] };
+let nextID = 0;
+const calls: string[] = [];
 const bridge = {
   onTcpEvent: (cb: any) => { emitter = cb; },
-  tcpOpen: async () => { const { id, before } = nextOpen; for (const [k, d] of before) emitter(id, k, d); return id; },
-  tcpWrite: () => {}, tcpClose: () => {},
+  tcpOpen: async () => nextID,
+  tcpWrite: () => {},
+  tcpClose: (id: number) => { calls.push(`close ${id}`); },
+  tcpResume: (id: number) => { calls.push(`resume ${id}`); },
 } as unknown as ElectronNetBridge;
-function fakeBridge(id: number, before: [string, Uint8Array?][]) {
-  nextOpen = { id, before };
-  return { bridge, emit: (k: string, d?: Uint8Array) => emitter(id, k as any, d) };
-}
+const tick = () => new Promise(r => setTimeout(r, 5));
 
 describe('ElectronTcpStream', () => {
-  it('delivers bytes that arrived before tcpOpen resolved, in order, then the rest', async () => {
-    const enc = (t: string) => new TextEncoder().encode(t);
-    const { bridge, emit } = fakeBridge(901, [['data', enc('SSH-2.0-x\r\n')], ['data', enc('A')]]);
+  it('resumes the socket only after open() returned and the handlers are set', async () => {
+    calls.length = 0; nextID = 903;
     const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
-    const got: string[] = [];
-    s.onData = d => got.push(new TextDecoder().decode(d));
-    emit('data', enc('B'));                 // arrives while the early ones wait
-    await new Promise(r => setTimeout(r, 5));
-    emit('data', enc('C'));
-    expect(got.join('')).toBe('SSH-2.0-x\r\nABC');
+    expect(calls).toEqual([]);                       // not yet: the caller is still wiring
+    const got: number[] = [];
+    s.onData = d => got.push(...d);
+    await tick();
+    expect(calls).toEqual(['resume 903']);
+    emitter(903, 'data', new Uint8Array([1, 2]));
+    expect(got).toEqual([1, 2]);
   });
-  it('an early close still closes', async () => {
-    const { bridge } = fakeBridge(902, [['data', new Uint8Array([1])], ['close']]);
+
+  it('events for an id with no stream are dropped, never stored (CWE-401)', async () => {
+    nextID = 904;
     const s = await ElectronTcpStream.open(bridge, '127.0.0.1', 22);
-    let closed = false; s.onClose = () => { closed = true; };
-    await new Promise(r => setTimeout(r, 5));
-    expect(closed).toBe(true);
+    let closes = 0;
+    s.onClose = () => { closes++; };
+    s.close();                                       // finished on our side…
+    for (let i = 0; i < 10_000; i++) emitter(904, 'close');   // …main's close(s) arrive after
+    emitter(99_999, 'data', new Uint8Array([1]));    // and one for an id never opened
+    expect(closes).toBe(1);
+    // No store left behind on the class for stragglers to pile into.
+    expect(Object.keys(ElectronTcpStream as any)).not.toContain('early');
+    expect((ElectronTcpStream as any).early).toBeUndefined();
+    expect((ElectronTcpStream as any).streams.has(904)).toBe(false);
+  });
+});
+
+describe('heldEvents (main)', () => {
+  it('holds a close or error until resume, then sends it in order; live afterwards', () => {
+    const sent: string[] = [];
+    const ev = heldEvents((k, d, m) => sent.push(`${k}${d ? ':' + d.length : ''}${m ? ':' + m : ''}`));
+    ev.emit('error', null, 'reset');
+    ev.emit('close');
+    expect(sent).toEqual([]);                        // the renderer has no stream yet
+    ev.resume();
+    expect(sent).toEqual(['error:reset', 'close']);
+    ev.emit('data', new Uint8Array(3));
+    ev.resume();                                     // a second resume is a no-op
+    expect(sent).toEqual(['error:reset', 'close', 'data:3']);
   });
 });
