@@ -1868,6 +1868,12 @@ def _restore_setid(fd, kept, path):
     if kept is None:
         return
     mode, caps = kept
+    if os.fstat(fd).st_mode & 0o7777 != mode:
+        try:
+            os.fchmod(fd, mode)
+        except OSError:
+            pass
+    mode_lost = os.fstat(fd).st_mode & 0o7777 != mode
     if caps is not None:
         try:
             now = os.getxattr(fd, "security.capability")
@@ -1879,12 +1885,7 @@ def _restore_setid(fd, kept, path):
             except OSError as e:
                 raise OSError(e.errno, "%s was written, but its file capabilities "
                               "were cleared and could not be restored: %s" % (path, e.strerror))
-    if os.fstat(fd).st_mode & 0o7777 != mode:
-        try:
-            os.fchmod(fd, mode)
-        except OSError:
-            pass
-    if os.fstat(fd).st_mode & 0o7777 != mode:
+    if mode_lost:
         raise OSError(errno.EPERM, "%s was written, but its set-user-ID/set-group-ID "
                       "permissions were cleared and could not be restored" % path)
 
