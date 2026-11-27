@@ -40,7 +40,12 @@ struct UploadCrossDeviceTests {
             # A link whose target doesn't exist yet: created, as a plain write would.
             missing = os.path.join(d, 'missing'); link2 = os.path.join(d, 'link2'); os.symlink(missing, link2)
             staged = os.path.join(d, '.link2.part'); open(staged, 'w').write('fresh')
-            m.os.replace = cross(errno.EBUSY)
+            # (Only the staged file's rename: the new file is then staged
+            # beside its target, and renamed in from there.)
+            def busy_from_staged(a, b):
+                if a == staged: raise OSError(errno.EBUSY, os.strerror(errno.EBUSY))
+                return real_replace(a, b)
+            m.os.replace = busy_from_staged
             assert m._file_op({'op': 'rename', 'path': staged, 'dest': link2}) == {'exit_code': 0}
             assert open(missing).read() == 'fresh' and not os.path.exists(staged)
             # A write-only target (CWE-732): as a plain upload, writing it is

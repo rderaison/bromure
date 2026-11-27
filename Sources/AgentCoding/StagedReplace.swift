@@ -171,31 +171,16 @@ enum StagedReplace {
     /// metadata stay). It needs only what a plain upload needs, write access
     /// to `dest` (CWE-732): the staged file — this user's own — is made
     /// readable first, and `dest` is opened write-only. And it is never
-    /// destructive (CWE-459): a new file that fails part-way is removed
-    /// again, an existing one gets its old bytes back from a copy taken
+    /// destructive (CWE-459): a new file is filled under a name of its own
+    /// and only then renamed into place (`createNew`), an existing one gets its old bytes back from a copy taken
     /// first (owner-only, beside `staged`; kept and named in the error if
     /// even that fails). A `dest` this user may not read (write-only 0200)
     /// can't be copied aside: it is written as a plain upload would, without.
     static func writeInPlace(_ staged: String, into dest: String, create: Bool = false) -> String? {
         makeReadable(staged)
         if create {
-            // 0666 and the umask (and the folder's ACL), as a plain write
-            // creates it — never a fixed 0644 that drops the group write a
-            // umask of 002 gives (CWE-732).
-            let fd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
-            if fd >= 0 {
-                var ours = stat()
-                let known = fstat(fd, &ours) == 0
-                let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                if let failure = copyAll(from: staged, to: out) ?? finish(out) {
-                    try? out.close()
-                    if known { unlinkIfOurs(dest, ours) }
-                    return failure
-                }
-                unlink(staged)
-                return nil
-            }
-            guard errno == EEXIST else { return String(cString: strerror(errno)) }
+            var st = stat()
+            if stat(dest, &st) != 0 { return createNew(staged, at: dest) }
         }
         let fd = open(dest, O_WRONLY | O_CLOEXEC)
         guard fd >= 0 else { return String(cString: strerror(errno)) }
@@ -248,14 +233,49 @@ enum StagedReplace {
         return nil
     }
 
-    /// Remove `path` only while it is still the file this upload created
-    /// (`ours`, that file's fstat): another writer may have put a file of
-    /// its own at that name since — a rename lands there whatever we hold
-    /// open — and that one isn't ours to delete (CWE-362).
-    static func unlinkIfOurs(_ path: String, _ ours: stat) {
-        var now = stat()
-        guard lstat(path, &now) == 0, now.st_dev == ours.st_dev, now.st_ino == ours.st_ino else { return }
-        unlink(path)
+    /// `dest` doesn't exist (or is a dangling symlink, into another volume
+    /// maybe): `staged`'s bytes go into a file of this upload's own, beside
+    /// where `dest` leads, renamed into place once complete. A copy that
+    /// fails removes only that file — never the name `dest`, where another
+    /// writer may have put a finished file of its own meanwhile, which a
+    /// check of the name followed by its removal couldn't rule out
+    /// (CWE-362). The mode a plain write would give it — 0666 and the umask
+    /// and the folder's ACL (`newFileMode`), never a fixed 0644 (CWE-732).
+    static func createNew(_ staged: String, at dest: String) -> String? {
+        let target = resolvedTarget(dest)
+        let folder = (target as NSString).deletingLastPathComponent
+        let tmp = (folder as NSString).appendingPathComponent(".bromure-\(UUID().uuidString).part")
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return String(cString: strerror(errno)) }
+        let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        if let failure = copyAll(from: staged, to: out) ?? finish(out) {
+            try? out.close()
+            unlink(tmp)
+            return failure
+        }
+        _ = chmod(tmp, newFileMode(in: folder))
+        guard Darwin.rename(tmp, target) == 0 else {
+            let failure = String(cString: strerror(errno))
+            unlink(tmp)
+            return failure
+        }
+        unlink(staged)
+        return nil
+    }
+
+    /// Where `path` leads: its symlinks followed (a dangling one's target
+    /// too, which realpath(3) won't give), at most 32 deep.
+    static func resolvedTarget(_ path: String) -> String {
+        var p = path
+        for _ in 0..<32 {
+            var buf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+            let n = readlink(p, &buf, Int(PATH_MAX))
+            guard n > 0 else { return p }
+            let link = String(decoding: buf[..<n].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            p = link.hasPrefix("/") ? link
+                : ((p as NSString).deletingLastPathComponent as NSString).appendingPathComponent(link)
+        }
+        return p
     }
 
     /// The staged file is this user's own, but may carry `dest`'s mode and
