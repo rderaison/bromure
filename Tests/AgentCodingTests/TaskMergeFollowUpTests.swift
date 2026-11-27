@@ -142,6 +142,16 @@ struct TaskMergeFollowUpTests {
         #expect(py("echo X=1 > '\(wt)/.env'").contains("KEEP"))
     }
 
+    @Test("the build-litter list is the same in the app and in bromure-agentd",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func disposableListsMatch() {
+        let agentd = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py").path
+        let py = sh("/usr/bin/python3 -I -c \"import importlib.util, sys; s = importlib.util.spec_from_file_location('a', sys.argv[1]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); sys.stdout.write(m.IGNORED_DISPOSABLE.pattern)\" '\(agentd)'")
+        #expect(py == TaskLitter.ignoredDisposable)
+    }
+
     @Test("a verified merge removes the checkout — a delegated task's too; kept, a PR or unverified: not")
     func removesCheckoutPolicy() {
         let merge = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())
