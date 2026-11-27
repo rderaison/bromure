@@ -12,19 +12,23 @@ struct SignOutRevokeTests {
     @Test("A confirmed revoke is done")
     func confirmed() async {
         var calls = 0
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: true) { calls += 1 }
-        #expect(failure == nil)
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: true) { calls += 1 }
+        #expect(outcome == .done)
         #expect(calls == 1)
     }
 
-    @Test("A 401 for a credential bromure.io accepted before is done: it's revoked")
-    func alreadyRevoked() async {
+    // Regression (CWE-613): a final 401 was taken as proof the device was
+    // revoked, and sign-out erased the identity. bromure.io answers the same
+    // 401 for a token that merely expired, with the device and its SSH key
+    // still live, so it's `.refused` (not retried, not done).
+    @Test("A 401 for a credential whose refusal is final is refused, not a confirmed revoke")
+    func finalRefusalIsNotRevoked() async {
         var calls = 0
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: true) {
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: true) {
             calls += 1
             throw ControlPlaneError.http(status: 401, code: "unauthorized")
         }
-        #expect(failure == nil)
+        #expect(outcome == .refused)
         #expect(calls == 1)
     }
 
@@ -34,23 +38,23 @@ struct SignOutRevokeTests {
     @Test("A 401 for a credential never accepted is retried, then keeps the identity")
     func unconfirmed401() async {
         var calls = 0
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: false, retries: 3, retryDelay: 0) {
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: false, retries: 3, retryDelay: 0) {
             calls += 1
             throw ControlPlaneError.http(status: 401, code: "unauthorized")
         }
         #expect(calls == 4)
-        #expect(failure != nil)
-        #expect(failure?.contains("may still be registered") == true)
+        guard case .failed(let failure) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(failure.contains("may still be registered"))
     }
 
     @Test("A 401 that clears once the credential propagates is done")
     func propagationLag() async {
         var calls = 0
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: false, retries: 3, retryDelay: 0) {
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: false, retries: 3, retryDelay: 0) {
             calls += 1
             if calls < 3 { throw ControlPlaneError.http(status: 401, code: nil) }
         }
-        #expect(failure == nil)
+        #expect(outcome == .done)
         #expect(calls == 3)
     }
 
@@ -72,16 +76,16 @@ struct SignOutRevokeTests {
                       .http(status: 403, code: "forbidden"),
                       .decode])
     func failed(_ e: ControlPlaneError) async {
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: true) { throw e }
-        #expect(failure != nil)
-        #expect(failure?.contains("still registered") == true)
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: true) { throw e }
+        guard case .failed(let failure) = outcome else { Issue.record("\(outcome)"); return }
+        #expect(failure.contains("still registered"))
     }
 
     @Test("An unrelated error is a failure too")
     func otherError() async {
         struct Boom: Error {}
-        let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: true) { throw Boom() }
-        #expect(failure != nil)
+        let outcome = await P2PEnrollmentCoordinator.revokeForSignOut(final: true) { throw Boom() }
+        guard case .failed = outcome else { Issue.record("\(outcome)"); return }
     }
 
     // Regression (CWE-613 follow-up): the accepted mark starts empty for an

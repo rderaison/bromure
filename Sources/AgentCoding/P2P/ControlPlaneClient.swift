@@ -496,7 +496,8 @@ enum ISO8601 {
 /// call with it as the bearer answered 2xx. Until then a 401 doesn't prove
 /// the device is revoked -- right after enrollment the credential may not have
 /// propagated yet (see `RemoteConnectModel.loadDirectory`). After it, a 401 is
-/// the server refusing a credential it knew: revoked. Kept across launches,
+/// the server refusing a credential it knew: dead, revoked or merely expired
+/// (bromure.io doesn't say which). Kept across launches,
 /// as a hash of the last accepted bearer (never the bearer itself).
 enum AcceptedCredential {
     static let defaultsKey = "p2p.acceptedCredential"
@@ -528,6 +529,9 @@ enum AcceptedCredential {
     /// by a build before `DeviceRecord.enrolledAt`, which enrolled before
     /// that upgrade and may never be accepted again (revoked meanwhile).
     /// Otherwise the 401 may be propagation lag right after enrollment.
+    /// Final is NOT proof the device was revoked: an expired token gets the
+    /// same 401 while the device and its SSH key stay live (CWE-613), so
+    /// sign-out treats it as `.refused`, never as a confirmed revoke.
     static func refusalIsFinal(bearer: String, record: DeviceRecord?, now: Date = Date(),
                                defaults: UserDefaults = .standard) -> Bool {
         if wasAccepted(bearer, defaults: defaults) { return true }
