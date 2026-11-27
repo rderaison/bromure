@@ -375,7 +375,11 @@ export class ChatModel {
   async stage(files: File[]): Promise<string[]> {
     if (!files.length) return [];
     const paths: string[] = [];
-    try { await this.host.guestFileOp(this.workspaceID, { op: 'mkdir', path: DROP_DIR }); } catch { return paths; }
+    // Every write (and a failed copy's cleanup) goes to the workspace the
+    // drop was staged for, even if the session's state changes meanwhile.
+    const ws = this.workspaceID;
+    if (!ws) return paths;
+    try { await this.host.guestFileOp(ws, { op: 'mkdir', path: DROP_DIR }); } catch { return paths; }
     const stamp = dropStamp();
     for (let n = 0; n < files.length; n++) {
       const f = files[n];
@@ -383,7 +387,7 @@ export class ChatModel {
       let ok = true;
       try {
         await writeGuestFile(f.stream(), path, 6 * 1024 * 1024,
-          (op, t) => this.host.guestFileOp(this.workspaceID, op, t), b64);
+          (op, t) => this.host.guestFileOp(ws, op, t), b64);
       } catch { ok = false; }
       if (ok) {
         paths.push(path);
