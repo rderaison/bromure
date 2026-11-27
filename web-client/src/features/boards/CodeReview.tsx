@@ -488,6 +488,16 @@ function FindingDetail({ f, st, fa, others, onClose, onOpenTask, openRun }: {
   );
 }
 
+/** The findings table's rows: status, severity, repository and search
+ *  filters, most severe first. */
+export function filterFindings(all: any[], q: Pick<FindingsQuery, 'status' | 'severity' | 'search'>, repo: string | null): any[] {
+  const needle = q.search.trim().toLowerCase();
+  return sortedForTriage(all.filter(f =>
+    (q.status === 'all' || (q.status === 'open' ? isOpen(f.status) : f.status === q.status))
+    && (!q.severity || f.severity === q.severity) && (!repo || f.repo === repo)
+    && (!needle || [f.title, f.file ?? '', f.summary ?? '', f.cwe ?? '', f.repo].join(' ').toLowerCase().includes(needle))));
+}
+
 export function CodeReviewFindings({ st, fa, q, setQ, repoFilter, setRepoFilter, onOpenTask, openRun }: {
   st: RemoteState; fa: FindingActions; q: FindingsQuery; setQ: (p: Partial<FindingsQuery>) => void;
   repoFilter: string | null; setRepoFilter: (r: string | null) => void; onOpenTask: (id: string) => void; openRun: (r: Run) => void;
@@ -496,12 +506,12 @@ export function CodeReviewFindings({ st, fa, q, setQ, repoFilter, setRepoFilter,
   const watched = ((st.automations?.watches ?? []) as any[]).map(w => w.repo);
   const repos = [...new Set(all.map(x => x.repo as string))].sort();
   const repo = repoFilter && (watched.includes(repoFilter) || repos.includes(repoFilter)) ? repoFilter : null;
-  const needle = q.search.trim().toLowerCase();
-  const rows = sortedForTriage(all.filter(f =>
-    (q.status === 'all' || (q.status === 'open' ? isOpen(f.status) : f.status === q.status))
-    && (!q.severity || f.severity === q.severity) && (!repo || f.repo === repo)
-    && (!needle || [f.title, f.file ?? '', f.summary ?? '', f.cwe ?? '', f.repo].join(' ').toLowerCase().includes(needle))));
-  const sel = q.selected ? all.find(x => x.id === q.selected) : undefined;
+  const rows = filterFindings(all, q, repo);
+  // Only a finding the filters show can be on the detail panel: one they
+  // exclude (another repository picked since, a status filter it no longer
+  // matches) must not stay there with live Fix / status / delete controls
+  // beside a table that says something else is in scope.
+  const sel = q.selected ? rows.find(x => x.id === q.selected) : undefined;
   const compact = !!sel;
   const listRef = useRef<HTMLDivElement>(null);
   const move = (d: number) => {

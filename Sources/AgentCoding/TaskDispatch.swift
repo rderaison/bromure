@@ -607,6 +607,10 @@ final class TaskDispatcher {
             if $0.lastError == Self.alreadyOnItsWay { $0.lastError = nil }
             Self.clearAnswerError(&$0, seen: seen)
         }
+        // Asked while landing: the agent goes on with it.
+        if let q = task.pendingQuestion, task.pendingAskID == ask {
+            delegate.codingTaskEngine.landingAnswered(taskID, question: q)
+        }
         return true
     }
 

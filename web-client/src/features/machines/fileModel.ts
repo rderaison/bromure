@@ -10,6 +10,9 @@ import { RepoGitPrograms, shellQuote as q, b64ToBytes, bytesToB64, decodeUTF8, j
 import { tarGzStream, type TarEntry } from './tar';
 import { writeGuestFile, replaceGuestFile } from '../../core/remote/chunkedWrite';
 
+/** One guest file operation (op, timeout s) → the guest's answer. */
+type FileOp = (op: Record<string, unknown>, timeout?: number) => Promise<any>;
+
 export type GitStatus = 'modified' | 'added' | 'untracked' | 'deleted' | 'renamed' | 'conflicted';
 export const STATUS_TINT: Record<GitStatus, string> = {
   modified: 'var(--orange)', added: 'var(--green)', untracked: 'var(--green)', deleted: 'var(--red)', renamed: 'var(--blue)', conflicted: 'var(--purple)',
@@ -115,6 +118,14 @@ export class FileExplorerModel {
   private fileOp(op: Record<string, unknown>, timeout = 30) {
     if (!this.profileID) return Promise.reject(new Error('The machine isn\'t running.'));
     return this.host.guestFileOp(this.profileID, op, timeout);
+  }
+  /** File ops pinned to the workspace a transfer started on. The pane keeps
+   *  this model across selections (setLocation), so `fileOp` follows the
+   *  current one: a copy's writes, reads and cleanup must not — a failed
+   *  upload's `remove` would otherwise hit the same path in the workspace
+   *  selected since, and closing the pane would strand the partial file. */
+  private transferOps(profileID: string): FileOp {
+    return (op, timeout = 30) => this.host.guestFileOp(profileID, op, timeout);
   }
 
   setLocation(profileID: string | null, cwd: string | null, repoHint: string | null) {
@@ -260,7 +271,8 @@ export class FileExplorerModel {
         this.setDetail({ kind: 'error', message: 'File was deleted — switch to Diff to see what was removed.' });
       } else if (IMG.test(path)) {
         if (this.detail.kind === 'image' && this.shownDetailKey === key) return;   // a poll: keep the shown picture
-        const bytes = await this.readAll(joinPath(root, path), MAX_IMAGE);
+        if (!this.profileID) throw new Error('The machine isn\'t running.');
+        const bytes = await this.readAll(this.transferOps(this.profileID), joinPath(root, path), MAX_IMAGE);
         if (gen !== this.detailGen) return;
         if (!bytes) { this.setDetail({ kind: 'tooLarge' }); }
         else {
@@ -291,11 +303,11 @@ export class FileExplorerModel {
   // ── transfers ──────────────────────────────────────────────────────────
 
   /** The whole file (chunked reads); null past `cap` bytes. */
-  private async readAll(guestPath: string, cap = Infinity, progress?: (n: number) => void): Promise<Uint8Array | null> {
+  private async readAll(ops: FileOp, guestPath: string, cap = Infinity, progress?: (n: number) => void): Promise<Uint8Array | null> {
     const chunks: Uint8Array[] = [];
     let offset = 0;
     for (;;) {
-      const r = await this.fileOp({ op: 'read', path: guestPath, offset, length: CHUNK }, 60);
+      const r = await ops({ op: 'read', path: guestPath, offset, length: CHUNK }, 60);
       const data = b64ToBytes(r?.data ?? '');
       chunks.push(data);
       offset += data.length;
@@ -312,10 +324,11 @@ export class FileExplorerModel {
 
   /** Save to Downloads: download, then hand to the platform's save. */
   async saveToDownloads(relPath: string) {
-    if (!this.root) return;
+    if (!this.root || !this.profileID) return;
     const name = lastPathComponent(relPath);
+    const ops = this.transferOps(this.profileID);
     try {
-      const bytes = await this.readAll(joinPath(this.root, relPath), Infinity, n => {
+      const bytes = await this.readAll(ops, joinPath(this.root, relPath), Infinity, n => {
         this.transferText = `Copying ${name} out… ${fileBytes(n)}`; this.emit();
       });
       this.transferText = null; this.emit();
@@ -327,16 +340,17 @@ export class FileExplorerModel {
 
   /** Copy dropped files (and whole folders, as one archive) into the folder on show. */
   async receive(items: { name: string; isDir: boolean; file?: File; entries?: TarEntry[] }[], intoDir?: string) {
-    if (!this.root || !this.canTransfer) return;
+    if (!this.root || !this.canTransfer || !this.profileID) return;
     const base = intoDir ? joinPath(this.root, intoDir) : this.root;
+    const ops = this.transferOps(this.profileID);
     let note: string | null = null;
     for (const it of items) {
       const name = safeRelativePath(it.name);
       if (!name || name.includes('/')) continue;      // a drop's top-level item is one name
       const dest = joinPath(base, name);
       try {
-        if (it.isDir) note = await this.uploadFolder(it.name, it.entries ?? [], dest) ?? note;
-        else if (it.file) await this.uploadFile(it.file, dest, it.name);
+        if (it.isDir) note = await this.uploadFolder(ops, it.name, it.entries ?? [], dest) ?? note;
+        else if (it.file) await this.uploadFile(ops, it.file, dest, it.name);
       } catch (e: any) { note = e?.message ?? String(e); }
     }
     this.transferText = null;
@@ -348,34 +362,35 @@ export class FileExplorerModel {
   /** Stream into a guest file, one CHUNK in memory at a time. */
   /** Stream into a guest file, one CHUNK in memory at a time; a copy that
    *  fails part-way leaves no partial file (writeGuestFile). */
-  private async writeStream(stream: ReadableStream<Uint8Array>, guestPath: string, label: string) {
-    await writeGuestFile(stream, guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
-      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
+  private async writeStream(ops: FileOp, stream: ReadableStream<Uint8Array>, guestPath: string, label: string, staged = false) {
+    await writeGuestFile(stream, guestPath, CHUNK, ops, bytesToB64,
+      sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); }, staged);
   }
   /** A dropped file lands on its destination only once complete: a copy
    *  that fails part-way leaves a file already there untouched. */
-  private async uploadFile(file: File, guestPath: string, label: string) {
-    await replaceGuestFile(() => file.stream(), guestPath, CHUNK, (op, t) => this.fileOp(op, t), bytesToB64,
+  private async uploadFile(ops: FileOp, file: File, guestPath: string, label: string) {
+    await replaceGuestFile(() => file.stream(), guestPath, CHUNK, ops, bytesToB64,
       sent => { this.transferText = `Copying ${label} in… ${fileBytes(sent)}`; this.emit(); });
   }
-  private async uploadFolder(name: string, entries: TarEntry[], guestDir: string): Promise<string | null> {
+  private async uploadFolder(ops: FileOp, name: string, entries: TarEntry[], guestDir: string): Promise<string | null> {
     this.transferText = `Packing ${name}…`; this.emit();
     const guestArchive = `/tmp/bromure-drop-${crypto.randomUUID().toUpperCase()}.tgz`;
-    await this.writeStream(tarGzStream(entries), guestArchive, name);
+    // Owner-only while it fills and until it's unpacked (CWE-200).
+    await this.writeStream(ops, tarGzStream(entries), guestArchive, name, true);
     this.transferText = `Unpacking ${name}…`; this.emit();
     try {
-      const r = await this.fileOp({ op: 'untar', path: guestDir, archive: guestArchive }, 600);
+      const r = await ops({ op: 'untar', path: guestDir, archive: guestArchive }, 600);
       const skipped = r?.skippedCount ?? 0;
       return skipped > 0 ? `${skipped} items in “${name}” weren't copied: they point outside the folder or aren't regular files.` : null;
     } catch {
-      await this.fileOp({ op: 'remove', path: guestArchive }).catch(() => {});
-      await this.fileOp({ op: 'mkdir', path: guestDir });
+      await ops({ op: 'remove', path: guestArchive }).catch(() => {});
+      await ops({ op: 'mkdir', path: guestDir });
       for (const e of entries) {
         const rel = safeRelativePath(e.path);
         if (!rel) continue;                            // would escape the folder: never written
         const dest = joinPath(guestDir, rel);
-        if (e.dir) await this.fileOp({ op: 'mkdir', path: dest });
-        else if (e.file) await this.uploadFile(e.file, dest, lastPathComponent(e.path));
+        if (e.dir) await ops({ op: 'mkdir', path: dest });
+        else if (e.file) await this.uploadFile(ops, e.file, dest, lastPathComponent(e.path));
       }
       return null;
     }

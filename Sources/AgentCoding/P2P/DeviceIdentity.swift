@@ -34,6 +34,10 @@ struct DeviceRecord: Codable, Equatable {
     /// The API base this device enrolled against, e.g. "https://bromure.io/api".
     /// Persisted so later calls hit the same control plane the code came from.
     var apiBase: String
+    /// When this device enrolled. nil for a record saved by a build before
+    /// this field: enrolled before that upgrade, long past any propagation
+    /// lag (AcceptedCredential.refusalIsFinal).
+    var enrolledAt: Date? = nil
 
     var isServer: Bool { capability == "server" }
 

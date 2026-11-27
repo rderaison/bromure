@@ -1652,7 +1652,11 @@ struct HubFindingsTab: View {
             Divider()
             HStack(spacing: 0) {
                 table
-                if let id = hub.selectedFindingID, let f = findingStore.finding(id) {
+                // Only a finding the filters show: one they exclude (another
+                // repository picked since…) must not stay on the panel with
+                // live Fix / status / delete beside a table scoped elsewhere.
+                if let id = Self.shownSelection(hub.selectedFindingID, in: filtered.map(\.id)),
+                   let f = filtered.first(where: { $0.id == id }) {
                     Divider()
                     FindingDetailPanel(
                         finding: f,
@@ -1671,6 +1675,28 @@ struct HubFindingsTab: View {
         .onAppear { dropStaleFilter() }
         .onChange(of: findingStore.watches.map(\.repo)) { _, _ in dropStaleFilter() }
         .onChange(of: Set(findingStore.findings.map(\.repo))) { _, _ in dropStaleFilter() }
+        .onChange(of: filtered.map(\.id)) { old, new in
+            let kept = Self.selectionAfterChange(hub.selectedFindingID, old: old, new: new)
+            if kept != hub.selectedFindingID { hub.selectedFindingID = kept }
+        }
+    }
+
+    /// The selection the panel and the table follow: only a finding the
+    /// rows show. A hidden one left the table compact (its Repository and
+    /// Seen columns folded away) with no panel beside it.
+    static func shownSelection(_ selected: UUID?, in rows: [UUID]) -> UUID? {
+        guard let selected, rows.contains(selected) else { return nil }
+        return selected
+    }
+
+    /// The selection once the rows changed: a finding that left them (a
+    /// filter changed, its status moved out of the one shown) is no longer
+    /// selected — it came back on the panel when a later filter showed it
+    /// again. One not among the rows yet (a jump to it, ahead of the
+    /// mirror) stays.
+    static func selectionAfterChange(_ selected: UUID?, old: [UUID], new: [UUID]) -> UUID? {
+        guard let selected, old.contains(selected), !new.contains(selected) else { return selected }
+        return nil
     }
 
     private var filterBar: some View {
@@ -1737,7 +1763,7 @@ struct HubFindingsTab: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            FindingsList(rows: rows, compact: hub.selectedFindingID != nil,
+            FindingsList(rows: rows, compact: Self.shownSelection(hub.selectedFindingID, in: rows.map(\.id)) != nil,
                          selection: $hub.selectedFindingID, onFix: { actions.startFix($0, confirmed: $1) },
                          onStatus: actions.setStatus)
         }

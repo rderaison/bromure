@@ -68,7 +68,9 @@ export function AutomationHubView({ host, initialTab }: { host: RemoteHost; init
     editWatch: (w: any) => setWatchEdit({ draft: w, isNew: false }),
   };
   const fa = useFindingActions(host, st ?? ({} as RemoteState), showFlash);
-  const showFindings = (p: Partial<FindingsQuery>, repo?: string | null) => { setQ(p); if (repo !== undefined) setRepoFilter(repo); setTab('security'); setSecTab('findings'); };
+  // From the overview: a fresh selection — the one it names, else none (a
+  // finding picked earlier isn't what a tile asked to see).
+  const showFindings = (p: Partial<FindingsQuery>, repo?: string | null) => { setQ({ selected: null, ...p }); if (repo !== undefined) setRepoFilter(repo); setTab('security'); setSecTab('findings'); };
   const newWatch = () => {
     const ws = st?.workspaces ?? [];
     const first = ws.find(w => (w as any).hasGitHubToken) ?? ws[0];
@@ -115,7 +117,7 @@ export function AutomationHubView({ host, initialTab }: { host: RemoteHost; init
         {!st ? null
           : tab === 'runs' ? <RunsBoard st={st} actions={actions} onNew={() => setChooser(true)} />
           : tab === 'automations' ? <HomeTab st={st} actions={actions} onChoose={choose} onShowRuns={() => setTab('runs')}
-                                             onOpenWatch={w => { setRepoFilter(w.repo); setTab('security'); setSecTab('findings'); }} />
+                                             onOpenWatch={w => { setQ({ selected: null }); setRepoFilter(w.repo); setTab('security'); setSecTab('findings'); }} />
           : watches.length === 0 ? <SecurityWelcome onNew={newWatch} />
           : secTab === 'overview' ? <CodeReviewOverview st={st} watches={watches} fa={fa} repo={pipelineRepo} setRepo={setPipelineRepo}
                                                        showFindings={showFindings} showRepositories={() => setSecTab('repositories')} showRuns={() => setTab('runs')}

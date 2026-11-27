@@ -47,26 +47,66 @@ export type GuestFileOp = (op: Record<string, unknown>, timeoutSec?: number) => 
 /** Copy `stream` into the guest file `path` (writeStreamChunked). If the copy
  *  fails part-way — the source became unreadable, a write was refused — the
  *  partial file it created is removed before the error propagates: a dropped
- *  folder's half-written /tmp archive or a truncated file never stays behind.
+ *  folder's half-written /tmp archive or a temp file never stays behind.
  *  A copy that failed before its first write touched nothing, so nothing is
- *  removed (a file already there stays). */
+ *  removed.
+ *
+ *  `path` MUST be this copy's own: a fresh, unique name nothing else writes
+ *  (a temp or archive name with a UUID). The cleanup deletes whatever is at
+ *  `path`, so on a shared name it would delete another, concurrent copy's
+ *  finished file (CWE-362). To land a file on a name others may use, go
+ *  through replaceGuestFile. */
 export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
                                      fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
-                                     progress?: (sent: number) => void): Promise<number> {
+                                     progress?: (sent: number) => void, staged = false): Promise<number> {
   let created = false;
   try {
-    return await writeStreamChunked(stream, chunk, async (bytes, append) => {
-      await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
-      created = true;
-    }, progress);
+    return await writeDirect(stream, path, chunk, fileOp, encode, progress, () => { created = true; }, staged);
   } catch (e) {
     if (created) await fileOp({ op: 'remove', path }).catch(() => {});
     throw e;
   }
 }
 
+/** The chunked writes alone — no cleanup: for a path this copy doesn't own. */
+function writeDirect(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
+                     fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                     progress?: (sent: number) => void, wrote?: () => void,
+                     staged = false): Promise<number> {
+  return writeStreamChunked(stream, chunk, async (bytes, append) => {
+    // `staged`: an upload's staging file, created owner-only (CWE-200).
+    await fileOp({ op: 'write', path, data: encode(bytes), append, ...(staged && !append ? { staged: true } : {}) }, 60);
+    wrote?.();
+  }, progress);
+}
+
 /** The guest agent's answer when it predates an op (bromure-agentd.py). */
 const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.message ?? e));
+
+/** The filesystem refused: EPERM (1) or EACCES (13), read from the error's
+ *  own shape, never from text that may hold a filename (CWE-20).
+ *  - bromure-agentd.py's file ops end in `except Exception as e: return
+ *    {"error": str(e)}`, so an OSError arrives as Python's own text, which
+ *    STARTS with its errno: `[Errno 13] Permission denied: '/d/.f…'`. The
+ *    path after it is quoted with ' or " (Python picks " when the name holds
+ *    an apostrophe) and may say anything, "permission denied" included.
+ *  - A Sidecar Mac (HostExec.swift) answers a refused write with strerror's
+ *    text alone, `Permission denied` / `Operation not permitted`, no path.
+ *  (A Mac host relays the guest's message as is; an older one wrapped it in
+ *  an enum dump, whose fixed prefix is skipped.)
+ *  Anything else (ENOSPC on a file named `permission denied's.txt`, an
+ *  exception that merely mentions a path) is not a refusal: the direct-write
+ *  fallback truncates the destination, so it must never run on a guess.
+ *  Mirrors FolderUpload.refusedByFilesystem in Swift; keep the two in step. */
+export const permissionDenied = (e: unknown) => {
+  const text = String((e as any)?.message ?? e).trim();
+  // A Mac host older than this check relays a VM guest's error as a Swift
+  // enum dump, `commandFailed(exitCode: 1, stderr: "[Errno 13] …")`: a fixed
+  // prefix, after which the guest's message starts as above.
+  const guest = text.replace(GUEST_ERROR_DUMP, '');
+  return /^\[errno (1|13)\] /i.test(guest) || /^(permission denied|operation not permitted)$/i.test(text);
+};
+const GUEST_ERROR_DUMP = /^commandFailed\(exitCode: -?\d+, stderr: "/;
 
 /** Copy a dropped file OVER `dest` without ever leaving it half-written: the
  *  bytes go to a hidden temp file beside it, which replaces `dest` in one
@@ -74,13 +114,49 @@ const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.mes
  *  copy that fails part-way — the source became unreadable, a write was
  *  refused — leaves `dest` exactly as it was and removes the temp file.
  *  A guest too old for `rename` gets the direct write it always had
- *  (`open` is called again for that: a File can be read twice). */
+ *  (`open` is called again for that: a File can be read twice; a new file it
+ *  fails to fill is removed again — writeLegacy), and so does a destination
+ *  whose DIRECTORY we may not write — see below. */
 export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
   const cut = dest.lastIndexOf('/');
-  const tmp = `${dest.slice(0, cut + 1)}.${dest.slice(cut + 1)}.bromure-${crypto.randomUUID()}.part`;
-  const sent = await writeGuestFile(open(), tmp, chunk, fileOp, encode, progress);
+  // Fixed length, whatever the destination's name: a name near the 255-byte
+  // component limit is valid, and must not become an invalid temp name.
+  const tmp = `${dest.slice(0, cut + 1)}.bromure-${crypto.randomUUID()}.part`;
+  let sent: number;
+  // Did the guest accept a write to `tmp`? Only a write that SUCCEEDED counts,
+  // so a refusal of the very first one — the create — leaves this false.
+  let tmpCreated = false;
+  try {
+    // Owner-only while it fills (CWE-200): `dest` may be private. `rename`
+    // gives it its final mode.
+    sent = await writeGuestFile(open(), tmp, chunk, async (o, timeoutSec) => {
+      const r = await fileOp(o, timeoutSec);
+      if (o.op === 'write') tmpCreated = true;
+      return r;
+    }, encode, progress, true);
+  } catch (e) {
+    // Writing a file does not require write access to its directory, but
+    // CREATING a sibling of it does. A group-writable file in someone else's
+    // directory is the ordinary case: the direct write this replaced worked
+    // there, so refusing the upload would be a regression.
+    //
+    // Narrow on purpose. Only when the guest refused AND nothing was written:
+    // a denial part-way through must never become a direct write, because
+    // writeGuestFile removes the file it created on failure — and on this
+    // path that file is `dest` itself, so the user's existing file would be
+    // deleted rather than left alone.
+    if (tmpCreated || !permissionDenied(e)) throw e;
+    console.warn(
+      `[upload] ${dest}: cannot create a temp file in its directory (${
+        String((e as any)?.message ?? e)}), so writing straight to it. ` +
+      'This is NOT atomic: if the copy fails part-way the destination is lost.',
+    );
+    // Straight onto `dest`, and NOT through writeGuestFile: its clean-up on a
+    // failed copy removes the file it wrote, which here is the user's own.
+    return writeDirect(open(), dest, chunk, fileOp, encode, progress);
+  }
   try {
     await fileOp({ op: 'rename', path: tmp, dest });
     return sent;
@@ -88,5 +164,46 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     await fileOp({ op: 'remove', path: tmp }).catch(() => {});
     if (!unknownOp(e)) throw e;
   }
-  return writeGuestFile(open(), dest, chunk, fileOp, encode, progress);
+  // Straight onto `dest`, as such a guest always got it. A file that was
+  // there stays whatever happens (another drop of the same name may have
+  // finished there meanwhile: never this copy's to delete); one this copy
+  // created is removed again if it fails part-way (writeLegacy).
+  return writeLegacy(open, dest, chunk, fileOp, encode, progress);
+}
+
+/** The size of guest file `path`; null when it can't be read — not there,
+ *  or not this user's to read. A guest's `read` has said its size since
+ *  long before `rename`. */
+async function guestSize(path: string, fileOp: GuestFileOp): Promise<number | null> {
+  try {
+    const r: any = await fileOp({ op: 'read', path, offset: 0, length: 1 });
+    return typeof r?.size === 'number' ? r.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A guest without `rename`: written straight onto `dest`. If `dest` wasn't
+ *  there and the copy fails part-way, the truncated file it left under the
+ *  final name is removed (CWE-459) — but only while it is still that copy's:
+ *  its size exactly the bytes this copy had written. A file that was there
+ *  before, or one another drop has since written over (its size differs),
+ *  stays: a guest this old has no remove tied to a file's identity, so its
+ *  size stands in for it (CWE-362). Mirrors FolderUpload.writeLegacy. */
+export async function writeLegacy(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
+                                  fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                                  progress?: (sent: number) => void): Promise<number> {
+  const existed = (await guestSize(dest, fileOp)) !== null;
+  let written = 0;
+  try {
+    return await writeStreamChunked(open(), chunk, async (bytes, append) => {
+      await fileOp({ op: 'write', path: dest, data: encode(bytes), append }, 60);
+      written += bytes.length;
+    }, progress);
+  } catch (e) {
+    if (!existed && (await guestSize(dest, fileOp)) === written) {
+      await fileOp({ op: 'remove', path: dest }).catch(() => {});
+    }
+    throw e;
+  }
 }

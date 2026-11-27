@@ -1145,6 +1145,8 @@ struct CodingKanbanView: View {
                     onRetry: actions.retryLanding.map { retry in { retry(task.id) } },
                     isSelected: actions.mergeBatch != nil && batchable(task) ? selectedReview.contains(task.id) : nil,
                     onToggleSelect: { toggleReview(task.id) },
+                    onAnswer: { await actions.answer(task.id, $0, $1, $2) },
+                    attachmentLimit: actions.answerAttachmentLimit,
                     menu: testingMenu(task))
                     .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
@@ -1977,11 +1979,6 @@ private struct AssignedTaskCard: View {
     var attachmentLimit: Int? = nil
     var onRecall: () -> Void
     @State private var answering = false
-    @State private var draft = TaskAnswerDraft()
-    @State private var sending = false
-    /// The last Send was refused or didn't go (the sheet says why from the
-    /// task's current `lastError`).
-    @State private var sendFailed = false
 
     var body: some View {
         Button(action: onOpen) {
@@ -2064,9 +2061,30 @@ private struct AssignedTaskCard: View {
                 + [.divider,
                    .init(title: NSLocalizedString("Stop & Return to Backlog", comment: "task card"),
                          role: .destructive, action: onRecall)])))
+        .modifier(TaskAnswering(task: task, isPresented: $answering,
+                                attachmentLimit: attachmentLimit, onAnswer: onAnswer))
+    }
+}
+
+/// The answer sheet for an assignee's question, from any card that shows
+/// it (In Progress, or Review while it lands): the draft, its sending and
+/// why a Send didn't go.
+private struct TaskAnswering: ViewModifier {
+    let task: CodingTask
+    @Binding var isPresented: Bool
+    var attachmentLimit: Int?
+    var onAnswer: (UUID?, String, [DroppedFile]) async -> Bool
+    @State private var draft = TaskAnswerDraft()
+    @State private var sending = false
+    /// The last Send was refused or didn't go (the sheet says why from the
+    /// task's current `lastError`).
+    @State private var sendFailed = false
+
+    func body(content: Content) -> some View {
+        content
         // A sheet, not an alert: a question runs to paragraphs (lists, code)
         // and an answer to a few lines — the alert showed both in a sliver.
-        .sheet(isPresented: $answering) {
+        .sheet(isPresented: $isPresented) {
             TaskAnswerSheet(task: task,
                             reply: Binding(get: { draft.text }, set: { draft.edit($0, for: task.pendingAskID) }),
                             stale: draft.isStale(for: task.pendingAskID),
@@ -2089,13 +2107,13 @@ private struct AssignedTaskCard: View {
                                     // refused answer stays, with why.
                                     draft = draft.afterSend(sent, accepted: ok)
                                     if ok {
-                                        answering = false
+                                        isPresented = false
                                     } else {
                                         sendFailed = true
                                     }
                                 }
                             },
-                            onCancel: { answering = false })   // the draft stays for next time
+                            onCancel: { isPresented = false })   // the draft stays for next time
         }
     }
 }
@@ -2471,6 +2489,11 @@ struct CardMenuItem: Identifiable {
         }
     }
 
+    /// `items` first, then `menu`: every id renumbered by position.
+    static func prepending(_ items: [CardMenuItem.Draft], to menu: [CardMenuItem]) -> [CardMenuItem] {
+        list(items + menu.map { Draft(title: $0.title, role: $0.role, url: $0.url, action: $0.action) })
+    }
+
     /// An entry before it gets its position.
     struct Draft {
         let title: String
@@ -2746,12 +2769,19 @@ private struct TestingTaskCard: View {
     /// Picked for a batch merge (nil: it can't be).
     var isSelected: Bool? = nil
     var onToggleSelect: () -> Void = {}
+    /// Answer the question its assignee asked while landing it.
+    var onAnswer: (UUID?, String, [DroppedFile]) async -> Bool = { _, _, _ in false }
+    var attachmentLimit: Int? = nil
     /// The card's menu (built by the column).
     var menu: [CardMenuItem] = []
     @State private var hovering = false
+    @State private var answering = false
 
     private var unsent: Int { task.comments.filter { $0.sentAt == nil }.count }
     private var needsYou: Bool { task.landing?.phase == .needsYou }
+    /// Its assignee asked while landing: answered here, as on In Progress
+    /// (its session may be on another machine, with nothing to type into).
+    private var asks: Bool { needsYou && task.pendingQuestion != nil && task.pendingAskID != nil }
 
     var body: some View {
         Button(action: onOpen) {
@@ -2824,7 +2854,11 @@ private struct TestingTaskCard: View {
             hint: task.isNoCode ? NSLocalizedString("Read Report", comment: "task card")
                                 : NSLocalizedString("Review Changes", comment: "task card"),
             onPress: onOpen,
-            menu: menu))
+            menu: asks ? CardMenuItem.prepending([.init(title: NSLocalizedString("Answer…", comment: "task card"),
+                                                        action: { answering = true }), .divider], to: menu)
+                       : menu))
+        .modifier(TaskAnswering(task: task, isPresented: $answering,
+                                attachmentLimit: attachmentLimit, onAnswer: onAnswer))
     }
 
     /// The hover ✓, in the action row next to the card's own control —
@@ -2879,11 +2913,22 @@ private struct TestingTaskCard: View {
                 Text(reason)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.red)
-                    .lineLimit(2)
+                    // The agent's question: enough of it to answer from.
+                    .lineLimit(asks ? 5 : 2)
                     .fixedSize(horizontal: false, vertical: true)
                     .help(task.landing?.detail ?? reason)
                 HStack(spacing: 6) {
-                    if let onRetry {
+                    if asks {
+                        Button {
+                            answering = true
+                        } label: {
+                            Label(NSLocalizedString("Answer…", comment: "task card"),
+                                  systemImage: "arrowshape.turn.up.left.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.small)
+                    } else if let onRetry {
                         Button(NSLocalizedString("Retry", comment: ""), action: onRetry)
                             .controlSize(.small)
                             .help(NSLocalizedString("Land it again with the same choices", comment: "task card"))

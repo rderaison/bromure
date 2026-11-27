@@ -79,11 +79,11 @@ type TcpEvent = [kind: string, data?: Uint8Array, message?: string];
 export class ElectronTcpStream implements ByteStream {
   private dataHandler: (data: Uint8Array) => void = () => {};
   private closeHandler: (err?: Error) => void = () => {};
-  /** Setting a handler releases what arrived early (see `open`). */
+  /** Setting a handler claims a socket from `open` (see there). */
   get onData() { return this.dataHandler; }
-  set onData(f: (data: Uint8Array) => void) { this.dataHandler = f; this.releaseBacklog(); }
+  set onData(f: (data: Uint8Array) => void) { this.dataHandler = f; this.claim(); }
   get onClose() { return this.closeHandler; }
-  set onClose(f: (err?: Error) => void) { this.closeHandler = f; this.releaseBacklog(); }
+  set onClose(f: (err?: Error) => void) { this.closeHandler = f; this.claim(); }
   /** An accepted connection's local side is full (true) or drained (false). */
   onPause: (paused: boolean) => void = () => {};
   private static streams = new Map<number, ElectronTcpStream>();
@@ -105,26 +105,15 @@ export class ElectronTcpStream implements ByteStream {
    *  (main reads on only while little is unacked). */
   ack(n: number): void { if (!this.closed && n > 0) this.bridge.tcpAck?.(this.id, n); }
 
-  /** Events for an id `open` hasn't returned yet: main sends the socket's
-   *  first bytes (the SSH server's banner) as soon as it connects, which can
-   *  beat tcpOpen's reply. Kept until `open` claims them, never dropped. */
-  private static early = new Map<number, TcpEvent[]>();
-  /** While set, events queue here (behind the early ones) instead of firing. */
-  private backlog: TcpEvent[] | null = null;
-
   private static wire(bridge: ElectronNetBridge) {
     if (!ElectronTcpStream.wired) {
       ElectronTcpStream.wired = true;
       bridge.onTcpEvent((id, kind, data, message) => {
-        const ev: TcpEvent = [kind, data, message];
-        const s = ElectronTcpStream.streams.get(id);
-        if (!s) {
-          const q = ElectronTcpStream.early.get(id) ?? [];
-          if (q.length < 1024) q.push(ev);
-          ElectronTcpStream.early.set(id, q);
-          return;
-        }
-        if (s.backlog) s.backlog.push(ev); else s.deliver(ev);
+        // Main sends a socket's events only once its stream exists (it holds
+        // them until tcpResume — electron/tcpEvents.ts). One for an unknown
+        // id is a straggler for a stream already finished (main's close
+        // after ours): dropped, never stored — nothing to accumulate.
+        ElectronTcpStream.streams.get(id)?.deliver([kind, data, message]);
       });
     }
   }
@@ -140,27 +129,20 @@ export class ElectronTcpStream implements ByteStream {
     const id = await bridge.tcpOpen(host, port);
     const s = new ElectronTcpStream(bridge, id);
     ElectronTcpStream.streams.set(id, s);
-    const early = ElectronTcpStream.early.get(id);
-    ElectronTcpStream.early.delete(id);
-    // Held until the caller sets its handlers — however long that takes
-    // (a timer guessed "right after this returns" and lost the banner when
-    // the caller awaited something first) — then delivered in order, ahead
-    // of anything that arrives meanwhile.
-    if (early) s.backlog = early;
+    // Main holds the socket until tcp:resume, sent once the caller has set
+    // onData/onClose, however long that takes: a timer guessing "right after
+    // open returns" lost the SSH banner when the caller awaited something
+    // first (the tunnel's forward lane loaded its key in between).
+    s.unclaimed = true;
     return s;
   }
-  private releaseBacklog() {
-    if (!this.backlog || this.releasing) return;
-    this.releasing = true;
+  private unclaimed = false;
+  private claim() {
+    if (!this.unclaimed) return;
+    this.unclaimed = false;
     // A microtask: the caller sets onData and onClose together.
-    queueMicrotask(() => {
-      this.releasing = false;
-      const q = this.backlog ?? [];
-      this.backlog = null;
-      for (const ev of q) this.deliver(ev);
-    });
+    queueMicrotask(() => { if (!this.closed) this.bridge.tcpResume?.(this.id); });
   }
-  private releasing = false;
   write(data: Uint8Array): void { if (!this.closed) this.bridge.tcpWrite(this.id, data); }
   close(): void { if (!this.closed) { this.bridge.tcpClose(this.id); this.finish(); } }
   private finish(err?: Error) {

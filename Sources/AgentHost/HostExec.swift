@@ -99,12 +99,34 @@ enum HostExec {
                         "eof": offset + UInt64(data.count) >= size, "exit_code": 0]
             case "write":
                 let data = Data(base64Encoded: spec["data"] as? String ?? "") ?? Data()
-                if spec["append"] as? Bool == true, let h = FileHandle(forWritingAtPath: path) {
+                if spec["staged"] as? Bool == true, spec["append"] as? Bool != true {
+                    // An upload's staging file: owner-only while it fills
+                    // (CWE-200); `rename` gives it its final mode. Never
+                    // through a link planted at its name.
+                    let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                    guard fd >= 0 else { return ["error": String(cString: strerror(errno)), "exit_code": 1] }
+                    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                     defer { try? h.close() }
-                    try h.seekToEnd()
+                    guard fchmod(fd, 0o600) == 0 else {
+                        return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                    }
                     try h.write(contentsOf: data)
                 } else {
-                    try data.write(to: URL(fileURLWithPath: path))
+                    // Opened without truncating, then truncated through the
+                    // same descriptor: an open(O_TRUNC) already strips the
+                    // set-id bits a write by this user clears, before they
+                    // could be read to put back.
+                    let append = spec["append"] as? Bool == true
+                    let fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : 0), 0o666)
+                    guard fd >= 0 else { return ["error": String(cString: strerror(errno)), "exit_code": 1] }
+                    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                    defer { try? h.close() }
+                    let kept = StagedReplace.setIDMode(fd)
+                    if !append { try h.truncate(atOffset: 0) }
+                    try h.write(contentsOf: data)
+                    if let failure = StagedReplace.restoreSetID(fd, kept, path: path) {
+                        return ["error": failure, "exit_code": 1]
+                    }
                 }
                 return ["exit_code": 0]
             case "mkdir":
@@ -122,7 +144,7 @@ enum HostExec {
             case "rename":
                 // An upload's last step (bromure-agentd.py's `rename`): the
                 // complete temp file replaces `dest` atomically; an existing
-                // file keeps its permissions, a symlink is written through.
+                // file keeps its metadata, a symlink is written through.
                 var dest = mapHome(spec["dest"] as? String ?? "")
                 guard dest.hasPrefix("/") else { return ["error": "dest must be absolute", "exit_code": 1] }
                 if (try? fm.destinationOfSymbolicLink(atPath: dest)) != nil {
@@ -132,11 +154,11 @@ enum HostExec {
                 if fm.fileExists(atPath: dest, isDirectory: &isDir), isDir.boolValue {
                     return ["error": "\(dest) is a folder", "exit_code": 1]
                 }
-                if let mode = (try? fm.attributesOfItem(atPath: dest))?[.posixPermissions] {
-                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
-                }
-                guard Foundation.rename(path, dest) == 0 else {
-                    return ["error": String(cString: strerror(errno)), "exit_code": 1]
+                // Owner, mode, ACL and extended attributes kept; a new file
+                // gets a plain write's mode; a hard-linked file, or a target
+                // across volumes, updated in place (StagedReplace).
+                if let failure = StagedReplace.replace(path, onto: dest) {
+                    return ["error": failure, "exit_code": 1]
                 }
                 return ["exit_code": 0]
             case "remove":

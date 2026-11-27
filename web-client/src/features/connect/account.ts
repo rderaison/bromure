@@ -129,29 +129,24 @@ export const account = {
   },
 
   /** Retire this device on bromure.io, then forget it locally. The local
-   *  credential is only dropped once bromure.io confirmed the revocation (or
-   *  says it's already gone): otherwise it's kept, so signing out can be
-   *  retried, and the failure is shown. Resolves to whether it signed out. */
-  async signOut(): Promise<boolean> {
-    const rec = snap.record;
-    if (rec && !DEMO) {
-      set({ busy: true, error: null });
-      try {
-        await revokeOnServer(new ControlPlane(rec.apiBase, http), rec);
-      } catch (e: any) {
-        set({ busy: false, error: `Couldn't sign out of bromure.io: ${e?.message ?? e}. This device is still registered there — check your connection and try again.` });
-        return false;
-      }
-      set({ busy: false });
-    }
-    stopTimer();
-    await clearDeviceRecord().catch(() => {});
-    await idbDelete('device-identity').catch(() => {});
-    directoryEverLoaded = false; firstLoad401Retries = 0;
-    try { sessionStorage.removeItem(CONNECT_KEY); } catch {}   // a pending Connect link was for that account
-    set({ record: null, servers: [], directoryLoaded: false, directoryError: null, error: null });
-    if (watchers) startTimer();
-    return true;
+   *  credential is only dropped once bromure.io confirmed the revocation:
+   *  otherwise it's kept, so signing out can be retried, and the failure is
+   *  shown. Resolves to whether it signed out.
+   *
+   *  A credential bromure.io refuses for good (CredentialRefused) is NOT a
+   *  confirmed revocation: it may only have expired (the hosted cookie lapses
+   *  after 24 h idle), with the device and its SSH key still live (CWE-613).
+   *  The first sign-out says so and keeps everything; a second one forgets
+   *  the credential on this device only, keeping the device key, so signing
+   *  in again re-attaches to the same device and can revoke it.
+   *
+   *  One sign-out at a time: a call while one is in flight shares its result
+   *  (CWE-362), so a second click can't count as having seen the warning the
+   *  first one is about to show. Only a sign-out started after the warning was
+   *  shown forgets the credential. */
+  signOut(): Promise<boolean> {
+    signingOut ??= signOutOnce().finally(() => { signingOut = null; });
+    return signingOut;
   },
 
   async loadDirectory(silent = false) {
@@ -171,9 +166,12 @@ export const account = {
       set({ directoryLoading: false });
       if (snap.record !== rec) return;
       if (e?.status === 401 && directoryEverLoaded) {
-        // Loaded before: a 401 now is a real revocation of this device.
+        // Loaded before, so the credential is dead -- revoked, or only
+        // expired (the hosted cookie lapses after 24 h idle): bromure.io
+        // doesn't say which. The device key stays (only sign-out deletes
+        // it), so signing in again re-attaches to the same device.
         await clearDeviceRecord().catch(() => {});
-        set({ record: null, servers: [], directoryLoaded: false, directoryError: "This device's bromure.io registration was revoked. Sign in again." });
+        set({ record: null, servers: [], directoryLoaded: false, directoryError: "bromure.io no longer accepts this device's sign-in — it expired or was revoked. Sign in again." });
       } else if (e?.status === 401) {
         // First load after sign-in: still propagating, or no servers yet.
         set({ servers: [] });
@@ -213,18 +211,90 @@ let revoke401DelayMs = 2000;
 /** Tests only. */
 export function setRevoke401DelayForTests(ms: number) { revoke401DelayMs = ms; }
 
-/** Run a sign-out call. 'gone' when it answered 401 for a credential
- *  bromure.io accepted before: revoked already, nothing left to do. A 401 for
- *  one it never accepted proves nothing (CWE-613): right after enrollment it
- *  may not have propagated, and forgetting the credential then would lose
- *  the only one that can revoke a still-live device. It's retried, then
- *  reported, the credential kept. */
-async function revokeCall(rec: DeviceRecord, call: () => Promise<unknown>): Promise<'done' | 'gone'> {
+/** Enrollment propagates in seconds; past this, a credential bromure.io
+ *  refuses isn't one it hasn't caught up with (AcceptedCredential in the
+ *  macOS app). */
+const PROPAGATION_WINDOW_MS = 10 * 60 * 1000;
+
+/** Whether a 401 for this credential can only mean it's dead: bromure.io
+ *  accepted it before, or it's older than propagation could explain -- a
+ *  record saved before `accepted` existed may never be accepted again.
+ *  Dead is NOT revoked: bromure.io answers the same 401 for a revoked device
+ *  and for a credential that merely expired, so this never proves the device
+ *  is gone (see CredentialRefused). */
+export function refusalIsFinal(rec: DeviceRecord, now = Date.now()): boolean {
+  if (rec.accepted) return true;
+  const enrolled = Date.parse(rec.enrolledAt);
+  return !Number.isFinite(enrolled) || now - enrolled > PROPAGATION_WINDOW_MS;
+}
+
+/** account.signOut's body; callers go through it (one at a time). */
+async function signOutOnce(): Promise<boolean> {
+  const rec = snap.record;
+  // Decided now, not when bromure.io answers: the warning must have been
+  // shown before this sign-out was asked for.
+  const warned = !!rec && refusalShownFor === rec;
+  let localOnly = false;
+  if (rec && !DEMO) {
+    set({ busy: true, error: null });
+    try {
+      await revokeOnServer(new ControlPlane(rec.apiBase, http), rec);
+    } catch (e: any) {
+      if (!(e instanceof CredentialRefused)) {
+        set({ busy: false, error: `Couldn't sign out of bromure.io: ${e?.message ?? e}. This device is still registered there — check your connection and try again.` });
+        return false;
+      }
+      if (!warned) {
+        refusalShownFor = rec;
+        set({ busy: false, error: REFUSED_MESSAGE });
+        return false;
+      }
+      localOnly = true;
+    }
+    set({ busy: false });
+  }
+  refusalShownFor = null;
+  stopTimer();
+  await clearDeviceRecord().catch(() => {});
+  if (!localOnly) await idbDelete('device-identity').catch(() => {});
+  directoryEverLoaded = false; firstLoad401Retries = 0;
+  try { sessionStorage.removeItem(CONNECT_KEY); } catch {}   // a pending Connect link was for that account
+  set({ record: null, servers: [], directoryLoaded: false, directoryError: null, error: localOnly ? FORGOTTEN_MESSAGE : null });
+  if (watchers) startTimer();
+  return true;
+}
+
+let signingOut: Promise<boolean> | null = null;
+
+/** bromure.io refuses this device's credential for good (refusalIsFinal).
+ *  The device may be revoked -- or still live with an expired credential:
+ *  nothing here confirms a revocation. */
+class CredentialRefused extends Error {
+  constructor() { super("bromure.io no longer accepts this device's credentials"); }
+}
+
+/** The record whose CredentialRefused sign-out was already explained: the
+ *  next sign-out of it forgets it locally (account.signOut). */
+let refusalShownFor: DeviceRecord | null = null;
+
+const REFUSED_MESSAGE =
+  "bromure.io no longer accepts this device's sign-in — it expired, or the device was revoked, and bromure.io doesn't say which, so this device may still be registered there. " +
+  'Sign Out again to forget it on this device only. If it is still listed under your devices on bromure.io, revoke it there, or sign in again on this device and then sign out.';
+const FORGOTTEN_MESSAGE =
+  'Signed out on this device only. If bromure.io still lists it under your devices, revoke it there, or sign in again here and sign out.';
+
+/** Run a sign-out call. A 401 never confirms a revocation (CWE-613). For a
+ *  credential bromure.io refuses for good (refusalIsFinal) it throws
+ *  CredentialRefused. For a fresh one it never accepted, the credential may
+ *  not have propagated yet, so the 401 is retried and then reported. Either
+ *  way the credential is kept, since it is the only one that can revoke a
+ *  still-live device. */
+async function revokeCall(rec: DeviceRecord, call: () => Promise<unknown>): Promise<void> {
   for (let attempt = 0; ; attempt++) {
-    try { await call(); return 'done'; }
+    try { await call(); return; }
     catch (e) {
       if (!gone(e, 401)) throw e;
-      if (rec.accepted) return 'gone';
+      if (refusalIsFinal(rec)) throw new CredentialRefused();
       if (attempt >= REVOKE_401_RETRIES) {
         throw new Error("it doesn't recognize this device's credentials yet, so the sign-out couldn't be confirmed");
       }
@@ -240,7 +310,7 @@ async function revokeOnServer(cp: ControlPlane, rec: DeviceRecord) {
     return;
   }
   // The SSH key first: removing it needs the still-valid bearer.
-  try { if (await revokeCall(rec, () => cp.removeSSHKey(rec.deviceToken)) === 'gone') return; }
+  try { await revokeCall(rec, () => cp.removeSSHKey(rec.deviceToken)); }
   catch (e) { if (!gone(e, 404)) throw e; }
   await revokeCall(rec, () => cp.selfRevoke(rec.deviceToken));
 }

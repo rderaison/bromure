@@ -82,6 +82,7 @@ import termios
 import threading
 import time
 import traceback
+import uuid
 
 # See _UNIT_CONTENT: python children ignore the user site-packages too.
 os.environ["PYTHONNOUSERSITE"] = "1"
@@ -1680,8 +1681,31 @@ def _file_op(spec):
                     "exit_code": 0}
         if op == "write":
             data = base64.b64decode(spec.get("data", "") or "")
-            with open(path, "ab" if spec.get("append") else "wb") as f:
+            if spec.get("staged") and not spec.get("append"):
+                # An upload's staging file (a temp file `rename` later puts
+                # in place, a folder's archive): only its owner may read it
+                # while it fills (CWE-200) -- the file it replaces may be
+                # private. `rename` gives it its final mode. Never through a
+                # link planted at its name.
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    os.fchmod(f.fileno(), 0o600)
+                    f.write(data)
+                return {"exit_code": 0}
+            # Opened without truncating, then truncated through the same
+            # descriptor: an open(O_TRUNC) already strips set-id bits, before
+            # they could be read for `_restore_setid`.
+            append = bool(spec.get("append"))
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC
+                         | (os.O_APPEND if append else 0), 0o666)
+            with os.fdopen(fd, "wb") as f:
+                kept = _setid_snapshot(fd)
+                if not append:
+                    os.ftruncate(fd, 0)
                 f.write(data)
+                f.flush()
+                _restore_setid(fd, kept, path)
             return {"exit_code": 0}
         if op == "mkdir":
             os.makedirs(path, exist_ok=True)
@@ -1702,8 +1726,9 @@ def _file_op(spec):
         if op == "rename":
             # An upload's last step: a complete temp file replaces `dest` in
             # one atomic step, so a copy that fails part-way never leaves the
-            # destination truncated. An existing file keeps its permissions;
-            # a symlinked destination is written through (like a plain write).
+            # destination truncated. An existing file keeps its owner,
+            # permissions, ACLs and extended attributes (_replace_staged); a
+            # symlinked destination is written through (like a plain write).
             dest = spec.get("dest", "")
             if not dest.startswith("/"):
                 return {"error": "dest must be absolute", "exit_code": 1}
@@ -1711,11 +1736,7 @@ def _file_op(spec):
                 dest = os.path.realpath(dest)
             if os.path.isdir(dest):
                 return {"error": "%s is a folder" % dest, "exit_code": 1}
-            try:
-                shutil.copymode(dest, path)
-            except OSError:
-                pass
-            os.replace(path, dest)
+            _replace_staged(path, dest)
             return {"exit_code": 0}
         if op == "remove":
             if os.path.isdir(path) and not os.path.islink(path):
@@ -1726,6 +1747,283 @@ def _file_op(spec):
         return {"error": "unknown file op %r" % op, "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
+
+
+def _current_umask():
+    """This process's umask, read without changing it (os.umask would, for
+    a moment, under the agent's other threads). Linux: /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    # Unknown: owner-only, never wider than the user asked for (CWE-732).
+    return 0o077
+
+
+def _new_file_mode(folder):
+    """The mode a plain write would give a new file in `folder`: a probe
+    file created there the normal way (0666, the umask, and a default ACL
+    of the folder's, which the umask alone misses), then removed. Unknown
+    (no file can be made there): from the umask."""
+    probe = os.path.join(folder, ".bromure-%s.mode" % os.urandom(8).hex())
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+    except OSError:
+        return 0o666 & ~_current_umask()
+    try:
+        return os.fstat(fd).st_mode & 0o777
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
+def _replace_staged(staged, dest, across=True):
+    """Put the complete file `staged` (beside `dest`, same filesystem) in
+    place of `dest`. A new destination is a rename. An existing one is too,
+    once the staged file carries everything the file had besides its bytes:
+    owner and group, mode, and every extended attribute (POSIX ACLs are
+    extended attributes here: system.posix_acl_*). Where that can't be
+    reproduced (an owner this user can't give, an attribute it can't set),
+    the rename is refused, or the file has other hard links, a rename would
+    change it or can't, so its own inode
+    gets the new bytes instead: its metadata and its links stay as they are,
+    the upload no longer atomic there (the staged copy is complete and local,
+    so only a full disk can stop it part-way). HostExec's twin:
+    StagedReplace.replace."""
+    try:
+        st = os.stat(dest)
+    except FileNotFoundError:
+        # The staged file is owner-only while it fills (`write`'s
+        # `staged`): a new file gets what a plain write would have given.
+        try:
+            os.chmod(staged, _new_file_mode(os.path.dirname(dest)))
+        except OSError:
+            pass
+        try:
+            os.replace(staged, dest)
+        except OSError as e:
+            # A dangling symlink into another filesystem (EXDEV): staged
+            # again over there, then renamed. A busy target: written
+            # through, as a plain write did.
+            if e.errno not in (errno.EXDEV, errno.EBUSY):
+                raise
+            if e.errno != errno.EXDEV or not across or not _replace_across(staged, dest):
+                _write_in_place(staged, dest, create=True)
+        return
+    if st.st_nlink > 1 or not _copy_file_metadata(dest, staged, st):
+        _write_in_place(staged, dest)
+        return
+    try:
+        os.replace(staged, dest)
+    except OSError as e:
+        # Refused (the folder or an ACL forbids removing the file): the
+        # file's own permissions may still allow writing it, as a plain
+        # write did. So too a symlink's target on another filesystem
+        # (EXDEV) or a file mounted on its own (EBUSY), which can't be
+        # renamed onto from beside the link. Not atomic there, but the
+        # staged copy is complete and local.
+        if not isinstance(e, PermissionError) and e.errno not in (errno.EXDEV, errno.EBUSY):
+            raise
+        # Across filesystems: staged again on the target's own one, so it
+        # still lands in one step (CWE-459).
+        if e.errno == errno.EXDEV and across and _replace_across(staged, dest):
+            return
+        _write_in_place(staged, dest)
+
+
+def _copy_file_metadata(src, dst, st):
+    """Give `dst` the owner, group, mode and extended attributes `src` (whose
+    stat is `st`) has. False when any of it can't be set."""
+    try:
+        cur = os.stat(dst)
+        if (cur.st_uid, cur.st_gid) != (st.st_uid, st.st_gid):
+            os.chown(dst, st.st_uid, st.st_gid)
+        # After the chown, which clears set-id bits.
+        os.chmod(dst, st.st_mode & 0o7777)
+        if hasattr(os, "listxattr"):
+            names = os.listxattr(src)
+            for name in os.listxattr(dst):
+                if name not in names:
+                    os.removexattr(dst, name)
+            for name in names:
+                os.setxattr(dst, name, os.getxattr(src, name))
+        return True
+    except OSError:
+        return False
+
+
+def _replace_across(staged, dest):
+    """`dest` is on another filesystem than `staged` (a symlink's target):
+    copy `staged` to a fresh file beside `dest`, on its filesystem, and
+    replace `dest` from there (`_replace_staged`) -- in one step, as on the
+    same filesystem. A copy that fails (a full disk, a read error) leaves
+    `dest` untouched (CWE-459). False when no file can be made there (the
+    folder isn't writable): the caller writes in place, with a backup."""
+    folder = os.path.dirname(dest)
+    tmp = os.path.join(folder, ".bromure-%s.part" % uuid.uuid4().hex)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return False
+    try:
+        # Readable again: it may carry `dest`'s write-only mode by now.
+        os.chmod(staged, 0o600)
+        with os.fdopen(fd, "wb") as out, open(staged, "rb") as src:
+            shutil.copyfileobj(src, out, 1 << 20)
+        # Same filesystem now; never across again.
+        _replace_staged(tmp, dest, across=False)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.unlink(staged)
+    return True
+
+
+def _write_in_place(staged, dest, create=False):
+    """Write `staged`'s bytes into `dest` itself (its inode, links and
+    metadata stay). It needs only what a plain upload needs, write access to
+    `dest` (CWE-732): the staged file -- this user's own, which
+    `_copy_file_metadata` may have given `dest`'s mode, a write-only 0200
+    say -- is made readable first, and `dest` is opened write-only. And it
+    is never destructive (CWE-459): a new file that fails part-way is
+    removed again, an existing one gets its old bytes back from a copy taken
+    first (owner-only, beside `staged`; kept and named in the error if even
+    that fails). A `dest` this user may not read can't be copied aside: it
+    is written as a plain upload would, without."""
+    os.chmod(staged, 0o600)
+    if create and not os.path.exists(dest):
+        try:
+            out = open(dest, "xb")
+        except FileExistsError:
+            out = None
+        if out is not None:
+            try:
+                with out, open(staged, "rb") as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            except BaseException:
+                try:
+                    os.unlink(dest)
+                except OSError:
+                    pass
+                raise
+            os.unlink(staged)
+            return
+    with open(staged, "rb") as src:
+        with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CLOEXEC), "wb") as out:
+            # Set-id bits and file capabilities a write strips: read now,
+            # put back after (CWE-732).
+            kept = _setid_snapshot(out.fileno())
+            backup = _copy_aside(dest, staged)
+            try:
+                shutil.copyfileobj(src, out, 1 << 20)
+                out.truncate()
+                out.flush()
+            except BaseException as e:
+                if backup is None:
+                    raise
+                try:
+                    out.seek(0)
+                    with open(backup, "rb") as old:
+                        shutil.copyfileobj(old, out, 1 << 20)
+                    out.truncate()
+                    out.flush()
+                    try:
+                        _restore_setid(out.fileno(), kept, dest)
+                    except OSError:
+                        pass   # the write's own error is the one to report
+                except OSError as again:
+                    raise OSError(getattr(e, "errno", None) or errno.EIO,
+                                  "%s: the write failed (%s) and its old contents couldn't be "
+                                  "put back (%s); they are saved in %s"
+                                  % (dest, e, again, backup))
+                os.unlink(backup)
+                raise
+            if backup is not None:
+                os.unlink(backup)
+            _restore_setid(out.fileno(), kept, dest)
+    os.unlink(staged)
+
+
+def _copy_aside(dest, staged):
+    """A copy of `dest`'s bytes in an owner-only file beside `staged`, to put
+    back if writing it fails; its path. None when `dest` may not be read
+    (write-only): nothing to copy, as a plain upload had none. Any other
+    failure raises before `dest` is touched."""
+    try:
+        src = open(dest, "rb")
+    except PermissionError:
+        return None
+    backup = os.path.join(os.path.dirname(staged), ".bromure-%s.old" % uuid.uuid4().hex)
+    with src:
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as old:
+                shutil.copyfileobj(src, old, 1 << 20)
+        except BaseException:
+            os.unlink(backup)
+            raise
+    return backup
+
+
+def _setid_snapshot(fd):
+    """What writing the open file `fd` may make the kernel strip, read
+    before the write: its set-user-ID / set-group-ID bits (cleared when a
+    user without CAP_FSETID writes it, on Linux and macOS alike) and its
+    file capabilities (security.capability, removed on any write). None
+    when it has neither -- nothing to put back."""
+    mode = os.fstat(fd).st_mode & 0o7777
+    caps = None
+    if hasattr(os, "getxattr"):
+        try:
+            caps = os.getxattr(fd, "security.capability")
+        except OSError:
+            caps = None
+    if not mode & 0o6000 and caps is None:
+        return None
+    return (mode, caps)
+
+
+def _restore_setid(fd, kept, path):
+    """Put back what the write stripped (`_setid_snapshot`), through the
+    same descriptor. Raises when it can't (file capabilities need
+    CAP_SETFCAP; a set-group-ID bit, membership of the group): the bytes
+    are in, but the file is no longer what it was, so the upload must not
+    report a plain success (CWE-732)."""
+    if kept is None:
+        return
+    mode, caps = kept
+    if os.fstat(fd).st_mode & 0o7777 != mode:
+        try:
+            os.fchmod(fd, mode)
+        except OSError:
+            pass
+    mode_lost = os.fstat(fd).st_mode & 0o7777 != mode
+    if caps is not None:
+        try:
+            now = os.getxattr(fd, "security.capability")
+        except OSError:
+            now = None
+        if now != caps:
+            try:
+                os.setxattr(fd, "security.capability", caps)
+            except OSError as e:
+                raise OSError(e.errno, "%s was written, but its file capabilities "
+                              "were cleared and could not be restored: %s" % (path, e.strerror))
+    if mode_lost:
+        raise OSError(errno.EPERM, "%s was written, but its set-user-ID/set-group-ID "
+                      "permissions were cleared and could not be restored" % path)
 
 
 def _untar_confined(archive, dest):
@@ -9714,14 +10012,21 @@ def task_docker_on_demand():
         log("session", "docker now starts on demand (docker.socket)")
 
 
+# As root: prints the first saved container with a restart policy, if any.
+_DOCKER_RESTART_POLICY_SCRIPT = (
+    "grep -lsE '\"RestartPolicy\":\\{\"Name\":\"(always|unless-stopped|on-failure)\"' "
+    "/var/lib/docker/containers/*/hostconfig.json 2>/dev/null | head -1")
+
+
 def task_docker_autostart():
     """Containers meant to come back by themselves (a restart policy) only do
     once dockerd runs: start it, after the boot's critical path, when there
-    is one. Nothing to do otherwise."""
+    is one. Nothing to do otherwise. Under the strict sandbox there's no sudo
+    left by now: its root script schedules the same start instead
+    (task_strict_sandbox)."""
     if not shutil.which("docker") or _docker_running() or not _have_sudo():
         return
-    script = ("grep -lsE '\"RestartPolicy\":\\{\"Name\":\"(always|unless-stopped|on-failure)\"' "
-              "/var/lib/docker/containers/*/hostconfig.json 2>/dev/null | head -1")
+    script = _DOCKER_RESTART_POLICY_SCRIPT
     try:
         p = subprocess.run(["sudo", "sh", "-c", script], capture_output=True, text=True,
                            timeout=30, env=_sys_env())
@@ -10105,6 +10410,16 @@ UNIT
   systemctl daemon-reload >/dev/null 2>&1
   systemctl start bromure-shutdown-phase.service >/dev/null 2>&1
 fi
+# Containers meant to come back by themselves (a restart policy) need dockerd,
+# which starts on demand now (task_docker_on_demand). After the revocation below
+# nothing in agentd can start it -- task_docker_autostart, which does it on
+# other workspaces after the shell, has no sudo left -- so it's scheduled here,
+# as root, a few seconds on: past the boot's critical path, like the other.
+if command -v docker >/dev/null 2>&1 && ! systemctl is-active --quiet docker.service \
+   && [ -n "$(%(docker_restart)s)" ]; then
+  systemctl reset-failed bromure-docker-autostart.timer bromure-docker-autostart.service >/dev/null 2>&1
+  systemd-run --unit=bromure-docker-autostart --collect --on-active=5 /bin/systemctl start --no-block docker.service >/dev/null 2>&1
+fi
 # Revoke regardless: without the attestor the host fails closed on binaries.
 #
 # RUNTIME ONLY. This used to edit the disk -- rm the NOPASSWD drop-in, write a
@@ -10124,7 +10439,8 @@ touch %(done)s
        "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
        "sentryunit": SENTRY_UNIT,
        "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
-       "strictd": shlex.quote(strictd), "done": STRICT_DONE}
+       "strictd": shlex.quote(strictd), "done": STRICT_DONE,
+       "docker_restart": _DOCKER_RESTART_POLICY_SCRIPT}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
     # The script just took sudo away. Anything in this incarnation that asks
     # again must get the new answer, not the one cached before the revocation --
