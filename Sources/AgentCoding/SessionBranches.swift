@@ -223,13 +223,23 @@ extension AgentSessionEngine {
         if let asker = m.askedBy, asker != id, store.session(asker) != nil {
             resume(asker, message: "'\(s.worktreeBranch ?? "")' (session “\(s.title)”) is merged into '\(m.target)'.")
         }
-        guard m.removeAfter, let branch = s.worktreeBranch, let root = s.branchRoot else { return }
+        guard m.removeAfter, let branch = s.worktreeBranch, let root = s.branchRoot,
+              let delegate else { return }
         if s.windowIndex != nil { close(id) }
-        // Its checkout goes: readable, nothing left to resume in.
-        store.mutate(id) { $0.folderMissing = true }
-        _ = delegate?.automationWorktreeCommand(profileNameOrID: s.profileID.uuidString,
-                                                action: "remove", args: [root, branch])
-        store.setArchived(id, true)
+        // Its checkout goes — with the guards a landed task's has: not one
+        // holding uncommitted work or ignored files (a .env, notes) the
+        // agent's forced remove would have taken unlooked (CWE-459).
+        Task { [weak self] in
+            // A beat for the closed tab's agent to let go of the folder.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let removed = await CodingTaskEngine.removeCheckoutGuarded(
+                profileID: s.profileID, root: root, branch: branch,
+                label: "sessions", title: s.title, delegate: delegate)
+            guard let self else { return }
+            // Readable either way; nothing to resume in once it's gone.
+            if removed { self.store.mutate(id) { $0.folderMissing = true } }
+            self.store.setArchived(id, true)
+        }
     }
 
     /// Resume a merge watch that was under way when the app quit.

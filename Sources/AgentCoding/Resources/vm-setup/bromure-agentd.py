@@ -6435,6 +6435,33 @@ def _worktree_remove(root, branch):
     _wt_registry_del(os.path.basename(root), branch)
 
 
+# Ignored entries a removal may take (CWE-459): regenerable build and tool
+# caches only. Mirrors TaskLitter.ignoredDisposable in TaskReviewWindow.swift.
+IGNORED_DISPOSABLE = re.compile(
+    r"(^|/)(\.build|\.build-ios|\.swiftpm|DerivedData|xcuserdata|node_modules|__pycache__"
+    r"|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.gradle|\.next|\.nuxt|\.turbo"
+    r"|\.parcel-cache|\.cache|target|dist|build|coverage)/$|(^|/)\.DS_Store$|\.py[co]$|\.o$")
+
+
+def _ignored_kept(wdir):
+    """Ignored files and folders in `wdir` a forced remove would delete that
+    aren't build litter (symlinks don't count: only the link goes). A listing
+    that fails counts as one: never delete on a doubtful signal."""
+    r = _ws_run(["git", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-C", wdir,
+                 "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+                capture_output=True, text=True)
+    if r.returncode != 0:
+        return ["(git ls-files failed)"]
+    listed = [p for p in r.stdout.splitlines() if p]
+    # A folder listed only because all it holds is ignored is judged by
+    # what it holds (`py/` over `py/__pycache__/`).
+    held = [p for p in listed
+            if not (p.endswith("/") and any(q != p and q.startswith(p) for q in listed))]
+    return [p for p in held
+            if not os.path.islink(os.path.join(wdir, p.rstrip("/")))
+            and not IGNORED_DISPOSABLE.search(p)]
+
+
 def _worktree_is_empty(root, branch, parent):
     """True only when an automation worktree produced nothing worth keeping: a
     clean working tree AND no commits beyond the branch it was cut from. Any
@@ -6447,6 +6474,10 @@ def _worktree_is_empty(root, branch, parent):
     st = _ws_run(["git", "-C", wdir, "status", "--porcelain"],
                         capture_output=True, text=True)
     if st.returncode != 0 or st.stdout.strip():
+        return False
+    # Ignored files `git status` doesn't show, which the forced remove takes
+    # all the same: anything beyond build litter (a .env, notes) keeps it.
+    if _ignored_kept(wdir):
         return False
     if not parent:
         return False

@@ -4728,17 +4728,27 @@ final class CodingTaskEngine {
     /// the branch.
     private func removeCheckout(_ task: CodingTask, branch: String, root: String,
                                 delegate: ACAppDelegate) async -> Bool {
-        guard Self.isSafeBranchName(branch) else { return false }
+        await Self.removeCheckoutGuarded(profileID: task.profileID, root: root, branch: branch,
+                                         label: "tasks", title: task.title, delegate: delegate)
+    }
+
+    /// `removeCheckoutCommand` run where the checkout is, then the agent's
+    /// own remove to drop its registry entry (the checkout is gone by then).
+    /// The way every automatic removal goes — a landed task's, a merged
+    /// session's — so none deletes uncommitted work or ignored files.
+    static func removeCheckoutGuarded(profileID: UUID, root: String, branch: String,
+                                      label: String, title: String,
+                                      delegate: ACAppDelegate) async -> Bool {
+        guard isSafeBranchName(branch) else { return false }
         let out = (try? await delegate.guestExec(
-            profileID: task.profileID,
-            command: Self.removeCheckoutCommand(root: root, branch: branch), timeout: 180)) ?? ""
+            profileID: profileID,
+            command: removeCheckoutCommand(root: root, branch: branch), timeout: 180)) ?? ""
         guard out.contains("REMOVED") else {
-            BACDebug.log("tasks", "“\(task.title)”: checkout kept: "
+            BACDebug.log(label, "“\(title)”: checkout kept: "
                 + (out.isEmpty ? "couldn't run the removal" : out.trimmingCharacters(in: .whitespacesAndNewlines)))
             return false
         }
-        // Gone already: the agent's remove just drops its registry entry.
-        _ = delegate.automationWorktreeCommand(profileNameOrID: task.profileID.uuidString,
+        _ = delegate.automationWorktreeCommand(profileNameOrID: profileID.uuidString,
                                                action: "remove", args: [root, branch])
         return true
     }
@@ -4749,6 +4759,7 @@ final class CodingTaskEngine {
     /// nothing uncommitted besides build litter (`TaskLitter`) goes: work
     /// written after the landing was verified stays. Prints REMOVED, or why
     /// not: KEPT-MAIN (checked out in the main checkout), KEPT-DIRTY,
+    /// KEPT-IGNORED (ignored files that aren't build litter — `ignoredKept`),
     /// KEPT-FAILED (git refused), KEPT-BRANCH (the branch is still there).
     nonisolated static func removeCheckoutCommand(root: String, branch: String) -> String {
         let git = pinnedGit("\"$r\"")
@@ -4760,6 +4771,9 @@ final class CodingTaskEngine {
             + "m=$(\(git) worktree list --porcelain 2>/dev/null | awk 'index($0, \"worktree \") == 1 { print substr($0, 10); exit }'); "
             + "if [ \"$d\" = \"$m\" ] || [ \"$d\" = \"$r\" ]; then echo KEPT-MAIN; exit 0; fi; "
             + "s=$(\(TaskLitter.status("\"$d\""))); if [ -n \"$s\" ]; then echo KEPT-DIRTY; exit 0; fi; "
+            // `git status` doesn't show ignored files, which the forced
+            // remove deletes all the same: a `.env`, local notes (CWE-459).
+            + "s=$(\(TaskLitter.ignoredKept("\"$d\""))); if [ -n \"$s\" ]; then echo KEPT-IGNORED; exit 0; fi; "
             + "\(git) worktree unlock \"$d\" >/dev/null 2>&1; "
             + "\(git) worktree remove --force \"$d\" >/dev/null 2>&1 || { echo KEPT-FAILED; exit 0; }; "
             + "fi; "
@@ -4769,13 +4783,16 @@ final class CodingTaskEngine {
     }
 
     /// Prints EMPTY when `branch` adds no commit to `parent` and its
-    /// checkout has nothing uncommitted (ignored files and build/cache
-    /// litter don't count — `TaskLitter`).
+    /// checkout has nothing uncommitted, nor ignored files beyond build and
+    /// cache litter (`TaskLitter`).
     nonisolated static func emptyBranchCommand(root: String, branch: String, parent: String,
                                                worktreeDir: String?) -> String {
         var cmd = "[ \"$(git -C \(shellQuote(root)) rev-list --count \(shellQuote(parent + ".." + branch)) 2>/dev/null)\" = 0 ] || exit 0; "
         if let wt = worktreeDir, !wt.isEmpty {
             cmd += "[ -z \"$(\(TaskLitter.status(shellQuote(wt))))\" ] || exit 0; "
+            // Nor ignored files beyond build litter: the remove that follows
+            // is forced, and takes them (CWE-459).
+            cmd += "[ -z \"$(\(TaskLitter.ignoredKept(shellQuote(wt))))\" ] || exit 0; "
         }
         return cmd + "echo EMPTY"
     }

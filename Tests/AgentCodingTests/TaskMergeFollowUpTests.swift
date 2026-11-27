@@ -86,6 +86,62 @@ struct TaskMergeFollowUpTests {
         #expect(!branchExists(root, "wt/fix"))
     }
 
+    // Regression (CWE-459): `git status` doesn't list ignored files, so a
+    // checkout holding an ignored .env read as clean, and the forced remove
+    // deleted it.
+    private func ignoring(_ root: String, _ wt: String, _ patterns: String) {
+        _ = sh("printf '%s\\n' \(patterns) > '\(root)/.git/info/exclude'")
+    }
+
+    @Test("an ignored file that isn't build litter keeps the checkout and the branch")
+    func keepsIgnored() {
+        let (root, wt) = repo()
+        ignoring(root, wt, "'.env' '.build/'")
+        _ = sh("echo SECRET=1 > '\(wt)/.env' && mkdir -p '\(wt)/.build' && touch '\(wt)/.build/x'")
+        let out = sh(CodingTaskEngine.removeCheckoutCommand(root: root, branch: "wt/fix"))
+        #expect(out.contains("KEPT-IGNORED"))
+        #expect(FileManager.default.fileExists(atPath: wt + "/.env"))
+        #expect(branchExists(root, "wt/fix"))
+    }
+
+    @Test("ignored build caches and symlinks alone don't keep it")
+    func removesIgnoredLitter() {
+        let (root, wt) = repo()
+        ignoring(root, wt, "'.build/' 'node_modules/' 'vendor' '__pycache__/' '*.pyc'")
+        let keep = FileManager.default.temporaryDirectory.appendingPathComponent("vendor-\(UUID().uuidString)").path
+        _ = sh("mkdir -p '\(keep)' && touch '\(keep)/precious' && ln -s '\(keep)' '\(wt)/vendor' "
+               + "&& mkdir -p '\(wt)/.build/debug' '\(wt)/web/node_modules/x' '\(wt)/py/__pycache__' "
+               + "&& touch '\(wt)/.build/debug/o' '\(wt)/web/node_modules/x/i.js' '\(wt)/py/__pycache__/m.pyc'")
+        #expect(sh(CodingTaskEngine.removeCheckoutCommand(root: root, branch: "wt/fix")).contains("REMOVED"))
+        #expect(!FileManager.default.fileExists(atPath: wt))
+        #expect(FileManager.default.fileExists(atPath: keep + "/precious"), "a symlink's target is never touched")
+    }
+
+    @Test("an empty task's checkout with an ignored file isn't empty")
+    func emptyKeepsIgnored() {
+        let (root, wt) = repo()
+        ignoring(root, wt, "'notes.local'")
+        let cmd = CodingTaskEngine.emptyBranchCommand(root: root, branch: "wt/fix", parent: "main", worktreeDir: wt)
+        #expect(sh(cmd).contains("EMPTY"))
+        _ = sh("echo todo > '\(wt)/notes.local'")
+        #expect(!sh(cmd).contains("EMPTY"))
+    }
+
+    @Test("bromure-agentd: an automation run with an ignored file isn't an empty one",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func agentdKeepsIgnored() {
+        let (root, wt) = repo()
+        ignoring(root, wt, "'.env' '__pycache__/'")
+        let agentd = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py").path
+        let py = { (setup: String) -> String in
+            self.sh(setup + "; /usr/bin/python3 -I -c \"import importlib.util, sys; s = importlib.util.spec_from_file_location('a', sys.argv[1]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print('EMPTY' if m._worktree_is_empty(sys.argv[2], 'wt/fix', 'main') else 'KEEP')\" '\(agentd)' '\(root)'")
+        }
+        #expect(py("mkdir -p '\(wt)/__pycache__' && touch '\(wt)/__pycache__/a.pyc'").contains("EMPTY"))
+        #expect(py("echo X=1 > '\(wt)/.env'").contains("KEEP"))
+    }
+
     @Test("a verified merge removes the checkout — a delegated task's too; kept, a PR or unverified: not")
     func removesCheckoutPolicy() {
         let merge = TaskLanding(mode: .merge, target: "main", phase: .landed, startedAt: Date())

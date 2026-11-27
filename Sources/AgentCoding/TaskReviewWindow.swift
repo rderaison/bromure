@@ -27,6 +27,26 @@ enum TaskLitter {
     /// review count and empty-branch test was a syntax error there (exit 2,
     /// read as "couldn't reach the workspace"). bash and zsh guess a
     /// subshell, which is why it passed on the Mac.
+    /// Ignored entries a removal may take (CWE-459): regenerable build and
+    /// tool caches only. `git ls-files --directory` lists an ignored folder
+    /// once, with a trailing slash. Mirrors IGNORED_DISPOSABLE in
+    /// bromure-agentd.py; keep the two in step.
+    static let ignoredDisposable =
+        #"(^|/)(\.build|\.build-ios|\.swiftpm|DerivedData|xcuserdata|node_modules|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.gradle|\.next|\.nuxt|\.turbo|\.parcel-cache|\.cache|target|dist|build|coverage)/$|(^|/)\.DS_Store$|\.py[co]$|\.o$"#
+    static let ignoredFailedLine = "!! (git ls-files failed)"
+    /// The ignored files and folders in `dir` (already shell-quoted) that a
+    /// forced `git worktree remove` would delete and that aren't build
+    /// litter: a `.env`, local notes, a key. `git status` never shows them,
+    /// so a checkout it calls clean can still hold them. Symlinks don't
+    /// count (removing one takes only the link). A listing that fails says
+    /// so (`ignoredFailedLine`): it isn't an empty one. A folder listed only
+    /// because all it holds is ignored (`py/` over `py/__pycache__/`) is
+    /// judged by what it holds, not as itself. Starts with a space, like
+    /// `status`.
+    static func ignoredKept(_ quotedDir: String) -> String {
+        " ( [ -d \(quotedDir) ] || exit 0; { git -c core.fsmonitor=false -c core.quotePath=false -C \(quotedDir) ls-files --others --ignored --exclude-standard --directory 2>/dev/null || echo '\(ignoredFailedLine)'; } | awk '{ a[NR] = $0 } END { for (i = 1; i <= NR; i++) { k = 1; if (substr(a[i], length(a[i])) == \"/\") for (j = 1; j <= NR; j++) if (j != i && index(a[j], a[i]) == 1) { k = 0; break }; if (k) print a[i] } }' | while IFS= read -r p; do [ -L \(quotedDir)/\"${p%/}\" ] && continue; printf '%s\\n' \"$p\"; done | grep -vE '\(ignoredDisposable)' )"
+    }
+
     static func status(_ quotedDir: String) -> String {
         " ( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
     }
