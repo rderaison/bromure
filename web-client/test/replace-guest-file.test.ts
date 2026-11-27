@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { replaceGuestFile, permissionDenied } from '../src/core/remote/chunkedWrite';
+import { replaceGuestFile, permissionDenied, GuestTooOld } from '../src/core/remote/chunkedWrite';
 
 // Regression (CWE-73): a dropped file was streamed straight onto its
 // destination — the first write truncated a file already there, so a source
@@ -93,11 +93,18 @@ describe('replaceGuestFile', () => {
     expect([...g.files.keys()]).toEqual([DEST]);
   });
 
-  it('a guest too old for rename gets the direct write it always had', async () => {
+  // Regression (CWE-459): a guest too old for rename got a direct write onto
+  // dest, which, failing part-way, left a truncated file under the final name
+  // (and removing it by path could delete another drop's — CWE-362). It is
+  // refused now, before dest is written.
+  it('a guest too old for rename is refused, with dest untouched and the temp removed', async () => {
     const g = guest({ rename: 'unknown' });
-    expect(await replaceGuestFile(bytes(10), DEST, 4, g.op, enc)).toBe(10);
-    expect(g.files.get(DEST)).toBe('[4][4][2]');
+    const err = await replaceGuestFile(bytes(10), DEST, 4, g.op, enc).catch(e => e);
+    expect(err).toBeInstanceOf(GuestTooOld);
+    expect(err.message).toMatch(/^Couldn't upload notes\.txt: .*too old.*Update Bromure/);
+    expect(g.files.get(DEST)).toBe('ORIGINAL');
     expect([...g.files.keys()]).toEqual([DEST]);
+    expect(g.ops.filter(o => o.startsWith(`write ${DEST}`))).toEqual([]);
   });
 
   // A user can hold write access to a FILE without write access to its
@@ -162,9 +169,9 @@ describe('replaceGuestFile', () => {
   // part-way, then A's source fails. A's cleanup must never remove `dest` —
   // it's B's finished file. (Each copy's temp name is its own, so A only
   // ever deletes its temp; the next test is the path that used to delete.)
-  for (const rename of ['ok', 'unknown'] as const) {
-    it(`a failed copy never deletes a concurrent copy's finished file (rename ${rename})`, async () => {
-      const g = guest({ rename });
+  {
+    it("a failed copy never deletes a concurrent copy's finished file", async () => {
+      const g = guest({ rename: 'ok' });
       let release!: () => void;
       const bDone = new Promise<void>(r => { release = r; });
       // A: one chunk, then waits for B to land, then the source fails.
@@ -189,67 +196,23 @@ describe('replaceGuestFile', () => {
     });
   }
 
-  // Regression (CWE-362): on a guest too old for `rename` the copy falls back
-  // to writing `dest` directly — and its failure cleanup removed `dest`,
-  // i.e. possibly another drop's finished file. That path no longer cleans up.
-  it('an old guest: a direct-write fallback that fails leaves dest for whoever wrote it last', async () => {
-    const g = guest({ rename: 'unknown' });
-    let opens = 0;
-    // First open (the temp copy) completes; the second (the direct write onto
-    // dest) fails after one chunk.
-    const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
-    await expect(replaceGuestFile(open, DEST, 4, g.op, enc)).rejects.toThrow('could not be read');
-    expect(g.ops).not.toContain(`remove ${DEST}`);                              // dest isn't this copy's to delete
-  });
-
-  // Regression (CWE-362): on that path a NEW destination the failed copy
-  // created was removed when its size still matched the bytes written — but
-  // another drop may have finished there since with that very size (both
-  // empty, say). A guest this old can't tell files apart: nothing is removed.
+  // Regression (CWE-459): the old-guest direct write that failed part-way
+  // left a NEW file holding a prefix under its final name, shown in the file
+  // pane like a finished upload. Nothing is written to the name now.
   const NEW = '/home/ubuntu/new.txt';
-  it('an old guest: a new file the direct write fails to fill stays (never removed by path)', async () => {
-    const g = guest({ rename: 'unknown' });
-    let opens = 0;
-    const open = () => opens++ === 0 ? bytes(8)() : failingAfter(4)();
-    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
-    expect(g.ops).not.toContain(`remove ${NEW}`);
-    expect(g.files.get(NEW)).toBe('[4]');                                       // incomplete, and said so
+  it('an old guest: no file appears under a new name, even when the source fails', async () => {
+    for (const open of [bytes(8), failingAfter(4)]) {
+      const g = guest({ rename: 'unknown' });
+      await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow();
+      expect(g.files.has(NEW)).toBe(false);
+      expect(g.ops.filter(o => o.startsWith(`write ${NEW}`) || o.startsWith(`remove ${NEW}`))).toEqual([]);
+    }
   });
 
-  it('an old guest: another drop finished at the same name with the same size is not removed', async () => {
+  it("an old guest: another drop's file at the same name is left alone", async () => {
     const g = guest({ rename: 'unknown' });
-    let opens = 0;
-    const open = () => {
-      if (opens++ === 0) return bytes(8)();
-      let step = 0;
-      return new ReadableStream<Uint8Array>({
-        pull(c) {
-          if (step++ === 0) { c.enqueue(new Uint8Array(4)); return; }
-          g.files.set(NEW, '[4]');                                             // the other drop: same size, finished
-          c.error(new DOMException('The file could not be read.', 'NotReadableError'));
-        },
-      });
-    };
-    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
-    expect(g.files.get(NEW)).toBe('[4]');
-    expect(g.ops).not.toContain(`remove ${NEW}`);
-  });
-
-  it('an old guest: a new file another drop wrote over meanwhile is not removed', async () => {
-    const g = guest({ rename: 'unknown' });
-    let opens = 0;
-    const open = () => {
-      if (opens++ === 0) return bytes(8)();
-      let step = 0;
-      return new ReadableStream<Uint8Array>({
-        pull(c) {
-          if (step++ === 0) { c.enqueue(new Uint8Array(4)); return; }
-          g.files.set(NEW, '[100]');                                           // the other drop finished
-          c.error(new DOMException('The file could not be read.', 'NotReadableError'));
-        },
-      });
-    };
-    await expect(replaceGuestFile(open, NEW, 4, g.op, enc)).rejects.toThrow('could not be read');
+    g.files.set(NEW, '[100]');
+    await expect(replaceGuestFile(bytes(8), NEW, 4, g.op, enc)).rejects.toBeInstanceOf(GuestTooOld);
     expect(g.files.get(NEW)).toBe('[100]');
     expect(g.ops).not.toContain(`remove ${NEW}`);
   });
@@ -328,14 +291,5 @@ describe('replaceGuestFile staging is owner-only', () => {
     expect(writes[0].append).toBe(false);
     expect(writes.slice(1).every(o => !('staged' in o))).toBe(true);
     expect(seen.find(o => o.op === 'rename')?.staged).toBeUndefined();
-  });
-
-  it('the old-guest fallback writes the destination directly, not staged', async () => {
-    const seen: Record<string, any>[] = [];
-    const op = async (o: Record<string, any>) => { seen.push(o); if (o.op === 'rename') throw new Error("unknown file op 'rename'"); };
-    await replaceGuestFile(bytes(10), DEST, 1024, op, enc);
-    const direct = seen.filter(o => o.op === 'write' && o.path === DEST);
-    expect(direct.length).toBe(1);
-    expect(direct[0].staged).toBeUndefined();
   });
 });

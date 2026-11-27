@@ -113,9 +113,9 @@ const GUEST_ERROR_DUMP = /^commandFailed\(exitCode: -?\d+, stderr: "/;
  *  atomic step (`rename`) only once the whole source was read and written. A
  *  copy that fails part-way — the source became unreadable, a write was
  *  refused — leaves `dest` exactly as it was and removes the temp file.
- *  A guest too old for `rename` gets the direct write it always had
- *  (`open` is called again for that: a File can be read twice — writeLegacy),
- *  and so does a destination whose DIRECTORY we may not write — see below. */
+ *  A guest too old for `rename` is refused (GuestTooOld) with `dest` never
+ *  touched; a destination whose DIRECTORY we may not write gets a direct
+ *  write — see below. */
 export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
@@ -163,28 +163,21 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     await fileOp({ op: 'remove', path: tmp }).catch(() => {});
     if (!unknownOp(e)) throw e;
   }
-  // Straight onto `dest`, as such a guest always got it, and never removed
-  // after (writeLegacy).
-  return writeLegacy(open, dest, chunk, fileOp, encode, progress);
+  throw new GuestTooOld(dest);
 }
 
-/** A guest without `rename`: written straight onto `dest`. Not atomic: a
- *  copy that fails part-way leaves `dest` incomplete, and that is said
- *  (console) as the error goes up. It is never removed, not even a file this
- *  copy created: such a guest's `read` and `remove` go by path alone, so
- *  nothing tells this copy's file from one another drop finished at the
- *  same name since — a size that matches proves nothing (both empty, say),
- *  and the name can change hands between the look and the remove (CWE-362).
- *  An incomplete file is the user's to see and drop again; another drop's
- *  finished one is not this copy's to delete. Mirrors FolderUpload.writeLegacy. */
-export async function writeLegacy(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
-                                  fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
-                                  progress?: (sent: number) => void): Promise<number> {
-  try {
-    return await writeDirect(open(), dest, chunk, fileOp, encode, progress);
-  } catch (e) {
-    console.warn(`[upload] ${dest}: the copy failed part-way on a guest too old to replace files in one step; `
-      + 'the file may be incomplete (left as it is: it may not be this copy\'s any more).');
-    throw e;
+/** A guest without `rename` (its agent predates it: a Bromure host older
+ *  than 2026-11-25 serves it): the upload is refused before anything is
+ *  written to `dest`. Such a guest can only write `dest` in place, and a copy
+ *  that failed part-way would leave a truncated file under the final name
+ *  that looks like a finished upload (CWE-459); its path-only `remove` can't
+ *  clean that up safely either, since another drop may have finished at the
+ *  same name meanwhile (CWE-362). So it is never written: the user is told to
+ *  update Bromure where the VM runs (its agent is re-staged at each start).
+ *  Mirrors FolderUpload.guestTooOld. */
+export class GuestTooOld extends Error {
+  constructor(dest: string) {
+    super(`Couldn't upload ${dest.slice(dest.lastIndexOf('/') + 1)}: the Bromure running this workspace is too old to replace files safely, so nothing was changed. Update Bromure on that Mac, restart the workspace's VM, and try again.`);
+    this.name = 'GuestTooOld';
   }
 }

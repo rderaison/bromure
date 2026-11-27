@@ -152,46 +152,35 @@ struct FolderUploadWriteTests {
         #expect(g.files["/permission denied's/f.txt"] == Data("old".utf8))
     }
 
-    // Regression (CWE-362): on a guest without `rename` the failed direct
-    // write's NEW destination was removed when its size matched the bytes
-    // written — another drop may have finished there with that very size.
-    // A guest this old can't tell files apart: nothing is removed.
-    // The temp copy is 2 writes (7 MB), so the direct write's 2nd is the 4th.
-    @Test("an old guest: a new file the direct write fails to fill stays (never removed by path)")
-    func legacyNewFileKept() async throws {
-        let g = Guest(); g.noRename = true; g.failWrite = 4
+    // Regression (CWE-459): on a guest without `rename` a direct write that
+    // failed part-way left a NEW file holding a prefix under its final name,
+    // looking like a finished upload; removing it by path could delete another
+    // drop's (CWE-362). Such a guest is refused now, the destination unwritten.
+    // The temp copy is 2 writes (7 MB).
+    @Test("an old guest: refused, no file appears under a new name, the temp is removed")
+    func legacyRefusedNewFile() async throws {
+        let g = Guest(); g.noRename = true
         let big = String(repeating: "x", count: 7 << 20)
-        await #expect(throws: (any Error).self) {
+        await #expect(throws: FolderUpload.GuestTooOld.self) {
             try await FolderUpload.write(try source(big), to: "/d/new", label: "new", op: g.op, progress: nil)
         }
-        #expect(g.files["/d/new"]?.count == 6 << 20, "incomplete, left as it is")
-        #expect(!g.ops.contains("remove new"))
+        #expect(g.files["/d/new"] == nil)
+        #expect(g.files.isEmpty, "the temp file is removed too")
+        #expect(!g.ops.contains("write new"))
     }
 
-    @Test("an old guest: another drop finished at the same name with the same size stays")
-    func legacySameSizeKept() async throws {
-        let big = String(repeating: "x", count: 7 << 20)
-        let g = Guest(); g.noRename = true; g.failWrite = 4
-        g.beforeWrite = (4, { $0.files["/d/new"] = Data(repeating: 0x41, count: 6 << 20) })
-        await #expect(throws: (any Error).self) {
-            try await FolderUpload.write(try source(big), to: "/d/new", label: "new", op: g.op, progress: nil)
+    @Test("an old guest: an existing file, or another drop's, is left exactly as it was")
+    func legacyRefusedExisting() async throws {
+        let g = Guest(); g.noRename = true; g.files["/d/f"] = Data("old".utf8)
+        do {
+            try await FolderUpload.write(try source("new"), to: "/d/f", label: "f", op: g.op, progress: nil)
+            Issue.record("expected GuestTooOld")
+        } catch {
+            #expect(error is FolderUpload.GuestTooOld)
+            #expect(error.localizedDescription.hasPrefix("Couldn't upload f: "))
+            #expect(error.localizedDescription.contains("Update Bromure"))
         }
-        #expect(g.files["/d/new"] == Data(repeating: 0x41, count: 6 << 20))
-    }
-
-    @Test("an old guest: a file that was there, or that another drop wrote over meanwhile, stays")
-    func legacyOthersKept() async throws {
-        let big = String(repeating: "x", count: 7 << 20)
-        let g = Guest(); g.noRename = true; g.failWrite = 4; g.files["/d/f"] = Data("old".utf8)
-        await #expect(throws: (any Error).self) {
-            try await FolderUpload.write(try source(big), to: "/d/f", label: "f", op: g.op, progress: nil)
-        }
-        #expect(g.files["/d/f"] != nil)
-        let h = Guest(); h.noRename = true; h.failWrite = 4
-        h.beforeWrite = (4, { $0.files["/d/new"] = Data("someone else's".utf8) })
-        await #expect(throws: (any Error).self) {
-            try await FolderUpload.write(try source(big), to: "/d/new", label: "new", op: h.op, progress: nil)
-        }
-        #expect(h.files["/d/new"] == Data("someone else's".utf8))
+        #expect(g.files["/d/f"] == Data("old".utf8))
+        #expect(!g.ops.contains("write f") && !g.ops.contains("remove f"))
     }
 }

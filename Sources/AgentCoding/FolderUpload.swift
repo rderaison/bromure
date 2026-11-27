@@ -94,9 +94,9 @@ enum FolderUpload {
     /// hidden temp file beside it, which replaces `guestPath` in one atomic
     /// step (the guest's `rename`) only once all of it was read and written.
     /// A copy that fails part-way leaves a file already there untouched and
-    /// removes the temp file. A guest agent too old for `rename` gets the
-    /// direct write it always had, and so does a destination whose DIRECTORY
-    /// we may not write — see below.
+    /// removes the temp file. A guest agent too old for `rename` is refused
+    /// (GuestTooOld) without `guestPath` ever being written; a destination
+    /// whose DIRECTORY we may not write gets a direct write — see below.
     static func write(_ src: URL, to guestPath: String, label: String, op: FileOp,
                       progress: ((String) -> Void)?) async throws {
         let dir = (guestPath as NSString).deletingLastPathComponent
@@ -141,27 +141,24 @@ enum FolderUpload {
                 _ = try? await op(["op": "remove", "path": tmp])
                 guard ("\(error) " + error.localizedDescription).localizedCaseInsensitiveContains("unknown file op") else { throw error }
             }
-            try await writeLegacy(src, to: guestPath, label: label, op: op, progress: progress)
-            return
+            throw GuestTooOld(name: (guestPath as NSString).lastPathComponent)
         }
         try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
     }
 
-    /// A guest without `rename`: written straight onto `guestPath`. Not
-    /// atomic: a copy that fails part-way leaves it incomplete, and that is
-    /// logged as the error goes up. It is never removed, not even a file this
-    /// copy created: such a guest's `read` and `remove` go by path alone, so
-    /// nothing tells this copy's file from one another drop finished at the
-    /// same name since — a size that matches proves nothing (both empty,
-    /// say), and the name can change hands between the look and the remove
-    /// (CWE-362). Mirrors writeLegacy in web-client/src/core/remote/chunkedWrite.ts.
-    private static func writeLegacy(_ src: URL, to guestPath: String, label: String, op: FileOp,
-                                    progress: ((String) -> Void)?) async throws {
-        do {
-            try await writeChunks(src, to: guestPath, label: label, op: op, progress: progress)
-        } catch {
-            NSLog("[upload] %@: the copy failed part-way on a guest too old to replace files in one step; the file may be incomplete (left as it is: it may not be this copy's any more).", guestPath)
-            throw error
+    /// A guest without `rename` (its agent predates it: a Bromure host older
+    /// than 2026-11-25 serves it): the upload is refused before anything is
+    /// written to the destination. Such a guest can only write it in place,
+    /// and a copy that failed part-way would leave a truncated file under the
+    /// final name that looks like a finished upload (CWE-459); its path-only
+    /// `remove` can't clean that up safely either, since another drop may have
+    /// finished at the same name meanwhile (CWE-362). The user is told to
+    /// update Bromure where the VM runs (its agent is re-staged at each
+    /// start). Mirrors GuestTooOld in web-client/src/core/remote/chunkedWrite.ts.
+    struct GuestTooOld: LocalizedError {
+        let name: String
+        var errorDescription: String? {
+            "Couldn't upload \(name): the Bromure running this workspace is too old to replace files safely, so nothing was changed. Update Bromure on that Mac, restart the workspace's VM, and try again."
         }
     }
 
