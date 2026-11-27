@@ -301,4 +301,25 @@ struct StagedReplaceTests {
         }
         #expect(read(other) == "new")
     }
+
+    // Regression (CWE-732): a new file the cross-volume fallback created got
+    // a fixed 0644, dropping the group write a umask of 002 gives a plain
+    // write (0664).
+    @Test("A new file written in place gets what a plain write would under the umask")
+    func inPlaceCreateHonorsUmask() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let old = umask(0o002)
+        var restored = false
+        defer { if !restored { umask(old) } }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("new", staged)
+        let r = StagedReplace.writeInPlace(staged.path, into: dest.path, create: true)
+        let plain = d.appendingPathComponent("plain")
+        FileManager.default.createFile(atPath: plain.path, contents: nil)
+        umask(old); restored = true
+        #expect(r == nil)
+        #expect(mode(dest) == 0o664)
+        #expect(mode(dest) == mode(plain))
+        #expect(read(dest) == "new")
+    }
 }

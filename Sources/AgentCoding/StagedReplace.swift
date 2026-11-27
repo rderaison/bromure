@@ -172,10 +172,13 @@ enum StagedReplace {
     /// first (owner-only, beside `staged`; kept and named in the error if
     /// even that fails). A `dest` this user may not read (write-only 0200)
     /// can't be copied aside: it is written as a plain upload would, without.
-    private static func writeInPlace(_ staged: String, into dest: String, create: Bool = false) -> String? {
+    static func writeInPlace(_ staged: String, into dest: String, create: Bool = false) -> String? {
         makeReadable(staged)
         if create {
-            let fd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+            // 0666 and the umask (and the folder's ACL), as a plain write
+            // creates it — never a fixed 0644 that drops the group write a
+            // umask of 002 gives (CWE-732).
+            let fd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
             if fd >= 0 {
                 let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                 let failure = copyAll(from: staged, to: out)
