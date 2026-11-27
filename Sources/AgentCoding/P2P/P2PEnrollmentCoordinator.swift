@@ -209,7 +209,10 @@ final class P2PEnrollmentCoordinator {
         guard !isEnterprise, !busy else { return false }
         if let (client, bearer) = ControlPlaneClient.current() {
             busy = true; error = nil
-            let failure = await Self.revokeForSignOut(accepted: AcceptedCredential.wasAccepted(bearer)) {
+            var record: DeviceRecord?
+            if case .found(let r) = DeviceIdentityStore.load() { record = r }
+            let final = AcceptedCredential.refusalIsFinal(bearer: bearer, record: record)
+            let failure = await Self.revokeForSignOut(accepted: final) {
                 try await client.selfRevoke(bearer: bearer)
             }
             busy = false
@@ -224,8 +227,10 @@ final class P2PEnrollmentCoordinator {
     }
 
     /// Run a sign-out revoke. nil when it's done: bromure.io confirmed it, or
-    /// refused (401) a credential it had accepted before (`accepted`), which
-    /// it has revoked. Otherwise the message to show, the identity kept.
+    /// refused (401) a credential whose refusal is final (`accepted`:
+    /// AcceptedCredential.refusalIsFinal -- accepted before, expired, or past
+    /// propagation), which it has revoked. Otherwise the message to show, the
+    /// identity kept.
     ///
     /// A 401 for a credential bromure.io never accepted proves nothing
     /// (CWE-613): right after enrollment it may not have propagated yet, and

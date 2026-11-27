@@ -83,4 +83,39 @@ struct SignOutRevokeTests {
         let failure = await P2PEnrollmentCoordinator.revokeForSignOut(accepted: true) { throw Boom() }
         #expect(failure != nil)
     }
+
+    // Regression (CWE-613 follow-up): the accepted mark starts empty for an
+    // identity saved before it existed; one revoked before its first
+    // successful call answered 401 forever and could never sign out. Past
+    // enrollment propagation, a 401 is final.
+    @Test("A 401 is final once accepted, expired, past propagation, or for a record from before enrolledAt")
+    func refusalIsFinal() throws {
+        let d = try #require(UserDefaults(suiteName: "SignOutRevokeTests-final-\(UUID().uuidString)"))
+        let now = Date()
+        func rec(enrolled: Date?, expires: Date? = nil, token: String = "tok") -> DeviceRecord {
+            DeviceRecord(privateKeyHex: "", deviceToken: token, deviceTokenExpiresAt: expires, deviceId: "d",
+                         capability: "client", orgSlug: nil, orgKind: nil, apiBase: "https://x", enrolledAt: enrolled)
+        }
+        // Fresh, never accepted: may be lag.
+        #expect(!AcceptedCredential.refusalIsFinal(bearer: "tok", record: rec(enrolled: now.addingTimeInterval(-30)), now: now, defaults: d))
+        // Saved before enrolledAt existed: enrolled before the upgrade.
+        #expect(AcceptedCredential.refusalIsFinal(bearer: "tok", record: rec(enrolled: nil), now: now, defaults: d))
+        // Past the window.
+        #expect(AcceptedCredential.refusalIsFinal(bearer: "tok", record: rec(enrolled: now.addingTimeInterval(-3600)), now: now, defaults: d))
+        // Expired.
+        #expect(AcceptedCredential.refusalIsFinal(bearer: "tok",
+            record: rec(enrolled: now.addingTimeInterval(-30), expires: now.addingTimeInterval(-1)), now: now, defaults: d))
+        // Accepted before.
+        AcceptedCredential.note("tok", defaults: d)
+        #expect(AcceptedCredential.refusalIsFinal(bearer: "tok", record: rec(enrolled: now), now: now, defaults: d))
+        // Another credential's record proves nothing about this one.
+        #expect(!AcceptedCredential.refusalIsFinal(bearer: "other", record: rec(enrolled: nil), now: now, defaults: d))
+    }
+
+    @Test("A record saved before enrolledAt decodes with none")
+    func legacyRecordDecodes() throws {
+        let json = #"{"privateKeyHex":"","deviceToken":"t","deviceId":"d","capability":"client","apiBase":"https://x"}"#
+        let r = try JSONDecoder().decode(DeviceRecord.self, from: Data(json.utf8))
+        #expect(r.enrolledAt == nil)
+    }
 }
