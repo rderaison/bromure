@@ -47,7 +47,6 @@ struct TaskMergeFollowUpTests {
         #expect(out.contains("REMOVED"))
         #expect(!FileManager.default.fileExists(atPath: wt))
         #expect(!branchExists(root, "wt/fix"))
-        #expect(sh(CodingTaskEngine.branchGoneCommand(root: root, branch: "wt/fix")).contains("GONE"))
     }
 
     @Test("a locked checkout holding only build litter is removed too")
@@ -67,7 +66,6 @@ struct TaskMergeFollowUpTests {
         #expect(out.contains("KEPT-DIRTY"))
         #expect(FileManager.default.fileExists(atPath: wt + "/late.txt"))
         #expect(branchExists(root, "wt/fix"))
-        #expect(sh(CodingTaskEngine.branchGoneCommand(root: root, branch: "wt/fix")).isEmpty)
     }
 
     @Test("a branch checked out in the main checkout is never removed")

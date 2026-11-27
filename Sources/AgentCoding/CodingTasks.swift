@@ -4719,38 +4719,28 @@ final class CodingTaskEngine {
         }
     }
 
-    /// Remove a landed task's checkout and branch: through the workspace
-    /// agent when it's a running VM workspace (it also forgets the worktree
-    /// it reopens at boot), otherwise — an attached Mac (a delegated
-    /// session's), or a workspace the agent can't be handed it in — by a
-    /// command run there. True once git no longer has the branch.
+    /// Remove a landed task's checkout and branch, where it is (a VM
+    /// workspace, or an attached Mac — a delegated session's), with the
+    /// guards first: never the main checkout, never one with uncommitted
+    /// work (`removeCheckoutCommand`). The workspace agent's own remove is
+    /// a forced one with no such look, so it only follows, on a VM, to
+    /// forget the worktree it reopens at boot. True once git no longer has
+    /// the branch.
     private func removeCheckout(_ task: CodingTask, branch: String, root: String,
                                 delegate: ACAppDelegate) async -> Bool {
         guard Self.isSafeBranchName(branch) else { return false }
-        if delegate.automationWorktreeCommand(profileNameOrID: task.profileID.uuidString,
-                                              action: "remove", args: [root, branch]) {
-            // The agent removes it in the background: look until it's gone.
-            for _ in 0..<12 {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                if let out = try? await delegate.guestExec(
-                    profileID: task.profileID,
-                    command: Self.branchGoneCommand(root: root, branch: branch), timeout: 15),
-                   out.contains("GONE") { return true }
-            }
+        let out = (try? await delegate.guestExec(
+            profileID: task.profileID,
+            command: Self.removeCheckoutCommand(root: root, branch: branch), timeout: 180)) ?? ""
+        guard out.contains("REMOVED") else {
+            BACDebug.log("tasks", "“\(task.title)”: checkout kept: "
+                + (out.isEmpty ? "couldn't run the removal" : out.trimmingCharacters(in: .whitespacesAndNewlines)))
             return false
         }
-        let out = try? await delegate.guestExec(
-            profileID: task.profileID,
-            command: Self.removeCheckoutCommand(root: root, branch: branch), timeout: 180)
-        if let out, !out.contains("REMOVED") {
-            BACDebug.log("tasks", "“\(task.title)”: checkout kept: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        return out?.contains("REMOVED") == true
-    }
-
-    /// Prints GONE when `root` has no branch `branch` any more.
-    nonisolated static func branchGoneCommand(root: String, branch: String) -> String {
-        "\(pinnedGit(shellQuote(root))) rev-parse -q --verify \(shellQuote("refs/heads/" + branch)) >/dev/null 2>&1 || echo GONE"
+        // Gone already: the agent's remove just drops its registry entry.
+        _ = delegate.automationWorktreeCommand(profileNameOrID: task.profileID.uuidString,
+                                               action: "remove", args: [root, branch])
+        return true
     }
 
     /// Remove `branch`'s checkout (wherever `git worktree list` says it is —
@@ -4763,7 +4753,7 @@ final class CodingTaskEngine {
     nonisolated static func removeCheckoutCommand(root: String, branch: String) -> String {
         let git = pinnedGit("\"$r\"")
         return "r=\(shellQuote(root)); b=\(shellQuote(branch)); "
-            + "d=$(\(git) worktree list --porcelain 2>/dev/null | awk -v ref=\"branch refs/heads/$b\" "
+            + "d=$(\(git) worktree list --porcelain 2>/dev/null | awk -v ref=\(shellQuote("branch refs/heads/" + branch)) "
             + "'index($0, \"worktree \") == 1 { w = substr($0, 10) } $0 == ref { print w; exit }'); "
             + "if [ -n \"$d\" ]; then "
             // The list's first entry is the main checkout.
