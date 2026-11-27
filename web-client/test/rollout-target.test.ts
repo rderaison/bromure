@@ -46,6 +46,24 @@ describe('rollout-target.sh (Jenkinsfile.client-web)', () => {
     ]) expect(parse(t), t).toBeNull();
   });
 
+  // Regression: both names were checked as 63-character DNS labels, but a
+  // Deployment name is a DNS subdomain: "web.client" (or a name past 63
+  // characters) is valid, and the stage failed after the image was pushed.
+  it('a Deployment name is a DNS subdomain; a namespace is a DNS label', () => {
+    expect(parse('bromure web.client')).toBe('bromure web.client');
+    expect(parse('kubectl rollout restart deploy/web.client -n bromure')).toBe('bromure web.client');
+    const label63 = 'a'.repeat(63);
+    const sub253 = [label63, label63, label63, 'a'.repeat(61)].join('.');
+    expect(sub253.length).toBe(253);
+    expect(parse(`bromure ${sub253}`)).toBe(`bromure ${sub253}`);
+    expect(parse(`bromure ${'a'.repeat(100)}`)).toBe(`bromure ${'a'.repeat(100)}`);
+    expect(parse(`bromure ${sub253}a`)).toBeNull();            // 254
+    expect(parse(`${label63} web`)).toBe(`${label63} web`);
+    expect(parse(`${label63}a web`)).toBeNull();               // namespace: 64
+    for (const t of ['bro.mure web', 'bromure web..client', 'bromure .web', 'bromure web.', 'bromure web-.client', 'bromure Web.client'])
+      expect(parse(t), t).toBeNull();
+  });
+
   it('says what it accepts when it refuses', () => {
     const r = spawnSync('sh', [script, 'nonsense here now'], { encoding: 'utf8' });
     expect(r.status).not.toBe(0);

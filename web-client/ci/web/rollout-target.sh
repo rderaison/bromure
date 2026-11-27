@@ -8,7 +8,8 @@
 # where <deploy> is deploy, deployment, deployments or deployment.apps and
 # <ns-option> is -n <ns>, -n<ns>, --namespace <ns> or --namespace=<ns>.
 # Exactly one resource and one namespace: an extra, repeated or unknown word
-# stops here, rather than restarting whichever deployment came last.
+# stops here, rather than restarting whichever deployment came last. The
+# names are checked as Kubernetes checks them.
 set -eu
 
 fail() {
@@ -36,7 +37,10 @@ else
     done
     [ "$nres" -eq 1 ] && [ "$nns" -eq 1 ] || fail
 fi
-name='^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
-printf '%s' "$ns" | grep -Eq "$name" || fail
-printf '%s' "$dep" | grep -Eq "$name" || fail
+# Kubernetes' own rules: a namespace is a DNS label (RFC 1123, at most 63
+# characters); a Deployment name is a DNS subdomain (dot-separated labels,
+# at most 253 characters), so "web.client" is a valid one.
+label='[a-z0-9]([-a-z0-9]*[a-z0-9])?'
+printf '%s' "$ns" | grep -Eq "^$label\$" && [ "${#ns}" -le 63 ] || fail
+printf '%s' "$dep" | grep -Eq "^$label(\.$label)*\$" && [ "${#dep}" -le 253 ] || fail
 printf '%s %s\n' "$ns" "$dep"
