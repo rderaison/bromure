@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process';
 import { setupTunnel, stopTunnel } from './tunnel';
 import { setupBrowser, stopBrowser } from './browser';
 import { closeGracefully } from './sockClose';
-import { heldEvents } from './tcpEvents';
+import { heldEvents, resumeTable } from './tcpEvents';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -224,20 +224,39 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
     // an id before it has a stream for it.
     const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
     s.once('connect', () => {
+      if (wc.isDestroyed()) { s.destroy(); reject(new Error('Window closed.')); return; }
       sockets.set(id, { s, owner: wc.id });
-      accepted.set(id, () => { s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d))); ev.resume(); });
+      ownSockets(wc);
+      accepted.hold(id, wc.id, () => { s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d))); ev.resume(); });
       resolve(id);
     });
     s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else ev.emit('error', null, err.message); });
-    // A connect that failed was rejected above; its close is nobody's.
-    s.on('close', () => { const known = sockets.delete(id); accepted.delete(id); if (known) ev.emit('close'); });
+    // A connect that failed was rejected above; its close is nobody's. One
+    // that closes before tcp:resume keeps its `accepted` entry: the resume
+    // still delivers the held close (CWE-362).
+    s.on('close', () => { if (sockets.delete(id)) ev.emit('close'); });
     s.setTimeout(15000, () => { if (!sockets.has(id)) { s.destroy(); reject(new Error(`Timed out reaching ${host}:${port}`)); } else s.setTimeout(0); });
   });
 });
 const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(id); return x && x.owner === e.sender.id ? x.s : undefined; };
 ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => { owned(e, id)?.write(data); });
 // Graceful: the renderer's last writes (sent just before) still reach the peer.
-ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { closeGracefully(s); sockets.delete(id); accepted.delete(id); } });
+ipcMain.on('tcp:close', (e, id: number) => {
+  accepted.drop(id, e.sender.id);     // never resumed: nothing to deliver now
+  const s = owned(e, id); if (s) { closeGracefully(s); sockets.delete(id); }
+});
+/** A window's sockets and pending resumes go with it: nothing is left to
+ *  read them. Registered once per webContents. */
+const owners = new WeakSet<Electron.WebContents>();
+function ownSockets(wc: Electron.WebContents) {
+  if (owners.has(wc)) return;
+  owners.add(wc);
+  const owner = wc.id;
+  wc.once('destroyed', () => {
+    accepted.dropOwner(owner);
+    for (const [id, x] of sockets) if (x.owner === owner) { x.s.destroy(); sockets.delete(id); }
+  });
+}
 
 // ── Loopback listener (a model sign-in's OAuth callback) ───────────────────
 // The provider sends the browser back to http://localhost:<port>/… — the port
@@ -259,13 +278,17 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
     // renderer has its stream (heldEvents).
     const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
     sockets.set(id, { s, owner: wc.id });
-    accepted.set(id, () => {
+    ownSockets(wc);
+    accepted.hold(id, wc.id, () => {
       s.setNoDelay(true);
       s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d)));
       ev.resume();
     });
     s.on('error', () => {});
-    s.on('close', () => { sockets.delete(id); accepted.delete(id); ev.emit('close'); });
+    // Closed before the renderer resumed it (the client gave up while the
+    // forward was opening): the `accepted` entry stays, so the resume still
+    // delivers this close and the renderer's stream ends (CWE-362).
+    s.on('close', () => { sockets.delete(id); ev.emit('close'); });
     wc.send('tcp:accept', lid, id);
   });
   await new Promise<void>((resolve, reject) => {
@@ -275,15 +298,14 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
   srv.on('error', () => {});
   if (wc.isDestroyed()) { srv.close(); throw new Error('Window closed.'); }
   listeners.set(lid, { srv, owner: wc.id });
-  wc.once('destroyed', () => {
-    srv.close(); listeners.delete(lid);
-    // Its connections too: nothing is left to read them.
-    for (const [id, x] of sockets) if (x.owner === wc.id) { x.s.destroy(); sockets.delete(id); accepted.delete(id); }
-  });
+  // Its connections go with the window too (ownSockets).
+  wc.once('destroyed', () => { srv.close(); listeners.delete(lid); });
   return lid;
 });
-const accepted = new Map<number, () => void>();
-ipcMain.on('tcp:resume', (e, id: number) => { if (owned(e, id)) { accepted.get(id)?.(); accepted.delete(id); } });
+const accepted = resumeTable();
+// Not `owned`: a socket that already closed is no longer in `sockets`, and
+// its held close is exactly what this must deliver.
+ipcMain.on('tcp:resume', (e, id: number) => { accepted.claim(id, e.sender.id); });
 ipcMain.on('tcp:unlisten', (e, lid: number) => {
   const l = listeners.get(lid);
   if (l && l.owner === e.sender.id) { l.srv.close(); listeners.delete(lid); }
