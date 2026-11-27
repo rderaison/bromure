@@ -181,4 +181,87 @@ struct UploadFailedCopyTests {
         StagedReplace.unlinkIfOurs(path, now)
         #expect(!FileManager.default.fileExists(atPath: path))
     }
+
+    // Regression (CWE-459): a write the volume deferred (a full or remote
+    // one) is only reported at the flush or the close; the copy's close
+    // error was dropped and the target replaced by an incomplete file.
+    @Test("Across filesystems: a copy whose flush to disk fails leaves the target untouched",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func crossDeviceFlushFails() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            real_replace = os.replace
+            def xdev_from_staged(a, b):
+                if os.path.basename(a).startswith('.up'):
+                    raise OSError(errno.EXDEV, 'Invalid cross-device link')
+                return real_replace(a, b)
+            m.os.replace = xdev_from_staged
+            def no_room(fd): raise OSError(errno.EIO, 'Input/output error')
+            m.os.fsync = no_room
+            dest = stage('f', 'old data, the original')
+            staged = stage('.up1.part', 'NEW DATA, the replacement')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': dest})
+            assert r['exit_code'] == 1 and 'Input/output' in r['error'], r
+            assert open(dest).read() == 'old data, the original'
+            assert leftovers() == [], leftovers()
+            # A new file the same way: none left behind.
+            staged = stage('.up2.part', 'fresh')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': os.path.join(d, 'new')})
+            assert r['exit_code'] == 1, r
+            assert not os.path.exists(os.path.join(d, 'new')) and leftovers() == [], leftovers()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
+
+    @Test("In place: a backup whose flush to disk fails stops the upload before the target is touched",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func backupFlushFails() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            dest = stage('f', 'old data, the original'); os.link(dest, os.path.join(d, 'other'))
+            def no_room(fd): raise OSError(errno.EIO, 'Input/output error')
+            m.os.fsync = no_room
+            staged = stage('.f.part', 'NEW DATA')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': dest})
+            assert r['exit_code'] == 1, r
+            assert open(dest).read() == 'old data, the original'
+            assert leftovers() == [], leftovers()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
+
+    @Test("Mac: a copy isn't complete until its flush and close say so")
+    func macFinishReportsFailure() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let path = d.appendingPathComponent("f").path
+        let fd = open(path, O_WRONLY | O_CREAT, 0o600)
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        try h.write(contentsOf: Data("x".utf8))
+        #expect(StagedReplace.finish(h) == nil)
+        // A descriptor the flush can't complete on: reported, not dropped.
+        let g = FileHandle(fileDescriptor: open(path, O_WRONLY), closeOnDealloc: false)
+        close(g.fileDescriptor)
+        #expect(StagedReplace.finish(g) != nil)
+    }
+
+    @Test("In place: a write whose flush to disk fails gets the old bytes back",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func inPlaceFlushFails() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            dest = stage('f', 'old data, the original'); os.link(dest, os.path.join(d, 'other'))
+            real_fsync = os.fsync
+            def fail_on_dest(fd):
+                if os.fstat(fd).st_ino == os.stat(dest).st_ino:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_fsync(fd)
+            m.os.fsync = fail_on_dest
+            staged = stage('.f.part', 'NEW DATA, longer than before')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': dest})
+            assert r['exit_code'] == 1, r
+            assert open(dest).read() == 'old data, the original', open(dest).read()
+            assert leftovers() == [], leftovers()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
 }

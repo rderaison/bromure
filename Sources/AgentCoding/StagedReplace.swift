@@ -81,9 +81,13 @@ enum StagedReplace {
         guard fd >= 0 else { return nil }
         makeReadable(staged)
         let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        let copied = copyAll(from: staged, to: out)
-        try? out.close()
-        if let copied { unlink(tmp); return Done(failure: copied) }
+        // A write the volume deferred (a full or remote one) fails at the
+        // flush or the close: the copy failed, and `dest` stays (CWE-459).
+        if let failed = copyAll(from: staged, to: out) ?? finish(out) {
+            try? out.close()
+            unlink(tmp)
+            return Done(failure: failed)
+        }
         if let failure = replace(tmp, onto: dest, across: false) {
             unlink(tmp)
             return Done(failure: failure)
@@ -183,9 +187,8 @@ enum StagedReplace {
                 var ours = stat()
                 let known = fstat(fd, &ours) == 0
                 let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                let failure = copyAll(from: staged, to: out)
-                try? out.close()
-                if let failure {
+                if let failure = copyAll(from: staged, to: out) ?? finish(out) {
+                    try? out.close()
                     if known { unlinkIfOurs(dest, ours) }
                     return failure
                 }
