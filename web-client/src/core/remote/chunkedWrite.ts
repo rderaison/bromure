@@ -47,22 +47,35 @@ export type GuestFileOp = (op: Record<string, unknown>, timeoutSec?: number) => 
 /** Copy `stream` into the guest file `path` (writeStreamChunked). If the copy
  *  fails part-way — the source became unreadable, a write was refused — the
  *  partial file it created is removed before the error propagates: a dropped
- *  folder's half-written /tmp archive or a truncated file never stays behind.
+ *  folder's half-written /tmp archive or a temp file never stays behind.
  *  A copy that failed before its first write touched nothing, so nothing is
- *  removed (a file already there stays). */
+ *  removed.
+ *
+ *  `path` MUST be this copy's own: a fresh, unique name nothing else writes
+ *  (a temp or archive name with a UUID). The cleanup deletes whatever is at
+ *  `path`, so on a shared name it would delete another, concurrent copy's
+ *  finished file (CWE-362). To land a file on a name others may use, go
+ *  through replaceGuestFile. */
 export async function writeGuestFile(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
                                      fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                      progress?: (sent: number) => void): Promise<number> {
   let created = false;
   try {
-    return await writeStreamChunked(stream, chunk, async (bytes, append) => {
-      await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
-      created = true;
-    }, progress);
+    return await writeDirect(stream, path, chunk, fileOp, encode, progress, () => { created = true; });
   } catch (e) {
     if (created) await fileOp({ op: 'remove', path }).catch(() => {});
     throw e;
   }
+}
+
+/** The chunked writes alone — no cleanup: for a path this copy doesn't own. */
+function writeDirect(stream: ReadableStream<Uint8Array>, path: string, chunk: number,
+                     fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
+                     progress?: (sent: number) => void, wrote?: () => void): Promise<number> {
+  return writeStreamChunked(stream, chunk, async (bytes, append) => {
+    await fileOp({ op: 'write', path, data: encode(bytes), append }, 60);
+    wrote?.();
+  }, progress);
 }
 
 /** The guest agent's answer when it predates an op (bromure-agentd.py). */
@@ -83,9 +96,9 @@ export const permissionDenied = (e: unknown) =>
  *  atomic step (`rename`) only once the whole source was read and written. A
  *  copy that fails part-way — the source became unreadable, a write was
  *  refused — leaves `dest` exactly as it was and removes the temp file.
- *  A guest too old for `rename` gets the direct write it always had
- *  (`open` is called again for that: a File can be read twice), and so does a
- *  destination whose DIRECTORY we may not write — see below. */
+ *  A guest too old for `rename` gets the direct write it always had, with no
+ *  cleanup (`open` is called again for that: a File can be read twice), and so
+ *  does a destination whose DIRECTORY we may not write — see below. */
 export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, dest: string, chunk: number,
                                        fileOp: GuestFileOp, encode: (b: Uint8Array) => string,
                                        progress?: (sent: number) => void): Promise<number> {
@@ -122,8 +135,7 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     );
     // Straight onto `dest`, and NOT through writeGuestFile: its clean-up on a
     // failed copy removes the file it wrote, which here is the user's own.
-    return writeStreamChunked(open(), chunk, (bytes, append) =>
-      fileOp({ op: 'write', path: dest, data: encode(bytes), append }, 60).then(() => {}), progress);
+    return writeDirect(open(), dest, chunk, fileOp, encode, progress);
   }
   try {
     await fileOp({ op: 'rename', path: tmp, dest });
@@ -132,5 +144,8 @@ export async function replaceGuestFile(open: () => ReadableStream<Uint8Array>, d
     await fileOp({ op: 'remove', path: tmp }).catch(() => {});
     if (!unknownOp(e)) throw e;
   }
-  return writeGuestFile(open(), dest, chunk, fileOp, encode, progress);
+  // Straight onto `dest`, as such a guest always got it — and without the
+  // cleanup: `dest` isn't this copy's to delete (another drop of the same
+  // name may have finished there meanwhile), as FolderUpload.write on macOS.
+  return writeDirect(open(), dest, chunk, fileOp, encode, progress);
 }

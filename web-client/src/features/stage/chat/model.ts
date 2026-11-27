@@ -66,7 +66,7 @@ export const DROP_DIR = '/home/ubuntu/.bromure/drops';
 export function dropStamp() {
   const d = new Date(), p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-`
-    + crypto.randomUUID().slice(0, 4).toLowerCase();
+    + crypto.randomUUID().slice(0, 8).toLowerCase();   // a drop's own names: its failed copy's cleanup can't hit another's
 }
 export function dropSafeName(name: string) {
   let s = [...name].map(c => /[\p{L}\p{N}._-]/u.test(c) ? c : '_').join('');
