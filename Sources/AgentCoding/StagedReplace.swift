@@ -21,8 +21,9 @@ enum StagedReplace {
         var st = stat()
         guard stat(dest, &st) == 0 else {
             // The staged file is owner-only while it fills: a new file gets
-            // a plain write's mode (0644 under the usual umask).
-            _ = chmod(staged, 0o644)
+            // a plain write's mode — the process's umask, not the usual one
+            // assumed (CWE-732: under umask 077 that was world-readable).
+            _ = chmod(staged, newFileMode(in: (dest as NSString).deletingLastPathComponent))
             if Darwin.rename(staged, dest) == 0 { return nil }
             // A dangling symlink into another volume (EXDEV), or a busy
             // target: write it through, as a plain write did.
@@ -41,6 +42,20 @@ enum StagedReplace {
         let e = errno
         guard e == EACCES || e == EPERM || e == EXDEV || e == EBUSY else { return String(cString: strerror(e)) }
         return writeInPlace(staged, into: dest)
+    }
+
+    /// The mode a plain write would give a new file in `dir`: a probe file
+    /// created there the normal way (0666 and the umask; there is no call
+    /// that reads the umask without setting it, under other threads), then
+    /// removed. Owner-only when no file can be made there.
+    static func newFileMode(in dir: String) -> mode_t {
+        let probe = (dir as NSString).appendingPathComponent(".bromure-\(UUID().uuidString).mode")
+        let fd = open(probe, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
+        guard fd >= 0 else { return 0o600 }
+        defer { close(fd); unlink(probe) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { return 0o600 }
+        return st.st_mode & 0o777
     }
 
     private static func copyMetadata(from src: String, to dst: String, expected st: stat) -> Bool {
