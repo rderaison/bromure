@@ -116,7 +116,7 @@ struct UploadFailedCopyTests {
                 assert False, 'no error'
             except OSError as e:
                 assert e.errno == errno.ENOSPC
-            assert not os.path.exists(dest)
+            assert not os.path.exists(dest) and leftovers() == [], leftovers()
             """, in: d)
         #expect(status == 0, Comment(rawValue: err))
     }
@@ -138,7 +138,10 @@ struct UploadFailedCopyTests {
 
     // Regression (CWE-362): a new file the fallback created was removed by
     // name when its copy failed — even when another writer had renamed a
-    // finished file of its own onto that name meanwhile.
+    // finished file of its own onto that name meanwhile. A check of the
+    // name's inode before the unlink left a window between the two; the new
+    // file is now filled under a name of its own, and the name `dest` is
+    // never removed.
     @Test("A failed new file is removed only while it's still this upload's",
           .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
     func newFileReplacedMeanwhile() throws {
@@ -160,26 +163,93 @@ struct UploadFailedCopyTests {
             except OSError as e:
                 assert e.errno == errno.ENOSPC
             assert open(dest).read() == 'their finished file', open(dest).read()
+            assert leftovers() == [], leftovers()
             """, in: d)
         #expect(status == 0, Comment(rawValue: err))
     }
 
-    @Test("Mac: a failed new file is removed only while it's still this upload's")
-    func macUnlinkIfOurs() throws {
+    @Test("A failed new file never removes the name: a rename landing just before any removal survives",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func newFileReplacedAfterCheck() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let path = d.appendingPathComponent("new").path
-        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
-        var ours = stat(); fstat(fd, &ours); close(fd)
-        // Another writer's file renamed onto the name: stays.
-        let theirs = d.appendingPathComponent("theirs").path
-        try "theirs".write(toFile: theirs, atomically: false, encoding: .utf8)
-        #expect(rename(theirs, path) == 0)
-        StagedReplace.unlinkIfOurs(path, ours)
-        #expect((try? String(contentsOfFile: path, encoding: .utf8)) == "theirs")
-        // Still ours: removed.
-        var now = stat(); lstat(path, &now)
-        StagedReplace.unlinkIfOurs(path, now)
-        #expect(!FileManager.default.fileExists(atPath: path))
+        let (status, err) = try agentd("""
+            dest = os.path.join(d, 'new')
+            staged = stage('.f.part', 'NEW DATA')
+            theirs = stage('theirs', 'their finished file')
+            fail_after(staged, 3)
+            # The other writer's rename lands at the last moment: right
+            # before any removal of the name (after whatever check came first).
+            real_unlink, real_remove, real_replace = os.unlink, os.remove, os.replace
+            def landing(f):
+                def g(path, *a, **k):
+                    if path == dest and os.path.exists(theirs):
+                        real_replace(theirs, dest)
+                    return f(path, *a, **k)
+                return g
+            m.os.unlink, m.os.remove = landing(real_unlink), landing(real_remove)
+            try:
+                m._write_in_place(staged, dest, create=True)
+                assert False, 'no error'
+            except OSError as e:
+                assert e.errno == errno.ENOSPC
+            finally:
+                m.os.unlink, m.os.remove = real_unlink, real_remove
+            # Their file is wherever it is now -- not removed with the name.
+            survivor = theirs if os.path.exists(theirs) else dest
+            assert os.path.exists(survivor), 'their file was removed'
+            assert open(survivor).read() == 'their finished file'
+            assert leftovers() == [], leftovers()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
+
+    @Test("A dangling symlink: the new file is staged beside its target, and lands there",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func newFileThroughDanglingLink() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            os.mkdir(os.path.join(d, 'other'))
+            dest = os.path.join(d, 'link'); os.symlink('other/target', dest)
+            staged = stage('.f.part', 'NEW DATA')
+            m._write_in_place(staged, dest, create=True)
+            assert os.path.islink(dest) and open(os.path.join(d, 'other', 'target')).read() == 'NEW DATA'
+            assert not os.path.exists(staged)
+            assert not [f for f in os.listdir(os.path.join(d, 'other')) if f.startswith('.bromure-')]
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
+
+    @Test("Mac: a failed new file leaves the name alone — another writer's file there stays")
+    func macCreateNewFails() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let dest = d.appendingPathComponent("new").path
+        // A folder where the staged file should be: it opens, but reads fail.
+        let staged = d.appendingPathComponent(".f.part")
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: false)
+        try "theirs".write(toFile: dest, atomically: false, encoding: .utf8)
+        #expect(StagedReplace.createNew(staged.path, at: dest) != nil)
+        #expect((try? String(contentsOfFile: dest, encoding: .utf8)) == "theirs")
+        try FileManager.default.removeItem(atPath: dest)
+        #expect(StagedReplace.writeInPlace(staged.path, into: dest, create: true) != nil)
+        #expect(!FileManager.default.fileExists(atPath: dest))
+        let left = try FileManager.default.contentsOfDirectory(atPath: d.path).filter { $0.hasPrefix(".bromure-") }
+        #expect(left.isEmpty)
+    }
+
+    @Test("Mac: a new file through a dangling symlink lands at its target")
+    func macCreateNewThroughLink() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let other = d.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        let link = d.appendingPathComponent("link").path
+        #expect(symlink("other/target", link) == 0)
+        let staged = d.appendingPathComponent(".f.part")
+        try "NEW".write(to: staged, atomically: false, encoding: .utf8)
+        #expect(StagedReplace.writeInPlace(staged.path, into: link, create: true) == nil)
+        #expect((try? String(contentsOf: other.appendingPathComponent("target"), encoding: .utf8)) == "NEW")
+        var st = stat()
+        #expect(lstat(link, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK)
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
     // Regression (CWE-459): a write the volume deferred (a full or remote

@@ -1900,29 +1900,16 @@ def _write_in_place(staged, dest, create=False):
     `dest` (CWE-732): the staged file -- this user's own, which
     `_copy_file_metadata` may have given `dest`'s mode, a write-only 0200
     say -- is made readable first, and `dest` is opened write-only. And it
-    is never destructive (CWE-459): a new file that fails part-way is
-    removed again, an existing one gets its old bytes back from a copy taken
+    is never destructive (CWE-459): a new file is filled under a name of its
+    own and only then renamed into place (`_create_new`), an existing one
+    gets its old bytes back from a copy taken
     first (owner-only, beside `staged`; kept and named in the error if even
     that fails). A `dest` this user may not read can't be copied aside: it
     is written as a plain upload would, without."""
     os.chmod(staged, 0o600)
     if create and not os.path.exists(dest):
-        try:
-            out = open(dest, "xb")
-        except FileExistsError:
-            out = None
-        if out is not None:
-            ours = os.fstat(out.fileno())
-            try:
-                with out, open(staged, "rb") as src:
-                    shutil.copyfileobj(src, out, 1 << 20)
-                    out.flush()
-                    os.fsync(out.fileno())
-            except BaseException:
-                _unlink_if_ours(dest, ours)
-                raise
-            os.unlink(staged)
-            return
+        _create_new(staged, dest)
+        return
     with open(staged, "rb") as src:
         with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CLOEXEC), "wb") as out:
             # Set-id bits and file capabilities a write strips: read now,
@@ -1962,17 +1949,34 @@ def _write_in_place(staged, dest, create=False):
     os.unlink(staged)
 
 
-def _unlink_if_ours(path, ours):
-    """Remove `path` only while it is still the file this upload created
-    (`ours`, that file's fstat): another writer may have put a file of its
-    own at that name since -- a rename lands there whatever we hold open --
-    and that one isn't ours to delete (CWE-362). Best effort, never raises."""
+def _create_new(staged, dest):
+    """`dest` doesn't exist (or is a dangling symlink, into another
+    filesystem maybe): `staged`'s bytes go into a file of this upload's own,
+    beside where `dest` leads, and that is renamed into place once complete.
+    A copy that fails removes only that file -- never the name `dest`, where
+    another writer may have put a finished file of its own meanwhile, which
+    a check of the name followed by its removal couldn't rule out (CWE-362).
+    The mode a plain write would give it (`_new_file_mode`)."""
+    target = os.path.realpath(dest)
+    folder = os.path.dirname(target)
+    tmp = os.path.join(folder, ".bromure-%s.part" % uuid.uuid4().hex)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        st = os.lstat(path)
-        if (st.st_dev, st.st_ino) == (ours.st_dev, ours.st_ino):
-            os.unlink(path)
-    except OSError:
-        pass
+        with os.fdopen(fd, "wb") as out, open(staged, "rb") as src:
+            shutil.copyfileobj(src, out, 1 << 20)
+            # A write the filesystem deferred fails here or at the close.
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, _new_file_mode(folder))
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.unlink(staged)
 
 
 def _copy_aside(dest, staged):
