@@ -46,7 +46,7 @@ extension Daemon {
 
     /// GET /profiles: every workspace, as macOS lists them (ACAutomationProfileInfo).
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListProfiles h=328eda9e2a033d62 @7dd92fdf
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/profiles"): h=5741f93279fa34e4 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/profiles"): h=5741f93279fa34e4 @f127f8ab
     func listProfiles() -> ControlResponse {
         let rows: [JSONValue] = registry.records.compactMap { rec in
             guard !rec.managed, let p = profile(for: rec) else { return nil }
@@ -70,7 +70,7 @@ extension Daemon {
     /// `POST /profiles`: a workspace from the template, overlaid with the
     /// document (the shared save: ProfileEditHost.automationUpsertProfile),
     /// and its VM registered (stopped) with the same id. 201 with its id.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/profiles"): h=ea29b136cb0d8add @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/profiles"): h=ea29b136cb0d8add @f127f8ab
     // partial: also creates the VM record
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCreateProfile h=293032f4590b42eb @d3ebbda2
     func createProfile(_ body: JSONValue) async -> ControlResponse {

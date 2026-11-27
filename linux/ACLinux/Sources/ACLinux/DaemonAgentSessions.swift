@@ -22,6 +22,8 @@ extension Daemon {
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / SecurityTimeline.shared.workspaceName h=e7f202440a5e86cb @d3ebbda2
     // partial: the guest-event wiring is the daemon's outbox polling loops (500 ms hooks, reboot intents) plus DaemonWatchdog's 5 s tick
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) h=4a67d1d1cdf24532 @d3ebbda2
+    // partial: the live watches are counted as on macOS; a server has no idle sleep to hold off (ShipWatchAwake holds nothing off macOS, as BootBudget)
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / ShipWatchAwake.shared.provider h=b433464f7120a301 @419a8ef59
     func startSessionEngine() async {
         let me = self, state = config.stateDir
         // Account features on (macOS: a Preferences switch a server has no
@@ -40,6 +42,11 @@ extension Daemon {
                 host?.listModel.profileRows.first { $0.id == id }?.name
             }
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
+            // Claude Code's /ship watches. Reported ones from before a
+            // restart are old by now (stale) or heard from again at their
+            // next wake-up.
+            ShipWatchAwake.shared.provider = { SessionStores.shared?.sessions.liveShipWatches() ?? 0 }
+            ShipWatchAwake.shared.refresh()
             Daemon.archiveSessionsOfGoneWorkspaces()
             // The coding board and the scheduled automations (macOS: the app
             // delegate's lazy engines, started at launch); the repository

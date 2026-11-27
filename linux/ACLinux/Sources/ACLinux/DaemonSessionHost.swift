@@ -7,7 +7,7 @@ import NIOConcurrencyHelpers
 /// conformance wraps these once that protocol lands.
 extension Daemon {
     /// A command in a workspace's guest failed to run, or ran and failed.
-    enum GuestCommandError: Error, CustomStringConvertible {
+    enum GuestCommandError: Error, CustomStringConvertible, LocalizedError {
         case unavailable(String)
         case failed(exitCode: Int, stderr: String)
         // @port-skip linux-only: guest exec errors
@@ -15,6 +15,19 @@ extension Daemon {
             switch self {
             case .unavailable(let why): return why
             case .failed(let code, let err): return "exit \(code): \(err.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+        }
+        /// The guest's own message, from its start (macOS:
+        /// GuestExecError.errorDescription): what reads a refusal off it
+        /// (`[Errno 13] …`: FolderUpload.refusedByFilesystem, the web
+        /// client's permissionDenied) needs it as the guest said it.
+        // @port-skip linux-only: guest exec errors
+        var errorDescription: String? {
+            switch self {
+            case .unavailable(let why): return why
+            case .failed(let code, let err):
+                let said = err.trimmingCharacters(in: .whitespacesAndNewlines)
+                return said.isEmpty ? "Command failed (exit \(code))" : said
             }
         }
     }

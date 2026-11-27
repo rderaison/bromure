@@ -167,7 +167,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// conversation, which may move the report to its own tab (Codex's
     /// shared server). macOS: UbuntuSandboxVM's outbox poll + onAgentStatus.
     // @port UbuntuSandboxVM.static isAgentHookFile(_: String) h=e13963421f41cba6 @132bb730
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onAgentStatus h=ba2345e1c2011ce6 @d3ebbda2
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onAgentStatus h=cc824ffbe70c0570 @419a8ef59
     func readAgentStatus() {
         guard let store = SessionStores.shared?.sessions else { return }
         let fm = FileManager.default
@@ -186,6 +186,12 @@ final class LinuxSessionHost: AgentSessionHost {
                 guard let w = AgentSessionStore.statusWindow(index: index, conversation: conversation,
                                                              profileID: id, sessions: store.sessions) else { continue }
                 setTabAgentStatus(id, index: w, status, turnEnded: AgentStatus.endsTurn(signal: raw))
+                // Line 3, at a turn's end: the tab's /ship watch, if any.
+                if case .some(let ref) = ClaudeShip.watch(inStatus: raw),
+                   let s = store.session(profileID: id, windowIndex: w) {
+                    store.setShipWatch(s.id, ref)
+                    ShipWatchAwake.shared.refresh()
+                }
             }
         }
     }

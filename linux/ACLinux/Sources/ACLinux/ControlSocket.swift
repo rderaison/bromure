@@ -14,6 +14,10 @@ public struct ControlRequest: Sendable {
     public let body: JSONValue
     /// Header names lower-cased.
     public var headers: [String: String] = [:]
+    /// Set when the request came over the SSH front door from a connection
+    /// signed in with the E2E test login (RemoteTestLogin.bridgeMarker): that
+    /// login's name. What the request enrolls stays the test login's.
+    public var testLoginUser: String? = nil
 }
 
 // @port-skip linux-only: response value type
@@ -231,6 +235,25 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     /// The client sent EOF: an incomplete request can't complete any more.
     private var inputClosed = false
 
+    /// The test login a connection's request is marked with, if any.
+    private var testLoginUser: String?
+
+    enum TestLoginMark: Equatable { case none, incomplete, user(String) }
+
+    /// Takes `RemoteTestLogin.bridgeMarker` + name + CRLF off the front of
+    /// `buf` (macOS: handleRequest strips it from the header block).
+    /// `.incomplete`: what's there so far could still be the mark.
+    // @port-skip linux-only: handleRequest's marker strip, on a NIO buffer
+    static func takeTestLoginMark(_ buf: inout ByteBuffer) -> TestLoginMark {
+        let marker = Array(RemoteTestLogin.bridgeMarker.utf8)
+        let have = buf.readableBytesView
+        guard have.prefix(marker.count).elementsEqual(marker.prefix(have.count)) else { return .none }
+        guard have.count >= marker.count, let eol = have.firstRange(of: Array("\r\n".utf8)) else { return .incomplete }
+        let user = String(decoding: have[(have.startIndex + marker.count)..<eol.lowerBound], as: UTF8.self)
+        buf.moveReaderIndex(forwardBy: eol.upperBound - have.startIndex)
+        return .user(user)
+    }
+
     // @port-skip linux-only: NIO request framing
     init(peers: Set<uid_t>, handler: @escaping @Sendable (ControlRequest) async -> ControlResponse) {
         self.peers = peers
@@ -296,9 +319,21 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     }
 
     // @port-skip linux-only: NIO request framing
-    // @port ACAutomationServer.handleRequest(fd: Int32) h=2753bc13a5818633 @f127f8ab
+    // @port ACAutomationServer.handleRequest(fd: Int32) h=9d2ece03b92e0fb1 @419a8ef59
     private func process(_ context: ChannelHandlerContext) {
         guard authorized == true, !started else { return }
+        // The SSH front door's mark on a test-login connection: the line
+        // before the request line (none yet: more bytes will say).
+        if testLoginUser == nil {
+            switch Self.takeTestLoginMark(&buf) {
+            case .none: break
+            case .incomplete:
+                if buf.readableBytes > Self.maxHeader { reply(context, .error(400, "Bad request")) }
+                else if inputClosed { context.close(promise: nil) }
+                return
+            case .user(let user): testLoginUser = user
+            }
+        }
         guard let end = buf.readableBytesView.firstRange(of: Array("\r\n\r\n".utf8)) else {
             if buf.readableBytes > Self.maxHeader { reply(context, .error(400, "Bad request")) }
             else if inputClosed { context.close(promise: nil) }
@@ -328,7 +363,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         let body = (try? JSONDecoder().decode(JSONValue.self, from: Data(bodyBytes))) ?? .object([:])
         let req = ControlRequest(method: String(line[0]), path: String(line[1]),
                                  body: { if case .object = body { return body }; return .object([:]) }(),
-                                 headers: headers)
+                                 headers: headers, testLoginUser: testLoginUser)
         let handler = self.handler
         let promise = context.eventLoop.makePromise(of: ControlResponse.self)
         promise.completeWithTask { await handler(req) }
@@ -393,8 +428,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
 public struct ControlClient: Sendable {
     public let socketPath: String
 
-    // partial: path required (CLI passes the daemon socket)
-    // @port ControlClient.init(socketPath: String?) h=2766d65a1e2c08aa @1b984d09
+    // partial: path required (CLI passes the daemon socket); no default remote (the CLI through a fat-client tunnel: the Mac is the client)
+    // @port ControlClient.init(socketPath: String?) h=ebf6bb7e875688cc @55cabf8c3
     public init(socketPath: String) { self.socketPath = socketPath }
 
     // @port-skip linux-only: control client

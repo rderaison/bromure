@@ -6,9 +6,9 @@ import Foundation
 extension Daemon {
     /// `POST /subscriptions/register|cancel|forget`; nil for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/register"): h=660996cce7a181e6 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/forget"): h=588a794720f01642 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/cancel"): h=be7cca29b4bc2f1a @1d74379cb
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/subscriptions/register"): h=660996cce7a181e6 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/subscriptions/forget"): h=588a794720f01642 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/subscriptions/cancel"): h=be7cca29b4bc2f1a @1d74379cb
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCancelRegistration h=3fc9abc130177888 @1d74379cb
     func subscriptionsRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let provider = body["provider"]?.stringValue ?? ""

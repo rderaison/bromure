@@ -234,7 +234,7 @@ extension Daemon {
     }
 
     /// `GET /remote`: what macOS's remoteAccessStatus returns.
-    // @port ACAppDelegate.remoteAccessStatus() h=b15b5034f2d2161f @f127f8ab
+    // @port ACAppDelegate.remoteAccessStatus() h=aacf5ac759996383 @419a8ef59
     // partial: host:port computed inline (primaryIPv4 for 0.0.0.0)
     // @port ACAppDelegate.remoteReachableAddress() h=29612ab5962d0e1c @d3ebbda2
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteStatus h=c16c88e244aefab5 @d3ebbda2
@@ -256,7 +256,39 @@ extension Daemon {
                                                  "fingerprint": .string($0.fingerprint)] }),
             // Why the list may be empty when it isn't: authorized_keys unreadable.
             "authorizedKeysProblem": .string(keysProblem ?? ""),
+            // The fat-client E2E's generated login, by name only (its
+            // password is only ever in POST /remote/test-login's reply).
+            "testLoginUser": .string(RemoteTestLogin.shared.current?.user ?? ""),
+            "testLoginKeys": .array(RemoteTestLogin.shared.keyFingerprints.map { .string($0) }),
         ])
+    }
+
+    /// `POST /remote/test-login` mints, `DELETE` ends, the fat-client E2E
+    /// suite's generated SSH login (RemoteTestLogin): a random name and
+    /// password this server's SSH front door accepts besides its own
+    /// logins. Only when the daemon runs with BROMURE_DEBUG_CLAUDE (the
+    /// control socket is its owner's already); the password is in the reply.
+    /// Not on a multi-user server: its front door is the gateway, whose
+    /// logins are the accounts' (a test signs in with `admin code` there).
+    // partial: a single-user server's front door only (a multi-user server's gateway has its own logins: refused there)
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/remote/test-login"), ("DELETE", "/remote/test-login"): h=2d90455a4770b603 @419a8ef59
+    func remoteTestLogin(_ method: String) async -> ControlResponse {
+        guard ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil else {
+            return .error(403, "Test logins need BROMURE_DEBUG_CLAUDE and the local control socket")
+        }
+        guard !config.multiUser else {
+            return .error(409, "A multi-user server's logins are its gateway's: sign a test in with `bromure-ac admin code`")
+        }
+        if method == "DELETE" {
+            RemoteTestLogin.shared.clear()
+            return ControlResponse(200, ["ok": true])
+        }
+        let c = RemoteTestLogin.shared.mint()
+        guard case .object(var body) = await remoteStatus().body else { return .error(503, "unavailable") }
+        body["user"] = .string(c.user)
+        body["password"] = .string(c.password)
+        body.removeValue(forKey: "connect")
+        return ControlResponse(200, .object(body))
     }
 
     /// `POST /remote`: port, bindAddress, passwordAuth, pubkeyAuth, enabled.
@@ -294,11 +326,19 @@ extension Daemon {
         return await remoteStatus()
     }
 
-    /// `POST /remote/keys {"key": "<openssh public key line>"}`.
+    /// `POST /remote/keys {"key": "<openssh public key line>"}`. Over the
+    /// E2E test login, the key is the test login's: in memory, under its
+    /// name only, gone with it (RemoteTestLogin), never in authorized_keys.
     // @port ACAppDelegate.remoteAccessAddKey(_: String) h=9d3ad0a2961c4ba1 @7dd92fdf
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteAddKey h=d568325e283a1266 @d3ebbda2
-    func remoteAddKey(_ body: JSONValue) async -> ControlResponse {
+    func remoteAddKey(_ body: JSONValue, testLoginUser: String? = nil) async -> ControlResponse {
         let key = body["key"]?.stringValue ?? ""
+        if let testLoginUser {
+            guard let fp = RemoteTestLogin.shared.addKey(key, user: testLoginUser) else {
+                return .error(400, "Not a key for the current test login")
+            }
+            return ControlResponse(200, ["ok": true, "fingerprint": .string(fp), "testLogin": true])
+        }
         do {
             let fp = try await MainActor.run { () throws -> String in
                 try RemoteAccessServer.shared.addAuthorizedKey(key)

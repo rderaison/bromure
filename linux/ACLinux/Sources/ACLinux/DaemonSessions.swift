@@ -5,7 +5,7 @@ import Foundation
 /// workspace, its window id 0 and never visible. `bromure-ac mcp` and the
 /// API's scripts list, open, close and exec in them as they do on a Mac.
 extension Daemon {
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/sessions/"): h=b445bd8b8be2e1cb @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p.hasPrefix("/sessions/"): h=b445bd8b8be2e1cb @f127f8ab
     func sessionsRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         switch (method, path) {
         case ("GET", "/sessions"): return listSessions()
@@ -31,14 +31,14 @@ extension Daemon {
     }
 
     // partial: the running workspaces
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/sessions"): h=f55eefa10cd15af7 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/sessions"): h=f55eefa10cd15af7 @f127f8ab
     // partial: windowID/visible meaningless
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListSessions h=bbcb6c6a79d51cc4 @d3ebbda2
     func listSessions() -> ControlResponse {
         ControlResponse(200, ["sessions": .array(runningWorkspaces().map(Self.sessionInfo))])
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/sessions"): h=ed84615f7b55066b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/sessions"): h=ed84615f7b55066b @f127f8ab
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCreateSession h=45ab1d9bbcf7f17c @d3ebbda2
     func createSession(_ body: JSONValue) async -> ControlResponse {
         guard let key = body["profile"]?.stringValue ?? body["profileId"]?.stringValue, !key.isEmpty else {
@@ -149,7 +149,7 @@ extension Daemon {
     }
 
     // partial: every workspace this daemon has (its workspace rows, as /state's)
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/workspaces"): h=1abca9f46bf2d854 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/workspaces"): h=1abca9f46bf2d854 @f127f8ab
     // partial: rows are thin (see C automationWorkspaceList)
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListWorkspaces h=2941378ab44054f9 @d3ebbda2
     func listWorkspaces() async -> ControlResponse {
@@ -157,7 +157,7 @@ extension Daemon {
     }
 
     // partial: no windows on a server (mainWindowOpen/editorOpen false), and the control socket is the trusted local caller
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/app/state"): h=10a6ac728f1b5c3d @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/app/state"): h=10a6ac728f1b5c3d @f127f8ab
     // partial: window flags false; locale from LANG
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGetAppState h=9b1ebc5a4003e418 @d3ebbda2
     func appState() -> ControlResponse {

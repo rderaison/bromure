@@ -401,7 +401,7 @@ public actor Daemon {
     }
 
     // partial: server-side launch is spread over Daemon.start/startSessionEngine. Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (macOS-legacy data)
-    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=c269a7e75cf65893 @1d74379cb
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=f1f1a5bc9f29d4c8 @419a8ef59
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
         // A state dir with no registry and no workspaces yet: a new user's
@@ -678,23 +678,23 @@ public actor Daemon {
 
     /// The control socket's router: the subset of macOS's routes the Linux
     /// daemon has, same paths and JSON; anything else is 404 with a JSON error.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) h=4d6baf51bc4e9285 @1d74379cb
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"): h=5085e35fd033de06 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/remote"): h=b6276f976a98e550 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/remote"): h=d60f95389e82ca48 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/remote/keys"): h=0e65891011a4819a @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where m == "DELETE" && p.hasPrefix("/remote/keys/"): h=9403aaa57e622dc5 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"): h=5176a61b92c6486b @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/git-state"): h=1623f7ebb4fc189b @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/folders"): h=17e37813123c560a @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/pending"): h=b5fc63a31b498a9b @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/worktree-open"), ("POST", "/agent-sessions/worktree-discard"): h=3df772160cb4d8e1 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/switchboard"): h=79ec264d6a0b2a2e @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/start"): h=36622910b9e35c75 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / default: h=be4becd88b5244ad @f127f8ab
-    // partial: router calls daemon functions directly
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=c8cf3c5d89f304d2 @1d74379cb
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) h=276b92b54821b6ab @419a8ef59
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"): h=5085e35fd033de06 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/remote"): h=b6276f976a98e550 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/remote"): h=d60f95389e82ca48 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/remote/keys"): h=d4cf6c56ebf57476 @419a8ef59
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where m == "DELETE" && p.hasPrefix("/remote/keys/"): h=9403aaa57e622dc5 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"): h=5176a61b92c6486b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/agent-sessions/git-state"): h=1623f7ebb4fc189b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/agent-sessions/folders"): h=17e37813123c560a @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/pending"): h=b5fc63a31b498a9b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/agent-sessions/worktree-open"), ("POST", "/agent-sessions/worktree-discard"): h=3df772160cb4d8e1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/agent-sessions/switchboard"): h=79ec264d6a0b2a2e @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/agent-sessions/start"): h=36622910b9e35c75 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / default: h=be4becd88b5244ad @f127f8ab
+    // partial: router calls daemon functions directly; none of the debug UI command's fixtures (seed-board-demo, seed-hub-demo…) or window actions
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=2246a8b4cb46b417 @419a8ef59
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         // A mutating request moves /state's generation on as it starts and
         // as its response goes out (macOS: route's noteMutation pair).
@@ -757,7 +757,8 @@ public actor Daemon {
         case (let m, let p) where p.hasPrefix("/vms/"): return await vmRoute(m, p, req.body)
         case ("GET", "/remote"): return await remoteStatus()
         case ("POST", "/remote"): return await remoteApply(req.body)
-        case ("POST", "/remote/keys"): return await remoteAddKey(req.body)
+        case ("POST", "/remote/keys"): return await remoteAddKey(req.body, testLoginUser: req.testLoginUser)
+        case ("POST", "/remote/test-login"), ("DELETE", "/remote/test-login"): return await remoteTestLogin(req.method)
         case ("POST", "/remote/code"): return remoteCode(req.body)
         case ("GET", "/remote/authorized-keys"): return await remoteAuthorizedKeys()
         case ("POST", "/remote/code/check"): return remoteCodeCheck(req.body)
@@ -770,6 +771,7 @@ public actor Daemon {
         case ("POST", "/cloud/enroll"): return await cloudEnroll(req.body)
         case ("POST", "/cloud/unenroll"): return await cloudUnenroll()
         case ("POST", "/fatclient/forward"): return await fatclientForward(req.body)
+        case ("POST", "/models/probe-server"): return await probeEngineRoute(req.body)
         case ("POST", let p) where p.hasPrefix("/models/"): return modelAction(p, req.body)
         case ("POST", "/fatclient/browser-mcp"): return await fatclientBrowserMCP(req.body)
         case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
@@ -788,7 +790,7 @@ public actor Daemon {
         }
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/health"): h=ec3227f904b323b7 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/health"): h=ec3227f904b323b7 @f127f8ab
     func health() -> ControlResponse {
         ControlResponse(200, ["status": "ok", "service": "bromure-ac-automation", "debugEnabled": false])
     }
@@ -798,7 +800,7 @@ public actor Daemon {
     /// /state carries only the most recent), and which run numbered them.
     /// `?after=<seq>&epoch=<run>` (`after` empty: none yet) asks instead for
     /// the rows past what the client holds (`SecurityTimeline.deltaBody`).
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=b0a52cfa857baf84 @d7bd69f5
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=b0a52cfa857baf84 @d7bd69f5
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityHistory h=a9a9fc7e99ac7ebd @d3ebbda2
     func securityTimelineHistory(_ fullPath: String) async -> ControlResponse {
         var hours = 24
@@ -824,14 +826,14 @@ public actor Daemon {
     /// `GET /storage/defaults`: the sizes a workspace made here gets when it
     /// has none of its own, for a fat client's new-workspace editor (this
     /// host's free space and setting, not the client's).
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/storage/defaults"): h=9332e5415b80ee6d @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/storage/defaults"): h=9332e5415b80ee6d @f127f8ab
     func storageDefaults() -> ControlResponse {
         ControlResponse(200, ["homeImageGB": .number(Double(newHomeDefaultGB()))])
     }
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/state"): h=adfaa737ba44087f @f127f8ab
     func state() async -> ControlResponse { ControlResponse(200, await cachedStateBody()) }
 
     /// `GET /state/subscribe`: the octet-stream header, then `/state`
@@ -847,7 +849,7 @@ public actor Daemon {
     /// is subscribed (StateFeed); each subscriber only sends. Ends when a
     /// write fails; the client half-closing (the SSH bridge forwards its
     /// EOF) doesn't end it.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/state/subscribe"): h=1f85f15c8df15ffd @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/state/subscribe"): h=1f85f15c8df15ffd @f127f8ab
     // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
     func stateSubscribe(delta: Bool = false) -> ControlResponse {
         let me = WeakDaemon(self)
@@ -1124,7 +1126,7 @@ public actor Daemon {
         return .object(Self.withMachines(body))
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/vms"): h=b80678b83121852e @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/vms"): h=b80678b83121852e @f127f8ab
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListVMs h=66bfdf0f62a8d55c @d3ebbda2
     func listVMs() -> ControlResponse {
         let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
@@ -1241,7 +1243,7 @@ public actor Daemon {
     }
 
     // partial: no attach (a server has no pane)
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @f127f8ab
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=b83437067e545b26 @f127f8ab
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / default: h=a378a9dda33ea55e @f127f8ab
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
@@ -1796,7 +1798,7 @@ public actor Daemon {
     /// AWS keys (macOS: MitmEngine.unregister), prompt-injection policy,
     /// swap map and kube trust, and its local engine route.
     // partial: subscription bogus keys aren't unregistered at stop (only when an automation clone is destroyed, DaemonClones.swift); no browser/MCP bridge teardown here (owned by Live)
-    // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=2dd454dacc682c60 @d7bd69f51
+    // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=57bb8ed973fe5696 @419a8ef59
     // partial: BinaryIdentityService.shared.dropBridge(pid)?.stop() at session teardown; no VZ listener to remove
     // @port BinaryIdentityService.detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) h=2557c1fe1aa481a4 @7a039834
     // partial: KernelSentryService.shared.dropBridge(pid)?.closeChannel() at teardown
@@ -1848,6 +1850,12 @@ public actor Daemon {
         // The watchdog's window and baseline start over with the next session,
         // and no question holds the VM any more.
         AgentWatchdog.shared.reset(profileID: pid)
+        // The machine stopped: none of its tabs watch a pull request any
+        // more (Claude Code's /ship).
+        await MainActor.run {
+            SessionStores.shared?.sessions.clearShipWatches(profileID: pid)
+            ShipWatchAwake.shared.refresh()
+        }
         clearPauseHolds(pid.uuidString.lowercased())
         lastStagedProfiles[pid.uuidString.lowercased()] = nil
         watchdogAsking.remove(pid.uuidString.lowercased())

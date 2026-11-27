@@ -4,7 +4,7 @@ extension Daemon {
     /// `POST /vms/<id>/file {"op": {...}, "timeout"}`: a guest file operation
     /// (read, write, list…) through agentd, as the chat view and the CLI
     /// use it. 409 when the VM isn't running or the guest refused.
-    // @port ACAppDelegate.automationGuestFileOp(idOrName: String, op: [String:Any], timeout: Int) h=9684560563026b32 @9ece43f6
+    // @port ACAppDelegate.automationGuestFileOp(idOrName: String, op: [String:Any], timeout: Int) h=10aa7acfb8707f45 @419a8ef59
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGuestFileOp h=d7c0b2d40da72235 @d3ebbda2
     func guestFileRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         guard live[rec.id] != nil, let pid = UUID(uuidString: rec.id) else {
@@ -15,6 +15,10 @@ extension Daemon {
         do {
             let r = try await guestFileOp(profileID: pid, op: op, timeout: timeout)
             return ControlResponse(200, JSONValue(foundation: r) ?? .object([:]))
+        } catch let e as GuestCommandError {
+            // The guest's own message, not "exit 1: …" before it: clients
+            // read the refusal from its start (`[Errno 13] …`).
+            return ControlResponse(409, ["error": .string(e.errorDescription ?? String(describing: e))])
         } catch {
             return ControlResponse(409, ["error": .string(String(describing: error))])
         }

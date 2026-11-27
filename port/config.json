@@ -31,6 +31,7 @@
     "Sources/AgentCoding/ChatQueueStore.swift",
     "Sources/AgentCoding/ClassifierQueue.swift",
     "Sources/AgentCoding/ClaudeAutoMode.swift",
+    "Sources/AgentCoding/ClaudeShip.swift",
     "Sources/AgentCoding/CloudEvents.swift",
     "Sources/AgentCoding/CloudMTLSClient.swift",
     "Sources/AgentCoding/CloudUploader.swift",
@@ -432,6 +433,10 @@
     {
       "path": "Sources/AgentCoding/ScriptCommands.swift",
       "reason": "applescript"
+    },
+    {
+      "path": "Sources/AgentCoding/StagedReplace.swift",
+      "reason": "Bromure Sidecar's host file operations (Sources/AgentHost/HostExec.swift, which compiles this file too) are its only caller: a Linux server writes uploads through the guest's agentd"
     },
     {
       "path": "Sources/AgentCoding/*View.swift",
@@ -858,19 +863,19 @@
       "reason": "macOS's BSD-socket server; Linux's control socket closes with ControlServer.close"
     },
     {
-      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (_, let p) where p == \"/debug/ui-shot\" || p.hasPrefix(\"/debug/ui-shot?\"):",
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (_, let p) where p == \"/debug/ui-shot\" || p.hasPrefix(\"/debug/ui-shot?\"):",
       "reason": "screen-only: renders macOS windows to PNG (a debug hook)"
     },
     {
-      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/debug/editor\"):",
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (\"POST\", \"/debug/editor\"):",
       "reason": "screen-only: drives macOS's profile editor window (a debug hook)"
     },
     {
-      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/debug/fatclient\"):",
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (\"POST\", \"/debug/fatclient\"):",
       "reason": "screen-only: drives macOS's fat-client windows (a debug hook)"
     },
     {
-      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/detect/prompt-injection\"):",
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (\"POST\", \"/detect/prompt-injection\"):",
       "reason": "debug-only (BROMURE_DEBUG_CLAUDE): runs the detectors on posted text; Linux's detectors run in the proxy and its tests"
     },
     {
@@ -878,8 +883,12 @@
       "reason": "debug-only (BROMURE_DEBUG_CLAUDE): see /detect/prompt-injection"
     },
     {
-      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/connector\"):",
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (\"POST\", \"/connector\"):",
       "reason": "test hooks driving macOS's connector window and its Slack/WhatsApp setup sheets (create, window, slack-setup, disconnect, wa-qr…): a Linux server has no such window"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (\"POST\", \"/scripting\"):",
+      "reason": "applescript: the AppleScript verbs (BromureAC.sdef, ScriptCommands) over the control socket; a Linux server has no scripting surface"
     },
     {
       "id": "ACAutomationServer.vmExec(profileID: String, command: String, timeoutSeconds: Int)",
@@ -3440,6 +3449,10 @@
     {
       "id": "ControlClient.init(socketPath: String, dial: @escaping()->Int32?)",
       "reason": "fat-client client side: custom dial (SSH tunnel / NIOSSH) for a remote bromure-ac"
+    },
+    {
+      "id": "ControlClient.var isRemote",
+      "reason": "fat-client client side: whether the CLI rides a fat-client tunnel to a remote bromure-ac (BROMURE_AC_REMOTE_HOST)"
     },
     {
       "id": "ControlClient.static samplesLatency(_: String, _: String)",

@@ -99,7 +99,7 @@ extension SessionStores {
     /// `/watches…` and `/findings…`: the fat client's write path for the
     /// hub (macOS: the app delegate's, same paths and bodies). Returns the
     /// response body; "error" set = failure.
-    // @port ACAppDelegate.watchesCommand(method: String, path: String, body: [String:Any]) h=43b69ba1786f52f5 @32c80445
+    // @port ACAppDelegate.watchesCommand(method: String, path: String, body: [String:Any]) h=92bdd4614633094e @419a8ef59
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onWatchesCommand h=102422d4d1e202d5 @d3ebbda2
     // partial: POST /watches with scanNow
     // @port ACAppDelegate.saveWatch(_: WatchedRepo, scanNow: Bool) h=f10b29938a848a4e @977cc122
@@ -172,7 +172,9 @@ extension SessionStores {
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
                 }
-                if let why = routeFindingToSession(id, session: sid, confirmed: true) {
+                // A resend with the same key gets the same task.
+                let key = (body["handOver"] as? String).flatMap { $0.isEmpty || $0.count > 100 ? nil : $0 }
+                if let why = routeFindingToSession(id, session: sid, confirmed: true, handOver: key) {
                     return ["error": why]
                 }
             case ("POST", "duplicate"):
@@ -228,14 +230,15 @@ extension SessionStores {
         return true
     }
 
-    // @port ACAppDelegate.routeFindingToSession(_: UUID, session: UUID, confirmed: Bool) h=c9393fdcd37420d9 @32c80445
-    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, confirmed: Bool) -> String? {
+    // @port ACAppDelegate.routeFindingToSession(_: UUID, session: UUID, confirmed: Bool, handOver: String?) h=ba156f4cb63bdd08 @419a8ef59
+    func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, confirmed: Bool,
+                               handOver: String? = nil) -> String? {
         guard let f = findings.finding(findingID),
               let s = sessions.sessions.first(where: { $0.id == sessionID && !$0.isDeleted }) else {
             return NSLocalizedString("that session is gone", comment: "finding → session failure")
         }
         if let refusal = f.handOverRefusal(confirmed: confirmed) { return refusal }
-        guard let tid = watchEngine?.fix(findingID, by: s) else {
+        guard let tid = watchEngine?.fix(findingID, by: s, handOver: handOver) else {
             return NSLocalizedString("couldn't put it on the board", comment: "finding → session failure")
         }
         BACDebug.log("watch", "finding \(findingID) → task \(tid) for session \(sessionID)")

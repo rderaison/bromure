@@ -926,7 +926,7 @@ public enum CLICommandsEntry {
 /// macOS's status lines; on Linux "password" is the one-time codes, plus the
 /// account password only when allowed.
 // partial: says what "password" accepts here (one-time codes; the account password only with allowAccountPassword)
-// @port printRemoteStatus(_: [String:Any]) h=ad292b4ae5693692 @dd6d27ed
+// @port printRemoteStatus(_: [String:Any]) h=0e2a4c786b70488b @419a8ef59
 public func printRemoteStatus(_ s: [String: Any]) {
     let enabled = s["enabled"] as? Bool ?? false
     let running = s["running"] as? Bool ?? false
@@ -943,6 +943,7 @@ public func printRemoteStatus(_ s: [String: Any]) {
         print("  Login as: \(user)")
         print("  Connect:  \(connect)")
     }
+    if let t = s["testLoginUser"] as? String, !t.isEmpty { print("  Test login: \(t) (E2E, until restart)") }
     let keys = s["authorizedKeys"] as? [[String: Any]] ?? []
     print("  Keys:     \(keys.count) authorized")
     if let problem = s["authorizedKeysProblem"] as? String, !problem.isEmpty { print("  Warning:  \(problem)") }

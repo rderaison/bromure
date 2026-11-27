@@ -27,7 +27,7 @@ struct RemoteMenuClient {
     /// macOS starts a headless agent; here the daemon is a systemd service,
     /// and the SSH server this menu runs under lives in it.
     // partial: doesn't start the daemon (a systemd service); says how
-    // @port ControlClient.ensureAgentRunning(timeout: TimeInterval) h=de095f5726837b0f @1b984d09
+    // @port ControlClient.ensureAgentRunning(timeout: TimeInterval) h=45bb91597de9d3a5 @55cabf8c3
     func ensureAgentRunning(timeout: TimeInterval = 40) throws {
         if isAgentRunning() { return }
         throw ControlClient.ClientError.protocolError(

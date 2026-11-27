@@ -68,7 +68,7 @@ extension SessionStores {
 
     /// `POST /tasks/<id>/plan-events {since}`: the streamed plan session's
     /// rendered items from `since` on (a growing-log cursor).
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=0e9e12973aa766f8 @d7bd69f5
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=7c4821d661300f22 @419a8ef59
     func planEvents(_ id: UUID, _ body: [String: Any]) -> [String: Any] {
         guard let task = codingTasks.task(id),
               let slug = task.branchSlug,

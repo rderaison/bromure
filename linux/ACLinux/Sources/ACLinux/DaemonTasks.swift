@@ -6,16 +6,16 @@ import Foundation
 /// the app delegate's callbacks behind them; same paths, same JSON.
 extension Daemon {
     /// `/tasks…`, `/automations…`, `/automation-runs/…`; nil for any other path.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/automations"): h=382dc2f2e17eee60 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automation-sources"): h=74321afd31efa247 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automations"): h=ba8982c888b6e19d @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/tasks"): h=2b0018397b4d82e0 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/tasks"): h=8bf6fcc99c5cc833 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/tasks/") && p.hasSuffix("/transcript"): h=3f4c3f73c062b4c0 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/tasks/"): h=246559f981c3fb35 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automation-runs/"): h=27a2b964225dc883 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")                 || p.hasPrefix("/findings/"): h=569897f14eb6e2f1 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automations/"): h=df3d8972eac1ad9c @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/automations"): h=382dc2f2e17eee60 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/automation-sources"): h=74321afd31efa247 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/automations"): h=ba8982c888b6e19d @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/tasks"): h=2b0018397b4d82e0 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/tasks"): h=8bf6fcc99c5cc833 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", let p) where p.hasPrefix("/tasks/") && p.hasSuffix("/transcript"): h=3f4c3f73c062b4c0 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p.hasPrefix("/tasks/"): h=246559f981c3fb35 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p.hasPrefix("/automation-runs/"): h=27a2b964225dc883 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")                 || p.hasPrefix("/findings/"): h=569897f14eb6e2f1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p.hasPrefix("/automations/"): h=df3d8972eac1ad9c @f127f8ab
     // partial: inline stores.automations.remove(id)
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDeleteAutomation h=6ba93182b686f637 @d3ebbda2
     func boardRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
@@ -155,7 +155,7 @@ extension SessionStores {
     /// `DELETE /tasks/<id>`): macOS's, less what needs its task dispatcher
     /// (assign, answer, recall, locate); the plan stream's relay is
     /// DaemonPlanStreams.swift's.
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=0e9e12973aa766f8 @d7bd69f5
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=7c4821d661300f22 @419a8ef59
     func taskCommand(_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any] {
         guard let engine = codingTaskEngine else { return ["error": "no task engine"] }
         guard codingTasks.task(id) != nil else { return ["error": "unknown task"] }
@@ -193,6 +193,8 @@ extension SessionStores {
         case "merge", "land":
             // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
             // legacy merge body ({squash, cleanup}) still works.
+            // One it won't start says why: the client tells the user.
+            if let why = engine.landRefusal(id) { return ["ok": false, "error": why] }
             let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
                 ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
             let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
@@ -200,6 +202,7 @@ extension SessionStores {
                         keepBranch: keep, push: body["push"] as? Bool ?? false)
         case "merge-batch":
             let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+            if let why = engine.landRefusal([id] + others) { return ["ok": false, "error": why] }
             engine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
                              push: body["push"] as? Bool ?? false)
         case "open-pr":

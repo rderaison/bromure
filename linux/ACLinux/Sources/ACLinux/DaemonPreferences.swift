@@ -9,10 +9,10 @@ extension Daemon {
     /// `GET|PUT|PATCH /preferences`, `GET|PUT|PATCH /models/settings`; nil
     /// for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/preferences"): h=135b9ea34619bb62 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("PUT", "/preferences"), ("PATCH", "/preferences"): h=f4188d370ef7a6bd @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/models/settings"): h=2694f9914b1a08f4 @f127f8ab
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("PUT", "/models/settings"), ("PATCH", "/models/settings"): h=279aafb685a1b5b9 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/preferences"): h=135b9ea34619bb62 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("PUT", "/preferences"), ("PATCH", "/preferences"): h=f4188d370ef7a6bd @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("GET", "/models/settings"): h=2694f9914b1a08f4 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("PUT", "/models/settings"), ("PATCH", "/models/settings"): h=279aafb685a1b5b9 @f127f8ab
     func preferencesRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         switch (method, path) {
@@ -145,5 +145,95 @@ extension Daemon {
         if doc["agentEnvironment"] == nil { merged.agentEnvironment = store.settings.agentEnvironment }
         store.update { $0 = merged }
         return ["ok": true]
+    }
+
+    /// `POST /models/probe-server {baseURL, apiKey?, scope?, profileId?}`: a
+    /// fat client's "Test Connection" for a custom inference server (vLLM,
+    /// Ollama, …), run from this server, the machine whose launches will
+    /// reach it: the client never contacts that server itself. A failed
+    /// probe is still a 200 (the answer is the error).
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case ("POST", "/models/probe-server"): h=928f6ba0063c332c @419a8ef59
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onProbeEngine h=a83f6b8743f9ca21 @419a8ef59
+    func probeEngineRoute(_ body: JSONValue) async -> ControlResponse {
+        let doc = (body.foundationObject as? [String: Any]) ?? [:]
+        guard let base = doc["baseURL"] as? String, !base.isEmpty else { return .error(400, "Missing 'baseURL'") }
+        let r = await Self.probeEngine(base: base, apiKey: doc["apiKey"] as? String, scope: EngineProbeScope(wire: doc))
+        return ControlResponse(200, JSONValue(foundation: r) ?? .object([:]))
+    }
+
+    /// The probe itself. The client's copy of a stored key is redacted, so a
+    /// blank or redacted key means "the key stored for this server" in the
+    /// configuration being edited (`scope`), and only for that exact server,
+    /// so a client can't send a stored key anywhere else.
+    // @port ACAppDelegate.automationProbeEngine(base: String, apiKey: String?, scope: EngineProbeScope) h=78975660cb8db7c1 @419a8ef59
+    @MainActor
+    static func probeEngine(base raw: String, apiKey: String?,
+                            scope: EngineProbeScope = .unspecified) async -> [String: Any] {
+        guard let base = Profile.normalizedEngineBase(raw),
+              ["http", "https"].contains(base.scheme?.lowercased() ?? "") else {
+            return ["ok": false, "error": NSLocalizedString("That isn't a valid server URL.", comment: "engine probe")]
+        }
+        let key = ModelSettings.isRedactedSecret(apiKey) ? storedEngineKey(for: base, scope: scope) : apiKey
+        do {
+            let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+            return ["ok": true, "models": models]
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
+    /// The API key stored for the custom server at `base` in `scope`'s
+    /// configuration (normalized URLs compared), or nil.
+    // @port ACAppDelegate.storedEngineKey(for: URL, scope: EngineProbeScope) h=fb30e977a974085e @419a8ef59
+    @MainActor
+    private static func storedEngineKey(for base: URL, scope: EngineProbeScope) -> String? {
+        let store = ProfileStore()
+        let candidates = engineKeyCandidates(scope: scope,
+                                             global: ModelSettingsStore.shared.settings.localServer,
+                                             profiles: store.loadAll(), template: store.loadTemplate())
+        return engineKey(for: base, among: candidates)
+    }
+
+    /// Where a probe's redacted key is looked up, in order:
+    /// - global settings: the global custom server only;
+    /// - a workspace: its own custom server (its Models override, then its
+    ///   Local Models engine), then the global one if it inherits it (no
+    ///   override, or a layered one that doesn't exclude it). A workspace not
+    ///   saved yet is the template's copy.
+    /// - unspecified (a client older than the scope): every configuration,
+    ///   global first.
+    /// Two configurations on one server with different keys (tenant keys)
+    /// each test their own.
+    // @port ACAppDelegate.static engineKeyCandidates(scope: EngineProbeScope, global: LocalServer?, profiles: [Profile], template: Profile) h=1a16851cd1a1c973 @419a8ef59
+    nonisolated static func engineKeyCandidates(scope: EngineProbeScope, global: LocalServer?,
+                                                profiles: [Profile], template: Profile) -> [(url: String?, key: String?)] {
+        func own(_ p: Profile) -> [(url: String?, key: String?)] {
+            var c: [(url: String?, key: String?)] = []
+            if let ls = p.modelOverride?.settings.localServer { c.append((ls.baseURL, ls.apiKey)) }
+            c.append((p.localEngineURL, p.localEngineAPIKey))
+            return c
+        }
+        let inherited: [(url: String?, key: String?)] = global.map { [($0.baseURL, $0.apiKey)] } ?? []
+        switch scope {
+        case .global:
+            return inherited
+        case .workspace(let id):
+            let p = id.flatMap { id in profiles.first { $0.id == id } } ?? template
+            let inherits = p.modelOverride.map { $0.inheritsGlobal && !$0.excludedProviders.contains(.custom) } ?? true
+            return own(p) + (inherits ? inherited : [])
+        case .unspecified:
+            return inherited + (profiles + [template]).flatMap(own)
+        }
+    }
+
+    /// The first non-blank key whose server URL normalizes to `base`.
+    // @port ACAppDelegate.static engineKey(for: URL, among: [(url:String?,key:String?)]) h=7c97763e0f1b3a41 @419a8ef59
+    nonisolated static func engineKey(for base: URL, among candidates: [(url: String?, key: String?)]) -> String? {
+        for c in candidates {
+            guard let k = c.key, !ModelSettings.isRedactedSecret(k),
+                  Profile.normalizedEngineBase(c.url)?.absoluteString == base.absoluteString else { continue }
+            return k
+        }
+        return nil
     }
 }

@@ -16,10 +16,10 @@ struct BromureAC: AsyncParsableCommand {
                       Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command, Mcp.self,
                       ModelCommand.self])
 
-    // partial: SIGPIPE is ignored in Daemon.run; no hidden __pii-scan/__squelch/__shot-* hooks
-    // @port BromureAC.static main() h=b92f6d3ecd654150 @d3ebbda2
-    // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split
-    // @port BromureAC.static var configuration h=6859cbda432af2b9 @d3ebbda2
+    // partial: SIGPIPE is ignored in Daemon.run; no hidden __pii-scan/__squelch/__shot-* hooks; no BROMURE_AC_REMOTE_HOST (the CLI through a fat-client tunnel: the Mac is the client)
+    // @port BromureAC.static main() h=ec8d38fcfa574e18 @419a8ef59
+    // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split; none of the fat-client client commands (__fatclient-proxy among them)
+    // @port BromureAC.static var configuration h=d29a9944d3904059 @419a8ef59
     static func main() async {
         // Hidden verification hooks, before parsing (macOS's main too).
         if HiddenHooks.run(Array(CommandLine.arguments.dropFirst())) { return }
@@ -704,6 +704,7 @@ struct Account: AsyncParsableCommand {
             return
         }
         print("signed in: \(j["org"]?.stringValue ?? "bromure.io")   device: \(j["deviceId"]?.stringValue ?? "?")   api: \(j["apiBase"]?.stringValue ?? "?")")
+        if let p = j["problem"]?.stringValue { print("problem: \(p)") }
         if let s = j["lastSync"] {
             let n = { (k: String) in s[k].flatMap { if case .number(let v) = $0 { return Int(v) } else { return nil } } ?? 0 }
             if let e = s["error"]?.stringValue {
@@ -811,12 +812,23 @@ struct Account: AsyncParsableCommand {
 
     struct SignOut: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            commandName: "sign-out", abstract: "Forget this server's account here (the keys it brought in stay).")
+            commandName: "sign-out",
+            abstract: "Sign this server out of bromure.io (the keys it brought in stay).",
+            discussion: """
+                The server's device is revoked on bromure.io first, and forgotten here only once bromure.io \
+                confirmed it: if that can't be done, the server stays signed in and this says why. When \
+                bromure.io no longer accepts the server's credentials (they expired, or the device was \
+                revoked there), a second sign-out forgets the account on this server only.
+                """)
         // @port-skip linux-only: CLI
         func run() async throws {
             let r = try client().request("POST", "/account/sign-out")
             try check(r, "sign-out")
-            print("Signed out. The keys it brought in stay; remove one with `remote rm-key`.")
+            if let note = r.json["note"]?.stringValue {
+                print("\(note) The keys it brought in stay; remove one with `remote rm-key`.")
+            } else {
+                print("Signed out. The keys it brought in stay; remove one with `remote rm-key`.")
+            }
         }
     }
 

@@ -6,7 +6,7 @@ extension Daemon {
     /// `GET|DELETE /trace`, `GET /trace/records`, `GET /trace/body`
     /// (`?profile=`, `?id=&kind=`); nil for any other path.
     // @port ACAutomationServer.handleTraceRoute(fd: Int32, method: String, path: String) h=7f3400e099ae79fd @7dd92fdf
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?") || p.hasPrefix("/trace/"): h=d65fdfd9969838f9 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool, testLoginUser: String?) / case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?") || p.hasPrefix("/trace/"): h=d65fdfd9969838f9 @f127f8ab
     // partial: DELETE /trace case
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onClearTrace h=36666f0771dbb649 @d3ebbda2
     func traceRoute(_ method: String, _ path: String) async -> ControlResponse? {

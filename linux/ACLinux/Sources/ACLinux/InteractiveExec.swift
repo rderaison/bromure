@@ -16,7 +16,7 @@ nonisolated(unsafe) var gWinchPipe: Int32 = -1
 // @port-skip linux-only: the namespace; run carries the @port line
 public enum InteractiveExec {
     // partial: no view/window, guiConsent or sizePassive (no host terminal views on Linux); a stream that ends without an exit frame is an error (exit 1) rather than a silent 0
-    // @port InteractiveExec.static run(client: ControlClient, vm: String, command: String, view: String?, window: Int?, guiConsent: Bool, sizePassive: Bool, overlayTrigger: UInt8?, onOverlay: (()->[UInt8])?) h=817622aa69512a47 @94eb37f3
+    // @port InteractiveExec.static run(client: ControlClient, vm: String, command: String, view: String?, window: Int?, guiConsent: Bool, sizePassive: Bool, overlayTrigger: UInt8?, onOverlay: (()->[UInt8])?) h=6790f758280009a8 @419a8ef59
     /// `overlayTrigger`: a lone byte (the remote menu's Ctrl-]) caught here,
     /// never framed to the guest, that calls `onOverlay`; its non-empty
     /// return is written to the guest (Ctrl-b d to detach), an empty one
@@ -28,6 +28,20 @@ public enum InteractiveExec {
             _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
             return (ws.ws_col == 0 ? 80 : Int(ws.ws_col), ws.ws_row == 0 ? 24 : Int(ws.ws_row))
         }
+        // Watch for resizes BEFORE reading the size (macOS's run does the
+        // same): one that arrives while the stream opens (a terminal laid
+        // out a moment after it was created) was ignored, and the far pty
+        // kept the first size.
+        var p: [Int32] = [-1, -1]
+        guard pipe(&p) == 0 else { throw ValidationError("pipe: \(String(cString: strerror(errno)))") }
+        for e in p { _ = fcntl(e, F_SETFL, O_NONBLOCK); _ = fcntl(e, F_SETFD, FD_CLOEXEC) }
+        defer { signal(SIGWINCH, SIG_DFL); gWinchPipe = -1; close(p[0]); close(p[1]) }
+        gWinchPipe = p[1]
+        signal(SIGWINCH) { _ in
+            var one: UInt8 = 1
+            _ = write(gWinchPipe, &one, 1)
+        }
+
         let (cols, rows) = size()
         let body: JSONValue = .object(["command": .string(command), "interactive": .bool(true),
                                        "cols": .number(Double(cols)), "rows": .number(Double(rows))])
@@ -46,15 +60,11 @@ public enum InteractiveExec {
         }
         defer { if haveTTY { tcsetattr(STDIN_FILENO, TCSANOW, &orig) } }
 
-        var p: [Int32] = [-1, -1]
-        guard pipe(&p) == 0 else { throw ValidationError("pipe: \(String(cString: strerror(errno)))") }
-        for e in p { _ = fcntl(e, F_SETFL, O_NONBLOCK); _ = fcntl(e, F_SETFD, FD_CLOEXEC) }
-        defer { signal(SIGWINCH, SIG_DFL); gWinchPipe = -1; close(p[0]); close(p[1]) }
-        gWinchPipe = p[1]
-        signal(SIGWINCH) { _ in
-            var one: UInt8 = 1
-            _ = write(gWinchPipe, &one, 1)
-        }
+        // The size may have moved while the stream opened, unsignalled if
+        // this process wasn't yet the terminal's foreground: look again.
+        var sent = (cols, rows)
+        var one: UInt8 = 1
+        _ = write(p[1], &one, 1)
 
         var stdinFD: Int32 = STDIN_FILENO
         var inbuf: [UInt8] = []
@@ -67,8 +77,13 @@ public enum InteractiveExec {
             if poll(&fds, 3, -1) < 0 { if errno == EINTR { continue }; break }
             if fds[2].revents != 0 {
                 while read(p[0], &rbuf, rbuf.count) > 0 {}
-                let (c, r) = size()
-                PTYFrame.send(fd, PTYFrame.resize, PTYFrame.resizePayload(cols: c, rows: r))
+                var ws = winsize()
+                _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
+                let now = (Int(ws.ws_col), Int(ws.ws_row))
+                if now.0 > 0, now.1 > 0, now != sent {
+                    sent = now
+                    PTYFrame.send(fd, PTYFrame.resize, PTYFrame.resizePayload(cols: now.0, rows: now.1))
+                }
             }
             if fds[0].revents != 0 {
                 let r = read(stdinFD, &rbuf, rbuf.count)
@@ -77,6 +92,7 @@ public enum InteractiveExec {
                         let forward = onOverlay()
                         if forward.isEmpty {
                             let (c, rows) = size()
+                            sent = (c, rows)
                             PTYFrame.send(fd, PTYFrame.resize, PTYFrame.resizePayload(cols: c, rows: rows))
                         } else {
                             PTYFrame.send(fd, PTYFrame.data, forward)
