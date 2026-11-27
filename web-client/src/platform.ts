@@ -59,7 +59,7 @@ export interface TunnelBridge {
   flowClose(id: number): void;
 }
 
-/** Main process ⇄ renderer for the built-in browser: its SOCKS proxy hands
+/** Main process ⇄ renderer for the built-in browser: its loopback proxy hands
  *  each connection into the workspace subnet over as a flow, exactly like
  *  TunnelBridge's (open the SSH channel, answer `flowOpened`, then bytes). */
 export interface BrowserBridge {

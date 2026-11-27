@@ -1,6 +1,6 @@
 // Pure helpers of the built-in browser (electron/browser.ts): the PAC, the
-// SOCKS5 handshake, the address bar's text → URL. No Electron here, so the
-// unit tests can load it.
+// authenticated proxy's request parsing, the address bar's text → URL. No
+// Electron here, so the unit tests can load it.
 
 import type net from 'node:net';
 
@@ -19,40 +19,90 @@ export function validSubnet(c: string): boolean {
   return !!m && isIPv4(m[1]) && +m[2] >= 16 && +m[2] <= 30;
 }
 
-/** FatClientPAC.script: the subnet to our SOCKS server, the rest DIRECT. */
-export function pacScript(subnet: string, socksPort: number): string {
-  if (!validSubnet(subnet) || !socksPort) return 'function FindProxyForURL(url, host) { return "DIRECT"; }';
+/** FatClientPAC.script: the subnet to our proxy, the rest DIRECT. */
+export function pacScript(subnet: string, proxyPort: number): string {
+  if (!validSubnet(subnet) || !proxyPort) return 'function FindProxyForURL(url, host) { return "DIRECT"; }';
   const [net4, bits] = subnet.split('/');
   const m = bits === '0' ? 0 : (~0 << (32 - +bits)) >>> 0;
   const mask = [24, 16, 8, 0].map(s => (m >>> s) & 255).join('.');
-  return `function FindProxyForURL(url, host) {\n  if (isInNet(host, "${net4}", "${mask}")) return "SOCKS5 127.0.0.1:${socksPort}";\n  return "DIRECT";\n}\n`;
+  return `function FindProxyForURL(url, host) {\n  if (isInNet(host, "${net4}", "${mask}")) return "PROXY 127.0.0.1:${proxyPort}";\n  return "DIRECT";\n}\n`;
 }
 
-/** SOCKS5 (RFC 1928), no authentication, CONNECT only; IPv4 or a domain
- *  that is an IPv4 literal. `onTarget` gets ip/port and answers yes/no. */
-export function socksHandshake(sock: net.Socket, onTarget: (ip: string, port: number, rest: Buffer) => void) {
-  let buf = Buffer.alloc(0), stage = 0;
-  const fail = (code: number) => { try { sock.end(Buffer.from([5, code, 0, 1, 0, 0, 0, 0, 0, 0])); } catch {} };
+// ── The loopback HTTP proxy (CWE-306) ──────────────────────────────────────
+// It was SOCKS5, which Chromium can only speak unauthenticated: any process
+// on the machine — another local user's included — could CONNECT through it
+// and reach the workspace VMs with this user's SSH identity. An HTTP proxy
+// can demand credentials: every request must carry Proxy-Authorization with
+// a random per-session secret that only main knows and only the browser
+// page's session answers (its `login` event).
+
+export const PROXY_USER = 'bromure';
+
+export type ProxyRequest =
+  | { kind: 'denied'; reply: string }                       // answer it and close
+  | { kind: 'connect' | 'http'; ip: string; port: number; initial: Buffer };
+
+const reply = (status: string, extra = '') =>
+  `HTTP/1.1 ${status}\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n`;
+export const PROXY_407 = reply('407 Proxy Authentication Required', `Proxy-Authenticate: Basic realm="${PROXY_USER}"\r\n`);
+export const PROXY_403 = reply('403 Forbidden');
+export const PROXY_400 = reply('400 Bad Request');
+export const PROXY_502 = reply('502 Bad Gateway');
+export const PROXY_200 = 'HTTP/1.1 200 Connection established\r\n\r\n';
+
+/** Constant-time string comparison. */
+function same(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+/** Parse one proxy request head (`head` = bytes up to and including the
+ *  blank line, `rest` = what followed). Authorizes it against `secret`, then:
+ *  CONNECT ip:port → a tunnel; `METHOD http://ip[:port]/path` → the request
+ *  rewritten to origin form for the server, proxy headers stripped and
+ *  `Connection: close` (each proxy connection then carries one request to
+ *  one host — Chromium reuses proxy connections across hosts otherwise),
+ *  except for an Upgrade (WebSocket) request, which keeps its Connection. */
+export function parseProxyRequest(head: string, rest: Buffer, secret: string): ProxyRequest {
+  const lines = head.split('\r\n');
+  const [method = '', target = '', version = ''] = (lines[0] ?? '').split(' ');
+  if (!/^HTTP\/1\.[01]$/.test(version) || !/^[A-Z]+$/.test(method)) return { kind: 'denied', reply: PROXY_400 };
+  const headers = lines.slice(1).filter(l => l !== '');
+  const get = (name: string) => headers.find(h => h.toLowerCase().startsWith(name + ':'))?.slice(name.length + 1).trim();
+  const auth = get('proxy-authorization') ?? '';
+  const want = 'Basic ' + Buffer.from(`${PROXY_USER}:${secret}`).toString('base64');
+  if (!secret || !same(auth, want)) return { kind: 'denied', reply: PROXY_407 };
+  if (method === 'CONNECT') {
+    const m = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/.exec(target);
+    if (!m) return { kind: 'denied', reply: PROXY_403 };
+    return { kind: 'connect', ip: m[1], port: +m[2], initial: rest };
+  }
+  const u = /^http:\/\/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?(\/[^ ]*)?$/.exec(target);
+  if (!u) return { kind: 'denied', reply: PROXY_403 };
+  const upgrade = !!get('upgrade');
+  const kept = headers.filter(h => {
+    const n = h.slice(0, h.indexOf(':')).trim().toLowerCase();
+    if (n === 'proxy-authorization' || n === 'proxy-connection') return false;
+    if (!upgrade && (n === 'connection' || n === 'keep-alive')) return false;
+    return true;
+  });
+  if (!upgrade) kept.push('Connection: close');
+  const out = [`${method} ${u[3] ?? '/'} ${version}`, ...kept, '', ''].join('\r\n');
+  return { kind: 'http', ip: u[1], port: u[2] ? +u[2] : 80, initial: Buffer.concat([Buffer.from(out, 'latin1'), rest]) };
+}
+
+/** Read a request head off `sock` (≤ 32 KiB), then hand it over. */
+export function readProxyHead(sock: net.Socket, done: (head: string, rest: Buffer) => void) {
+  let buf = Buffer.alloc(0);
   const onData = (d: Buffer) => {
     buf = Buffer.concat([buf, d]);
-    if (buf.length > 600) { sock.destroy(); return; }
-    if (stage === 0) {
-      if (buf.length < 2 || buf.length < 2 + buf[1]) return;
-      if (buf[0] !== 5 || !buf.subarray(2, 2 + buf[1]).includes(0)) { sock.end(Buffer.from([5, 0xff])); return; }
-      sock.write(Buffer.from([5, 0]));
-      buf = buf.subarray(2 + buf[1]); stage = 1;
-    }
-    if (buf.length < 5) return;
-    if (buf[0] !== 5) { sock.destroy(); return; }
-    if (buf[1] !== 1) { sock.off('data', onData); fail(7); return; }   // CONNECT only
-    let ip = '', end = 0;
-    if (buf[3] === 1) { if (buf.length < 10) return; ip = [...buf.subarray(4, 8)].join('.'); end = 8; }
-    else if (buf[3] === 3) { const n = buf[4]; if (buf.length < 5 + n + 2) return; ip = buf.subarray(5, 5 + n).toString('latin1'); end = 5 + n; }
-    else { sock.off('data', onData); fail(8); return; }
-    const p = buf.readUInt16BE(end);
+    const end = buf.indexOf('\r\n\r\n');
+    if (end < 0) { if (buf.length > 32 * 1024) { sock.off('data', onData); sock.destroy(); } return; }
     sock.off('data', onData);
     sock.pause();
-    onTarget(ip, p, buf.subarray(end + 2));
+    done(buf.subarray(0, end + 4).toString('latin1'), buf.subarray(end + 4));
   };
   sock.on('data', onData);
 }
