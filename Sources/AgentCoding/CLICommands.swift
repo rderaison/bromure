@@ -1284,7 +1284,7 @@ struct TraceList: ParsableCommand {
                   + pad(String(r["status"] as? Int ?? 0), 7)
                   + pad(kb(r["requestBytes"] as? Int ?? 0), 8)
                   + pad(kb(r["responseBytes"] as? Int ?? 0), 8)
-                  + pad("\(Int(r["latencyMs"] as? Double ?? 0))ms", 8)
+                  + pad("\((r["latencyMs"] as? Double).flatMap { Int(exactly: $0.rounded()) } ?? 0)ms", 8)
                   + flags.joined(separator: " "))
         }
         if recs.count > limit { print("… \(recs.count - limit) more (use --limit).") }

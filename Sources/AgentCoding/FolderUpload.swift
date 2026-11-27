@@ -180,10 +180,13 @@ enum FolderUpload {
     /// size since long before `rename`.
     private static func guestSize(_ path: String, op: FileOp) async -> Int? {
         guard let reply = try? await op(["op": "read", "path": path, "offset": 0, "length": 1]) else { return nil }
-        // As DisplayFileReader reads it: an agent's JSON number, or an Int
-        // from an in-process file service.
+        // An agent's JSON number, or an Int from an in-process file service.
+        // The guest's word: a size Int can't hold (1e100, NaN, a fraction,
+        // a negative) is no size, never a trap (CWE-20).
         let size = reply["size"]
-        return (size as? Int) ?? (size as? Int64).map(Int.init) ?? (size as? Double).map(Int.init)
+        let n = (size as? Int) ?? (size as? Int64).flatMap { Int(exactly: $0) }
+            ?? (size as? Double).flatMap { Int(exactly: $0) }
+        return n.flatMap { $0 >= 0 ? $0 : nil }
     }
 
     /// The filesystem refused: EPERM (1) or EACCES (13), read from the
