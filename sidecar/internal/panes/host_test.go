@@ -356,6 +356,45 @@ func TestSizeAuthority(t *testing.T) {
 	}
 }
 
+// With only passive clients (every fat-client view attaches ignore-size),
+// the latest of them sizes the window, as in tmux.
+func TestPassiveClientsSizeWhenAlone(t *testing.T) {
+	h := NewHost()
+	defer h.Close()
+	w, err := h.NewWindow(childReq("cat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect := func(step string, c, r int) {
+		t.Helper()
+		if g, _ := h.Get(w.Index); g.Width != c || g.Height != r {
+			t.Fatalf("%s: window %dx%d, want %dx%d", step, g.Width, g.Height, c, r)
+		}
+	}
+	tick := func() { time.Sleep(2 * time.Millisecond) }
+	a, _ := h.Attach(w.Index, 150, 45, true)
+	defer a.Close()
+	go io.Copy(io.Discard, a)
+	expect("lone passive A", 150, 45)
+	tick()
+	a.Resize(160, 50)
+	expect("A resized", 160, 50)
+	tick()
+	b, _ := h.Attach(w.Index, 60, 20, true)
+	defer b.Close()
+	go io.Copy(io.Discard, b)
+	expect("passive B latest", 60, 20)
+	tick()
+	c, _ := h.Attach(w.Index, 100, 30, false)
+	go io.Copy(io.Discard, c)
+	expect("active C rules", 100, 30)
+	tick()
+	b.Resize(70, 22)
+	expect("passive B ignored beside C", 100, 30)
+	c.Close()
+	expect("C gone, B latest", 70, 22)
+}
+
 func TestAttachRepaintLiveAndExit(t *testing.T) {
 	h := NewHost()
 	defer h.Close()

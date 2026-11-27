@@ -477,6 +477,10 @@ struct ProfileEditorView: View {
     static let idealWindowSize = CGSize(width: 880, height: 840)
     #endif
     @State private var draft: Profile
+    /// Asks, as /ship goes back on in a workspace an earlier build switched
+    /// off, whether to remove the "off" entries that build left in Claude
+    /// Code's settings (Profile.claudeShipLegacyOff).
+    @State private var askShipReclaim = false
     /// The saved home size, so picking the current size back leaves the
     /// profile unchanged (no restart prompt for a no-op).
     private var savedHomeImageGB: Int?
@@ -1402,7 +1406,21 @@ struct ProfileEditorView: View {
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
             },
-            health: { provider in subscriptionHealth?(provider) })
+            health: { provider in subscriptionHealth?(provider) },
+            // Fat client: the custom server is tested by the remote, with
+            // the key of the configuration this pane edits.
+            probeServer: (localModelsRemoteAny as? RemoteModelBackend).map { remote in
+                let scope = modelsProbeScope
+                return { base, key in try await remote.probeServer(base, key, scope) }
+            })
+    }
+
+    /// The configuration the Models pane edits, for a custom-server probe.
+    private var modelsProbeScope: EngineProbeScope {
+        switch resolvedModelsPane {
+        case .globalStore, .remoteGlobal: return .global
+        case .workspace: return .workspace(draft.id)
+        }
     }
     #endif
 
@@ -1432,15 +1450,19 @@ struct ProfileEditorView: View {
 
     /// Ask the custom engine for its /v1/models ids (macOS only — the iOS
     /// editor keeps the free-typed field; ExternalEngine isn't in its
-    /// shared subset). On the fat client this probes from the CLIENT Mac,
-    /// so a server-loopback URL can fail here yet work at launch — the
-    /// typed-id fallback covers that.
+    /// shared subset). On the fat client the SERVER asks (the machine whose
+    /// launches reach it); the client never contacts the engine itself.
     private func probeExternalEngineModels() {
         #if os(macOS)
         guard let base = draft.localEngineBaseURL else { return }
         let key = draft.localEngineAPIKey
+        let id = draft.id
+        let remote = localModelsRemoteAny as? RemoteModelBackend
         Task {
-            if let models = try? await ExternalEngine.listModels(base: base, apiKey: key),
+            let probed: [String]?
+            if let remote { probed = try? await remote.probeServer(base.absoluteString, key, .workspace(id)) }
+            else { probed = try? await ExternalEngine.listModels(base: base, apiKey: key) }
+            if let models = probed,
                !models.isEmpty {
                 await MainActor.run { externalEngineModels = models }
             }
@@ -4595,6 +4617,29 @@ struct ProfileEditorView: View {
                         Toggle("Tell the agent when policy blocks it",
                                isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }))
                     }
+                    settingRow(caption: "Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge.",
+                               info: "Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts.") {
+                        Toggle("Allow /ship and /steward",
+                               isOn: Binding(get: { !draft.claudeShipDisabled }, set: { on in
+                                   if on, draft.claudeShipDisabled, draft.claudeShipLegacyOff { askShipReclaim = true }
+                                   draft.claudeShipDisabled = !on
+                                   // A re-enable not applied yet doesn't outlive the switch going off.
+                                   if !on { draft.claudeShipReclaimToken = nil }
+                               }))
+                        .confirmationDialog("Turn /ship and /steward back on in Claude Code too?",
+                                            isPresented: $askShipReclaim, titleVisibility: .visible) {
+                            // The safe answer first (the default).
+                            Button("Leave Claude Code's Settings") { draft.claudeShipLegacyOff = false }
+                            Button("Turn Them Back On") {
+                                // Only while the switch is still on: the answer is for this re-enable.
+                                guard !draft.claudeShipDisabled else { return }
+                                draft.claudeShipReclaimToken = UUID().uuidString
+                                draft.claudeShipLegacyOff = false
+                            }
+                        } message: {
+                            Text("An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself.")
+                        }
+                    }
                     settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
                                info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {
                         Picker("Agent watchdog", selection: $draft.watchdogMode) {
@@ -5569,6 +5614,19 @@ struct RemoteModelBackend {
     var installedRepos: () -> [String]
     var removeRepo: (_ repo: String) -> Void
     var installedSizeGB: (_ repo: String) -> Double?
+    /// "Test Connection" for a custom inference server (vLLM, Ollama, …): the
+    /// SERVER probes it — the machine whose launches use it, from its own
+    /// address — and returns the model ids or throws its error. The client
+    /// never contacts that server itself.
+    /// `scope`: the configuration being tested, whose stored key a redacted
+    /// one stands for.
+    var probeServer: (_ baseURL: String, _ apiKey: String?, _ scope: EngineProbeScope) async throws -> [String]
+}
+
+/// A custom-server probe that failed on the remote (its reason, verbatim).
+struct RemoteProbeError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 struct LocalModelsSettingsView: View {
@@ -5584,6 +5642,8 @@ struct LocalModelsSettingsView: View {
     /// Non-nil on the fat client: manage the REMOTE server's models instead of
     /// this machine's (RAM gate, downloads, installed state all go remote).
     var remote: RemoteModelBackend? = nil
+    /// The workspace whose engine this is (a remote probe uses its stored key).
+    var profileID: UUID? = nil
 
     private var hostGB: Int { remote?.unifiedMemGB() ?? HostMemory.unifiedMemoryGB() }
     // The curated catalog is a static list, identical on host and client, so
@@ -5690,9 +5750,13 @@ struct LocalModelsSettingsView: View {
         guard let base = normalizedEngineBase else { return }
         engineProbe = .probing
         let key = engineKey
+        let remote = remote
         Task {
             do {
-                let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+                // Fat client: the server tests it (its network, its address).
+                let models: [String]
+                if let remote { models = try await remote.probeServer(base.absoluteString, key, .workspace(profileID)) }
+                else { models = try await ExternalEngine.listModels(base: base, apiKey: key) }
                 await MainActor.run { engineModels = models; engineProbe = .ok(models.count) }
             } catch {
                 await MainActor.run { engineModels = []; engineProbe = .failed(error.localizedDescription) }

@@ -22,6 +22,7 @@ import { Markdown } from './Markdown';
 import { openRunWindow } from './RunWindow';
 import { openAutomationEditor, confirmDeleteAutomation } from './AutomationEditor';
 import { openTaskReview } from './TaskReview';
+import { CodeReviewOverview, CodeReviewFindings, useFindingActions, SEVERITIES, sevTint, sevName, isOpen, type FindingsQuery } from './CodeReview';
 import './boards.css';
 
 export type HubTab = 'automations' | 'runs' | 'security';
@@ -37,6 +38,9 @@ export function AutomationHubView({ host, initialTab }: { host: RemoteHost; init
   const [chooser, setChooser] = useState(false);
   const [watchEdit, setWatchEdit] = useState<{ draft: any; isNew: boolean } | null>(null);
   const [repoFilter, setRepoFilter] = useState<string | null>(null);
+  const [pipelineRepo, setPipelineRepo] = useState<string | null>(null);
+  const [fq, setFq] = useState<FindingsQuery>({ status: 'open', severity: '', search: '', selected: null });
+  const setQ = (p: Partial<FindingsQuery>) => setFq(q => ({ ...q, ...p }));
   useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]); // eslint-disable-line
   useEffect(() => { if (!flash) return; const t = setTimeout(() => setFlash(null), 8000); return () => clearTimeout(t); }, [flash]);
 
@@ -63,6 +67,10 @@ export function AutomationHubView({ host, initialTab }: { host: RemoteHost; init
     deleteWatch: (w: any) => confirm({ title: `Stop watching ${w.repo}?`, message: 'Its scan automations are removed. Findings stay.', buttons: [{ label: 'Stop Watching', role: 'destructive', action: () => host.send('DELETE', `/watches/${seg(w.id)}`) }, { label: 'Cancel', role: 'cancel' }] }),
     editWatch: (w: any) => setWatchEdit({ draft: w, isNew: false }),
   };
+  const fa = useFindingActions(host, st ?? ({} as RemoteState), showFlash);
+  // From the overview: a fresh selection — the one it names, else none (a
+  // finding picked earlier isn't what a tile asked to see).
+  const showFindings = (p: Partial<FindingsQuery>, repo?: string | null) => { setQ({ selected: null, ...p }); if (repo !== undefined) setRepoFilter(repo); setTab('security'); setSecTab('findings'); };
   const newWatch = () => {
     const ws = st?.workspaces ?? [];
     const first = ws.find(w => (w as any).hasGitHubToken) ?? ws[0];
@@ -109,10 +117,13 @@ export function AutomationHubView({ host, initialTab }: { host: RemoteHost; init
         {!st ? null
           : tab === 'runs' ? <RunsBoard st={st} actions={actions} onNew={() => setChooser(true)} />
           : tab === 'automations' ? <HomeTab st={st} actions={actions} onChoose={choose} onShowRuns={() => setTab('runs')}
-                                             onOpenWatch={w => { setRepoFilter(w.repo); setTab('security'); setSecTab('findings'); }} />
+                                             onOpenWatch={w => { setQ({ selected: null }); setRepoFilter(w.repo); setTab('security'); setSecTab('findings'); }} />
           : watches.length === 0 ? <SecurityWelcome onNew={newWatch} />
-          : secTab === 'overview' ? <Overview st={st} watches={watches} onFindings={() => setSecTab('findings')} onScan={actions.scanNow} onNew={newWatch} />
-          : secTab === 'findings' ? <Findings host={host} st={st} repoFilter={repoFilter} setRepoFilter={setRepoFilter} showFlash={showFlash} onOpenTask={id => openTaskReview(wm, host, id)} />
+          : secTab === 'overview' ? <CodeReviewOverview st={st} watches={watches} fa={fa} repo={pipelineRepo} setRepo={setPipelineRepo}
+                                                       showFindings={showFindings} showRepositories={() => setSecTab('repositories')} showRuns={() => setTab('runs')}
+                                                       openRun={actions.openRun} acknowledge={actions.acknowledge} />
+          : secTab === 'findings' ? <CodeReviewFindings st={st} fa={fa} q={fq} setQ={setQ} repoFilter={repoFilter} setRepoFilter={setRepoFilter}
+                                                       onOpenTask={id => openTaskReview(wm, host, id)} openRun={actions.openRun} />
           : <Repositories st={st} watches={watches} actions={actions} onNew={newWatch} />}
       </div>
       {chooser && (
@@ -415,12 +426,6 @@ function AutomationRow({ a, st, tz, actions, onShowRuns, live }: { a: Automation
   );
 }
 
-const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
-const sevTint = (s: string) => ({ critical: 'var(--red)', high: 'var(--orange)', medium: 'var(--yellow)', low: 'var(--blue)', info: 'var(--gray)' } as Record<string, string>)[s] ?? 'var(--gray)';
-const sevName = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : '';
-const statusName = (s: string) => ({ new: 'New', triaged: 'Backlog', inProgress: 'In progress', inReview: 'In review', fixed: 'Fixed', duplicate: 'Duplicate', dismissed: 'Dismissed' } as Record<string, string>)[s] ?? s;
-const statusTint = (s: string) => ({ new: 'var(--label-secondary)', triaged: 'var(--gray)', inProgress: 'var(--blue)', inReview: 'var(--purple)', fixed: 'var(--green)' } as Record<string, string>)[s] ?? 'var(--label-secondary)';
-const isOpen = (s: string) => ['new', 'triaged', 'inProgress', 'inReview'].includes(s);
 const focusName = (f: string) => f === 'security' ? 'Security vulnerabilities' : f === 'bugs' ? 'Bugs' : 'Security and bugs';
 
 function scanSummary(w: any, tz?: string) {
@@ -519,133 +524,6 @@ function SecurityWelcome({ onNew }: { onNew: () => void }) {
           ))}
         </div>
         <Button size="large" variant="prominent" icon="plus" onClick={onNew}>Watch a Repository…</Button>
-      </div>
-    </div>
-  );
-}
-
-function Overview({ st, watches, onFindings, onScan, onNew }: { st: RemoteState; watches: any[]; onFindings: () => void; onScan: (w: any) => void; onNew: () => void }) {
-  const findings = (st.automations?.findings ?? []) as any[];
-  const open = findings.filter(f => isOpen(f.status));
-  const pipeline = ['new', 'triaged', 'inProgress', 'inReview', 'fixed'];
-  return (
-    <div className="bx-ah-scroll">
-      <div className="bx-ah-home">
-        <div className="bx-ah-tiles">
-          <div className="bx-ah-tile"><div className="bx-ah-tile-n">{open.length}</div><div className="secondary">Open findings</div></div>
-          {SEVERITIES.slice(0, 3).map(s => <div key={s} className="bx-ah-tile" style={{ ['--sev' as any]: sevTint(s) }}><div className="bx-ah-tile-n" style={{ color: sevTint(s) }}>{open.filter(f => f.severity === s).length}</div><div className="secondary">{sevName(s)}</div></div>)}
-          <div className="bx-ah-tile"><div className="bx-ah-tile-n" style={{ color: 'var(--green)' }}>{findings.filter(f => f.status === 'fixed').length}</div><div className="secondary">Fixed</div></div>
-        </div>
-        <div className="bx-ah-card">
-          <div className="bx-ah-section-title">Pipeline</div>
-          <div className="bx-ah-pipeline">{pipeline.map(s => { const n = findings.filter(f => f.status === s).length; return <div key={s} style={{ flex: Math.max(n, 0.4), background: statusTint(s) }} title={`${statusName(s)}: ${n}`}><span>{statusName(s)} {n}</span></div>; })}</div>
-          <Button size="small" onClick={onFindings}>Show Findings</Button>
-        </div>
-        <div className="bx-ah-card">
-          <div className="bd-hrow"><span className="bx-ah-section-title">Repositories</span><span className="spacer" /><Button size="small" icon="plus" onClick={onNew}>Watch a Repository…</Button></div>
-          {watches.map(w => (
-            <div key={w.id} className="bd-hrow" style={{ gap: 10, padding: '6px 0' }}>
-              <SF name="doc.text.magnifyingglass" size={13} color="var(--green)" /><span style={{ fontWeight: 600 }}>{w.repo}</span>
-              <span className="secondary truncate" style={{ fontSize: 11.5 }}>{scanSummary(w, st.automations?.timeZone)}</span><span className="spacer" />
-              <SeverityCounts findings={findings.filter(f => f.watchID === w.id)} />
-              <Button size="small" icon="play.fill" onClick={() => onScan(w)}>Scan Now</Button>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Findings({ host, st, repoFilter, setRepoFilter, showFlash, onOpenTask }: {
-  host: RemoteHost; st: RemoteState; repoFilter: string | null; setRepoFilter: (r: string | null) => void; showFlash: (t: string, e?: boolean) => void; onOpenTask: (id: string) => void;
-}) {
-  const all = (st.automations?.findings ?? []) as any[];
-  const [filter, setFilter] = useState<'open' | 'all'>('open');
-  const [sel, setSel] = useState<string | null>(null);
-  const openMenu = useMenu();
-  const ctx = useHostCtx();
-  const list = all.filter(f => (filter === 'all' || isOpen(f.status)) && (!repoFilter || f.repo === repoFilter))
-    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
-  const f = all.find(x => x.id === sel) ?? list[0];
-  const repos = [...new Set(all.map(x => x.repo))].sort();
-  const handOver = async (path: string, body: any, success: string, failure: (why: string) => string, retry: () => void) => {
-    try {
-      const r = await host.request<any>('POST', path, body, { allowError: true } as any);
-      host.refreshSoon();
-      if (r?.flagged) {
-        confirm({ title: "This finding's text was flagged",
-          message: `The prompt-injection screen flagged it (${r.warning ?? r.error ?? ''}). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.`,
-          buttons: [{ label: 'Hand It Over Anyway', role: 'destructive', action: retry }, { label: 'Cancel', role: 'cancel' }] });
-      } else if (r?.error) showFlash(failure(r.error === 'not found' ? 'the server runs an older Bromure — update it to hand findings to a session' : r.error), true);
-      else showFlash(success);
-    } catch { showFlash(failure("the server didn't answer"), true); }
-  };
-  const fix = (id: string, confirmed = false) => handOver(`/findings/${seg(id)}/fix`, confirmed ? { confirmed: true } : {},
-    "Fix started — an agent is working on it in its own branch. It moves to In review when it's ready.", w => `Couldn't start the fix: ${w}`, () => fix(id, true));
-  const route = (id: string, room?: string, confirmed = false) => handOver(`/findings/${seg(id)}/switchboard`, { ...(room ? { room } : {}), ...(confirmed ? { confirmed: true } : {}) },
-    'Asked the Switchboard — it will propose a session and wait for your OK.', w => `Couldn't ask the Switchboard: ${w}`, () => route(id, room, true));
-  const ask = (id: string, s: { id: string; label: string }, confirmed = false) => handOver(`/findings/${seg(id)}/session`, { session: s.id, confirmed },
-    `Sent to ${s.label} — it works on the fix in its own session.`, w => `Couldn't send it to ${s.label}: ${w}`, () => ask(id, s, true));
-  const setStatus = (id: string, status: string) => host.send('POST', `/findings/${seg(id)}/status`, { status });
-  const fixMenu = (e: React.MouseEvent, x: any) => {
-    const items: MenuItem[] = [{ label: 'Start a Fix Session', action: () => fix(x.id) }, { separator: true }, { label: 'Ask the Switchboard', action: () => route(x.id) }];
-    for (const r of st.agentRooms ?? []) items.push({ label: `Ask #${r.name}'s Switchboard`, action: () => route(x.id, r.id) });
-    const sessions = (st.agentSessions ?? []).filter(s => !s.archivedAt && (s as any).role !== 'switchboard').slice(0, 20);
-    if (sessions.length) { items.push({ separator: true }, { header: 'Ask a session' }); for (const s of sessions) items.push({ label: s.nickname ? '@' + s.nickname : `“${s.title}”`, action: () => ask(x.id, { id: s.id, label: s.nickname ? '@' + s.nickname : `“${s.title}”` }) }); }
-    openMenu((e.currentTarget as HTMLElement).getBoundingClientRect(), items);
-  };
-  void ctx;
-  return (
-    <div className="bx-ah-findings">
-      <div className="bx-ah-flist">
-        <div className="bd-hrow" style={{ gap: 8, padding: '0 4px 8px' }}>
-          <Segmented value={filter} onChange={setFilter} options={[{ value: 'open', label: 'Open' }, { value: 'all', label: 'All' }]} />
-          <span className="spacer" />
-          <PopUp value={repoFilter ?? ''} onChange={v => setRepoFilter(v || null)} options={[{ value: '', label: 'All repositories' }, ...repos.map(r => ({ value: r, label: r }))]} />
-        </div>
-        {list.length === 0 ? <div className="bx-rv-empty">{filter === 'open' ? 'No open findings.' : 'No findings yet.'}</div>
-          : list.map(x => (
-            <button key={x.id} className={cx('bx-ah-frow', f?.id === x.id && 'on')} onClick={() => setSel(x.id)}>
-              <span className="bx-ah-sev" style={{ ['--sev' as any]: sevTint(x.severity) }}>{sevName(x.severity)}</span>
-              <span className="bd-stack" style={{ gap: 2, flex: 1, minWidth: 0 }}>
-                <span className="truncate" style={{ fontWeight: 600, fontSize: 12.5 }}>{x.title}</span>
-                <span className="secondary truncate" style={{ fontSize: 11 }}>{x.repo}{x.file ? ` · ${x.file}${x.line ? ':' + x.line : ''}` : ''}</span>
-              </span>
-              <span className="bx-ah-fstatus"><span className="dot" style={{ width: 6, height: 6, background: statusTint(x.status) }} />{statusName(x.status)}</span>
-            </button>
-          ))}
-      </div>
-      <div className="bx-ah-fdetail">
-        {!f ? <div className="bx-rv-empty" style={{ margin: 'auto' }}>Select a finding</div> : (
-          <div className="bd-stack selectable" style={{ gap: 12 }}>
-            <div className="bd-hrow" style={{ gap: 8 }}>
-              <span className="bx-ah-sev" style={{ ['--sev' as any]: sevTint(f.severity) }}>{sevName(f.severity)}</span>
-              {f.cwe && <span className="pill">{f.cwe}</span>}
-              <span className="bx-ah-fstatus"><span className="dot" style={{ width: 6, height: 6, background: statusTint(f.status) }} />{statusName(f.status)}</span>
-            </div>
-            <div style={{ fontSize: 17, fontWeight: 600 }}>{f.title}</div>
-            <div className="secondary" style={{ fontSize: 11.5 }}>{f.repo}{f.file ? ` · ${f.file}${f.line ? ':' + f.line : ''}` : ''} · first seen {relNamed(f.firstSeenAt)}{f.seenCount > 1 ? ` · seen ${f.seenCount}×` : ''}</div>
-            {f.screenWarning && <div className="bx-bm-warn"><SF name="exclamationmark.triangle.fill" size={12} />Flagged by the prompt-injection screen: {f.screenWarning}</div>}
-            <Markdown text={f.summary ?? ''} />
-            {f.evidence && <><div className="bx-te-label">Evidence</div><pre className="bx-md-pre">{f.evidence}</pre></>}
-            {f.recommendation && <><div className="bx-te-label">Recommendation</div><Markdown text={f.recommendation} /></>}
-            <div className="bd-hrow" style={{ gap: 8, flexWrap: 'wrap' }}>
-              {isOpen(f.status) && (
-                <span className="bx-rv-split">
-                  <Button variant="prominent" icon="wrench.and.screwdriver" onClick={() => fix(f.id)}>{f.taskID ? 'Retry the Fix' : 'Start a Fix'}</Button>
-                  <Button variant="prominent" icon="chevron.down" onClick={e => fixMenu(e, f)} />
-                </span>
-              )}
-              {f.taskID && <Button onClick={() => onOpenTask(f.taskID)}>Open Task</Button>}
-              <Button onClick={e => openMenu((e.currentTarget as HTMLElement).getBoundingClientRect(), [
-                { header: 'Set status' },
-                ...['new', 'triaged', 'fixed', 'dismissed'].map(s => ({ label: statusName(s), checked: f.status === s, action: () => setStatus(f.id, s) })),
-                { separator: true }, { label: 'Delete Finding', destructive: true, action: () => host.send('DELETE', `/findings/${seg(f.id)}`) },
-              ])}>Status</Button>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -186,15 +186,18 @@ enum GuestDrop {
     /// write (`append:false`) then appends, chunked so each request's base64
     /// clears the guest's request cap. Empty data yields one truncating write
     /// (creates an empty file). The parent dir is created once by `stage`.
-    static func writeOps(guestPath: String, data: Data) -> [[String: Any]] {
+    /// `staged`: an upload's staging file, created owner-only (CWE-200).
+    static func writeOps(guestPath: String, data: Data, staged: Bool = false) -> [[String: Any]] {
         var ops: [[String: Any]] = []
         var offset = 0
         var first = true
         repeat {
             let end = min(offset + writeChunk, data.count)
             let piece = data.subdata(in: offset..<end)
-            ops.append(["op": "write", "path": guestPath,
-                        "data": piece.base64EncodedString(), "append": !first])
+            var w: [String: Any] = ["op": "write", "path": guestPath,
+                                    "data": piece.base64EncodedString(), "append": !first]
+            if staged && first { w["staged"] = true }
+            ops.append(w)
             offset = end
             first = false
         } while offset < data.count

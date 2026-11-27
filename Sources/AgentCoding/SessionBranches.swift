@@ -277,7 +277,37 @@ extension AgentSessionEngine {
             store.mutate(id) { $0.lastError = CodingTaskEngine.unsafeBranchWhy(bad) }
             return
         }
-        resume(id, message: BranchMergeCommands.pullRequestPrompt(branch: branch, into: into))
+        let prompt = BranchMergeCommands.pullRequestPrompt(branch: branch, into: into)
+        // Claude Code with /ship does all of it -- commit, push, the pull
+        // request, a review -- and then watches it. Only where /ship can: a
+        // GitHub repository, into its default branch, the workspace allowing
+        // it. Anything else (or no answer from the machine): the prompt.
+        guard s.tool == .claude, delegate?.profile(for: s.profileID)?.claudeShipDisabled == false,
+              let root = s.branchRoot ?? Optional(s.cwd) else {
+            resume(id, message: prompt)
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let facts = await self.shipFacts(profileID: s.profileID, cwd: root)
+            let ship = facts.map { ClaudeShip.canShip($0, into: into) } ?? false
+            BACDebug.log("sessions", "pull request for \(branch) → \(into): \(ship ? "/ship" : "prompt")")
+            self.resume(id, message: ship ? "/ship" : prompt)
+        }
+    }
+
+    /// What `/ship` needs to know about the session's machine and folder:
+    /// `claude --version`, the origin's URL, the origin's default branch.
+    /// nil: the machine can't be asked.
+    func shipFacts(profileID: UUID, cwd: String) async -> ClaudeShip.Facts? {
+        guard let delegate else { return nil }
+        let dir = Self.q(ScheduledAutomationEngine.guestPath(cwd))
+        let script = "cd \(dir) 2>/dev/null || exit; "
+            + "echo \"claude $(claude --version 2>/dev/null | head -1)\"; "
+            + "echo \"origin $(git remote get-url origin 2>/dev/null)\"; "
+            + "echo \"head $(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\"; true"
+        guard let out = try? await delegate.guestExec(profileID: profileID, command: script, timeout: 15) else { return nil }
+        return ClaudeShip.Facts.parse(out)
     }
 
     // MARK: Git on the fly

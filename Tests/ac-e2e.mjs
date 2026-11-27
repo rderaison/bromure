@@ -22,11 +22,28 @@
  *
  * Env: BROMURE_AC_API_URL (automation API), BROMURE_AC_BIN (CLI binary),
  * BROMURE_AC_CONTROL_SOCK (control socket; default follows CFFIXED_USER_HOME).
+ *
+ * Fat-client mode (`--fat-client`, or `node Tests/ac-fatclient-e2e.mjs`): the
+ * SAME tests, driven through the rich client instead of the local app. The
+ * app's SSH front door is brought up on localhost:2222, the app mints a
+ * throwaway login (POST /remote/test-login, debug runs only), the client
+ * signs in with that user + password — which enrolls its key — and from then
+ * on every request rides the fat-client SSH tunnel to the server:
+ *   - api()/ctl()  → `bromure-ac __fatclient-proxy` (a local socket whose
+ *                    connections are fat-client control channels)
+ *   - cli()        → BROMURE_AC_REMOTE_HOST (the CLI's tunnel transport)
+ *   - ac()         → the AppleScript verbs over the tunnel (POST /scripting),
+ *                    while sessions and the settings editor go through the
+ *                    client's mirror window (POST /debug/fatclient), as a
+ *                    user at the client would drive them.
+ * Client and server are one app on this Mac (a self-mirror), so the suite's
+ * local file checks still look at the server's files.
  */
 
 import { execSync, execFileSync, spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from "fs";
 import http from "http";
+import { createHash } from "crypto";
 import os from "os";
 
 const APP_NAME = "Bromure Agentic Coding";
@@ -35,12 +52,25 @@ const FILTER = process.argv.find((a) => a === "--filter")
   ? process.argv[process.argv.indexOf("--filter") + 1]
   : null;
 const SKIP_SESSIONS = process.argv.includes("--no-sessions");
+// Fat-client mode: everything below runs through the rich client's SSH
+// tunnel to this Mac's own front door (see the header).
+const FAT = process.argv.includes("--fat-client") || process.env.BROMURE_AC_E2E_FATCLIENT === "1";
+const FAT_PORT = parseInt(process.env.BROMURE_AC_FATCLIENT_PORT || "2222", 10);
+// The live fat-client connection, once section 0 has brought it up:
+// { hostID, user, sock, proxy } — null before (and in native mode), so the
+// bring-up itself talks to the local app.
+let FC = null;
 
 // ---------------------------------------------------------------------------
 // AppleScript bridge
 // ---------------------------------------------------------------------------
 
-function ac(cmd, { timeoutMs = 15000 } = {}) {
+function ac(cmd, opts = {}) {
+  if (FC) return fatAC(cmd);
+  return localAC(cmd, opts);
+}
+
+function localAC(cmd, { timeoutMs = 15000 } = {}) {
   const wrapped = `with timeout of 10 seconds\ntell application "${APP_NAME}" to ${cmd}\nend timeout`;
   try {
     return execSync(`osascript -e '${wrapped.replace(/'/g, "'\\''")}'`, {
@@ -74,7 +104,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // HTTP API
 // ---------------------------------------------------------------------------
 
-async function api(method, path, body, { timeoutMs = 60000 } = {}) {
+async function api(method, path, body, opts = {}) {
+  // Fat-client mode: the automation API's routes, through the tunnel (the
+  // remote's control socket serves them all).
+  if (FC) return ctlAt(FC.sock, method, path, body, { timeoutMs: opts.timeoutMs ?? 60000 });
+  return localApi(method, path, body, opts);
+}
+
+// The local app's own HTTP API — in fat-client mode, the CLIENT side (its
+// mirror window's debug hooks live here).
+async function localApi(method, path, body, { timeoutMs = 60000 } = {}) {
   const opts = {
     method,
     headers: { "Content-Type": "application/json", Connection: "close" },
@@ -116,7 +155,16 @@ async function api(method, path, body, { timeoutMs = 60000 } = {}) {
 const CTL_SOCK = process.env.BROMURE_AC_CONTROL_SOCK ||
   `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/BromureAC/control.sock`;
 
-function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
+function ctl(method, path, body, opts = {}) {
+  return ctlAt(FC ? FC.sock : CTL_SOCK, method, path, body, opts);
+}
+
+// The local app's own control socket, whatever the mode.
+function localCtl(method, path, body, opts = {}) {
+  return ctlAt(CTL_SOCK, method, path, body, opts);
+}
+
+function ctlAt(socketPath, method, path, body, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve) => {
     const data = body === undefined ? null : JSON.stringify(body);
     const headers = { Connection: "close" };
@@ -124,7 +172,7 @@ function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
       headers["Content-Type"] = "application/json";
       headers["Content-Length"] = Buffer.byteLength(data);
     }
-    const req = http.request({ socketPath: CTL_SOCK, method, path, headers, agent: false }, (res) => {
+    const req = http.request({ socketPath, method, path, headers, agent: false }, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
@@ -140,7 +188,7 @@ function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
       });
     });
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`timed out after ${timeoutMs}ms`)));
-    req.on("error", (e) => resolve({ _status: 0, _error: `${method} ${path} (control socket): ${e.message}` }));
+    req.on("error", (e) => resolve({ _status: 0, _error: `${method} ${path} (${socketPath === CTL_SOCK ? "control socket" : socketPath}): ${e.message}` }));
     if (data) req.write(data);
     req.end();
   });
@@ -164,9 +212,23 @@ const AC_BIN = resolveACBin();
 // Run a `bromure-ac` subcommand. execFile (no shell) so spaces in the bundle
 // path are safe. Returns trimmed stdout+stderr; on non-zero exit either returns
 // the output (allowFail) or throws with it.
-function cli(args, { timeoutMs = 60000, allowFail = false } = {}) {
+//
+// Fat-client mode: the subcommand talks to the remote through the client's
+// SSH tunnel (BROMURE_AC_REMOTE_HOST); localCli() always talks to this app.
+function cli(args, opts = {}) {
+  return runCli(args, { ...opts, remote: !!FC });
+}
+
+function localCli(args, opts = {}) {
+  return runCli(args, { ...opts, remote: false });
+}
+
+function runCli(args, { timeoutMs = 60000, allowFail = false, remote = false } = {}) {
+  const env = { ...process.env };
+  delete env.BROMURE_AC_REMOTE_HOST;
+  if (remote) env.BROMURE_AC_REMOTE_HOST = FC.hostID;
   try {
-    return execFileSync(AC_BIN, args, { encoding: "utf-8", timeout: timeoutMs }).trim();
+    return execFileSync(AC_BIN, args, { encoding: "utf-8", timeout: timeoutMs, env }).trim();
   } catch (e) {
     const out = ((e.stdout || "") + (e.stderr || "")).toString().trim();
     if (allowFail) return out;
@@ -230,8 +292,8 @@ let passed = 0,
   skipped = 0;
 const results = [];
 
-async function test(name, fn) {
-  if (FILTER && !new RegExp(FILTER, "i").test(name)) {
+async function test(name, fn, { always = false } = {}) {
+  if (FILTER && !always && !new RegExp(FILTER, "i").test(name)) {
     skipped++;
     return;
   }
@@ -367,6 +429,9 @@ function getProfileJSON(nameOrID) {
 // and an unexpectedly *enabled* server, which 19.2 should still surface — are
 // both left untouched.
 function resetRemoteAccessDefaults() {
+  // Fat-client mode rides this front door: never bounce it mid-run (section
+  // 0's teardown restores the user's own settings at the end).
+  if (FAT) return;
   const s = cli(["remote", "status"], { allowFail: true });
   if (!/Remote access:\s*disabled/i.test(s)) return; // no agent, or (unexpectedly) enabled
   if (/Bind:\s*0\.0\.0\.0:/.test(s)) return;          // already at the default bind
@@ -401,14 +466,482 @@ function setProfileSetting(nameOrID, key, value) {
 }
 
 // ---------------------------------------------------------------------------
+// Fat-client mode (--fat-client): transports + connection bring-up/teardown
+// ---------------------------------------------------------------------------
+
+// The throwaway host record the client dials: this Mac's own front door.
+const FAT_HOST_ID = "FA7C11E7-0E2E-4000-8000-00000000E2E0";
+const FAT_HOST_NAME = "ACE2E_FatClient";
+const FAT_SUPPORT = `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/BromureAC`;
+const FAT_HOSTS_FILE = `${FAT_SUPPORT}/remote-client/hosts.json`;
+const FAT_KNOWN_HOSTS = `${FAT_SUPPORT}/remote-client/known_hosts`;
+// The server's host key (self-mirror: the same support dir).
+const FAT_SERVER_HOSTKEY = `${FAT_SUPPORT}/remote/hostkey_ed25519.pub`;
+// The client's pin token for the front door (KnownHostsStore.hostToken).
+const FAT_PIN_TOKEN = `[127.0.0.1]:${FAT_PORT}`;
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Synchronous HTTP over a Unix socket (curl). ac() is synchronous all over
+// the suite, so its fat-client route can't await. Same reply shape as ctl().
+function ctlSync(socketPath, method, path, body, { timeoutMs = 30000 } = {}) {
+  const args = ["-sS", "--max-time", String(Math.ceil(timeoutMs / 1000)), "--unix-socket", socketPath,
+                "-X", method, "-H", "Connection: close", "-w", "\n%{http_code}"];
+  let input;
+  if (body !== undefined) {
+    args.push("-H", "Content-Type: application/json", "--data-binary", "@-");
+    input = JSON.stringify(body);
+  }
+  args.push(`http://localhost${path}`);
+  let out;
+  try {
+    out = execFileSync("curl", args, { encoding: "utf-8", input, timeout: timeoutMs + 5000 });
+  } catch (e) {
+    return { _status: 0, _error: `${method} ${path}: ${((e.stderr || "") + "").trim() || e.message}` };
+  }
+  const nl = out.lastIndexOf("\n");
+  const status = parseInt(out.slice(nl + 1), 10) || 0;
+  const text = out.slice(0, nl);
+  if (!text) return { _status: status, _empty: true };
+  try {
+    const json = JSON.parse(text);
+    json._status = status;
+    return json;
+  } catch {
+    return { _status: status, _error: `Invalid JSON: ${text.slice(0, 200)}` };
+  }
+}
+
+// Split an AppleScript command as the suite writes it —
+//   verb words "direct" [key "k"] [to value "v"] [color "c"]
+// — into the parts POST /scripting takes.
+function parseScriptCommand(cmd) {
+  const ARG = { key: "key", "to value": "toValue", color: "color" };
+  const n = cmd.length;
+  let i = 0;
+  const readString = () => {
+    let out = "";
+    i++; // opening quote
+    while (i < n && cmd[i] !== '"') {
+      if (cmd[i] === "\\" && i + 1 < n) { out += cmd[i + 1]; i += 2; } else out += cmd[i++];
+    }
+    i++; // closing quote
+    return out;
+  };
+  const q = cmd.indexOf('"');
+  const verb = (q < 0 ? cmd : cmd.slice(0, q)).trim().replace(/\s+/g, " ");
+  const args = {};
+  let direct;
+  i = q < 0 ? n : q;
+  if (i < n) direct = readString();
+  while (i < n) {
+    const nq = cmd.indexOf('"', i);
+    if (nq < 0) break;
+    const kw = cmd.slice(i, nq).trim().replace(/\s+/g, " ");
+    i = nq;
+    const v = readString();
+    if (!(kw in ARG)) throw new Error(`fat-client ac(): unsupported parameter "${kw}" in: ${cmd}`);
+    args[ARG[kw]] = v;
+  }
+  return { verb, direct, args };
+}
+
+// An AppleScript verb run by the SERVER, sent through the tunnel.
+function remoteScripting(verb, direct, args) {
+  const r = ctlSync(FC.sock, "POST", "/scripting", { command: verb, direct, args });
+  if (r._status !== 200) return `error: ${r.error || r._error || `HTTP ${r._status}`}`;
+  return String(r.result ?? "").trim();
+}
+
+// An AppleScript verb run by the CLIENT app itself (its own UI).
+function clientScripting(verb, direct, args) {
+  const r = ctlSync(CTL_SOCK, "POST", "/scripting", { command: verb, direct, args });
+  if (r._status !== 200) return `error: ${r.error || r._error || `HTTP ${r._status}`}`;
+  return String(r.result ?? "").trim();
+}
+
+// The client's mirror window, driven as a user at it would (sync + async).
+function fcSync(action, extra = {}) {
+  return ctlSync(CTL_SOCK, "POST", "/debug/fatclient", { host: FC.hostID, action, ...extra });
+}
+function fcAsync(action, extra = {}) {
+  return localCtl("POST", "/debug/fatclient", { host: FAT_HOST_ID, action, ...extra });
+}
+
+// Resolve a workspace (name or id) on the server, then wait for the client's
+// mirror to list it — a workspace made a moment ago shows after a poll.
+function mirrorWorkspaceSync(nameOrID) {
+  let list = [];
+  try { list = JSON.parse(remoteScripting("list profiles", undefined, {})); } catch {}
+  const key = String(nameOrID || "").toLowerCase();
+  const p = list.find((x) => x.id.toLowerCase() === key) || list.find((x) => x.name.toLowerCase() === key);
+  if (!p) return null;
+  for (let i = 0; i < 40; i++) {
+    const st = fcSync("get-mirror-state");
+    if ((st.workspaces || []).some((w) => String(w.id).toUpperCase() === p.id.toUpperCase())) break;
+    sleepSync(250);
+  }
+  return p;
+}
+
+function settingsWindowSync() {
+  const r = fcSync("settings-window");
+  return { open: r.open === true, windowId: r.windowId || 0 };
+}
+
+// ac() in fat-client mode. Data verbs (profiles, settings, app settings) run
+// on the server through the tunnel; sessions and the settings editor go
+// through the client's mirror window, where a user at the client starts and
+// stops workspaces and edits them; editor navigation is the client's own UI.
+function fatAC(cmd) {
+  const { verb, direct, args } = parseScriptCommand(cmd);
+  switch (verb) {
+    case "open ac session": {
+      const p = mirrorWorkspaceSync(direct);
+      if (!p) return "error: profile not found";
+      // The mirror refuses (retry: true) until the workspace's profile has
+      // come over the tunnel — a moment after its sidebar row.
+      let r = {};
+      for (let i = 0; i < 40; i++) {
+        r = fcSync("start", { workspace: p.id });
+        if (r.retry !== true) break;
+        sleepSync(250);
+      }
+      return r.ok === true ? p.id : `error: ${r.error || r._error || "mirror start failed"}`;
+    }
+    case "close ac session": {
+      const p = mirrorWorkspaceSync(direct);
+      if (!p) return "error: profile not found";
+      const r = fcSync("stop", { workspace: p.id });
+      if (r.ok !== true) return `error: ${r.error || r._error || "mirror stop failed"}`;
+      // The mirror sends the shutdown and returns; wait (bounded) until the
+      // VM is down, so a delete right after isn't refused as "running".
+      const state = () => (fcSync("get-mirror-state").workspaces || [])
+        .find((w) => String(w.id).toUpperCase() === p.id.toUpperCase())?.state;
+      for (let i = 0; i < 120 && /running|booting/i.test(String(state())); i++) sleepSync(250);
+      return "ok";
+    }
+    case "list ac sessions": {
+      const st = fcSync("get-mirror-state");
+      return JSON.stringify((st.workspaces || [])
+        .filter((w) => /running|booting/i.test(String(w.state)))
+        .map((w) => ({ profileId: w.id, profileName: w.name, windowId: 0, visible: true })));
+    }
+    case "open ac profile editor": {
+      const p = mirrorWorkspaceSync(direct);
+      if (!p) return "error: profile not found";
+      const r = fcSync("open-settings", { workspace: p.id });
+      if (r.ok !== true) return `error: ${r.error || r._error || "open-settings failed"}`;
+      // The editor opens once its profile has come over the tunnel.
+      for (let i = 0; i < 40 && !settingsWindowSync().open; i++) sleepSync(250);
+      return "ok";
+    }
+    case "close ac profile editor": {
+      fcSync("close-settings");
+      for (let i = 0; i < 20 && settingsWindowSync().open; i++) sleepSync(100);
+      return "ok";
+    }
+    case "get editor window id":
+      return String(settingsWindowSync().windowId);
+    case "select editor category":
+      return clientScripting(verb, direct, args);
+    case "get app state": {
+      // The server's state, with the editor read off the client's mirror.
+      const out = remoteScripting(verb, direct, args);
+      try {
+        const st = JSON.parse(out);
+        st.editorOpen = settingsWindowSync().open;
+        return JSON.stringify(st);
+      } catch {
+        return out;
+      }
+    }
+    default:
+      return remoteScripting(verb, direct, args);
+  }
+}
+
+// SHA256:… fingerprint of an OpenSSH public key line (RemoteAccessServer's format).
+function sshFingerprint(line) {
+  const blob = Buffer.from(String(line).trim().split(/\s+/)[1] || "", "base64");
+  return "SHA256:" + createHash("sha256").update(blob).digest("base64").replace(/=+$/, "");
+}
+
+function readHosts() {
+  try { return JSON.parse(readFileSync(FAT_HOSTS_FILE, "utf-8")); } catch { return []; }
+}
+function writeHosts(list) {
+  mkdirSync(FAT_HOSTS_FILE.replace(/\/[^/]+$/, ""), { recursive: true, mode: 0o700 });
+  writeFileSync(FAT_HOSTS_FILE, JSON.stringify(list));
+}
+
+// Section 0's tests (run whatever the filter), so a filtered run's "ran no
+// test" check still counts only the tests it asked for.
+let fatBringUpTests = 0;
+
+// What teardown has to undo, filled in as section 0 goes.
+const fatState = {
+  remoteBefore: null,     // GET /remote before we touched it
+  changedRemote: false,   // we enabled / reconfigured the front door
+  clientKey: null,        // this Mac's fat-client public key line
+  keyChecked: false,      // 0.6 looked at whether it was authorized before the run
+  keyWasEnrolled: false,  // it was (put back after); else ours to remove
+  minted: false,
+  pinLinesBefore: null,   // the client's known_hosts lines for the front door, as found
+  hostWritten: false,
+  proxy: null,
+};
+
+// `bromure-ac __fatclient-auth` as the given user: returns its report.
+function fatAuth(user, password) {
+  const args = ["__fatclient-auth", "127.0.0.1", String(FAT_PORT), user];
+  if (password !== undefined) args.push("--password", password);
+  const out = localCli(args, { allowFail: true, timeoutMs: 60000 });
+  const key = (out.match(/^client key: (.+)$/m) || [])[1];
+  if (key && key !== "none") fatState.clientKey = key.trim();
+  return {
+    out,
+    probe: (out.match(/^pubkey probe: (\S+)/m) || [])[1] || "",
+    hostKey: (out.match(/^host-key fingerprint: (\S+)/m) || [])[1] || "",
+    password: (out.match(/^niossh password result: (\S+)/m) || [])[1] || "",
+  };
+}
+
+// Section 0: bring the fat-client connection up. Each step is a test; the
+// first that fails ends the run (everything after rides this connection).
+async function fatClientBringUp() {
+  console.log(`--- 0. Fat-client connection (localhost:${FAT_PORT}) ---`);
+  let login = null;
+  // Bring-up steps run whatever --filter says: every test rides them.
+  const step = async (name, fn) => {
+    const before = failed;
+    fatBringUpTests++;
+    await test(name, fn, { always: true });
+    return failed === before;
+  };
+
+  if (!(await step(`0.1 the app's SSH front door listens on 127.0.0.1:${FAT_PORT}`, async () => {
+    const h = await localApi("GET", "/health");
+    assert(h.debugEnabled === true,
+           "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
+    fatState.remoteBefore = await localCtl("GET", "/remote");
+    const b = fatState.remoteBefore;
+    const usable = b.enabled === true && b.running === true && b.port === FAT_PORT && b.pubkeyAuth === true
+      && (b.bindAddress === "127.0.0.1" || b.bindAddress === "0.0.0.0");
+    if (!usable) {
+      fatState.changedRemote = true;
+      const r = await localCtl("POST", "/remote",
+        { enabled: true, port: FAT_PORT, bindAddress: "127.0.0.1", pubkeyAuth: true, passwordAuth: false });
+      assert(!r.error && r._status === 200, `couldn't enable remote access: ${r.error || r._error}`);
+    }
+    const st = await localCtl("GET", "/remote");
+    assert(st.running === true && st.port === FAT_PORT, `front door not running: ${JSON.stringify(st).slice(0, 200)}`);
+  }))) return false;
+
+  if (!(await step("0.2 the app mints a test login; status names it, never its password", async () => {
+    login = await localCtl("POST", "/remote/test-login");
+    assertEq(login._status, 200, `POST /remote/test-login: ${JSON.stringify(login).slice(0, 200)}`);
+    fatState.minted = true;
+    assert(/^bromure-e2e-[0-9a-f]{6}$/.test(login.user || ""), `odd test user: ${login.user}`);
+    assert(typeof login.password === "string" && login.password.length >= 20, "test password missing or short");
+    const st = await localCtl("GET", "/remote");
+    assertEq(st.testLoginUser, login.user, "GET /remote doesn't name the test login");
+    assert(!JSON.stringify(st).includes(login.password), "GET /remote leaked the test password");
+    // Over the automation HTTP port (not the owner socket) it's refused.
+    const viaHTTP = await localApi("POST", "/remote/test-login");
+    assert(viaHTTP._status === 403 || viaHTTP._status === 0,
+           `HTTP API minted a login: ${viaHTTP._status}`);
+  }))) return false;
+
+  if (!(await step("0.3 the client reaches the server's own host key, and pins it", async () => {
+    // What the client scans on localhost:<port> must be the key the server
+    // says it holds — then this is the right server, and a pin left by an
+    // earlier server on that port (a rebuilt test home) is replaced, as a
+    // user accepting the new key would.
+    const st = await localCtl("GET", "/remote");
+    const serverFP = (String(st.fingerprint || "").match(/SHA256:\S+/) || [])[0];
+    assert(serverFP, `server reports no host-key fingerprint: ${st.fingerprint}`);
+    const scan = fatAuth(login.user);
+    assertEq(scan.hostKey, serverFP, `the client scanned another key than the server's:\n${scan.out}`);
+    const lines = existsSync(FAT_KNOWN_HOSTS) ? readFileSync(FAT_KNOWN_HOSTS, "utf-8").split("\n").filter(Boolean) : [];
+    const mine = (l) => l.split(" ")[0] === FAT_PIN_TOKEN;
+    fatState.pinLinesBefore = lines.filter(mine);
+    const keyB64 = readFileSync(FAT_SERVER_HOSTKEY, "utf-8").trim().split(/\s+/)[1];
+    assertEq(sshFingerprint(`ssh-ed25519 ${keyB64}`), serverFP, "the server's hostkey file doesn't match its status");
+    mkdirSync(FAT_KNOWN_HOSTS.replace(/\/[^/]+$/, ""), { recursive: true, mode: 0o700 });
+    writeFileSync(FAT_KNOWN_HOSTS, [...lines.filter((l) => !mine(l)), `${FAT_PIN_TOKEN} ${keyB64}`].join("\n") + "\n");
+    const again = fatAuth(login.user);
+    assert(again.probe !== "hostKeyChanged", `still a host-key mismatch after pinning:\n${again.out}`);
+  }))) return false;
+
+  if (!(await step("0.4 a wrong password is refused", async () => {
+    const r = fatAuth(login.user, login.password.split("").reverse().join("") + "x");
+    assertEq(r.password, "authFailed", `wrong password not refused:\n${r.out}`);
+    assert(fatState.clientKey, `no client key reported:\n${r.out}`);
+  }))) return false;
+
+  if (!(await step("0.5 the test password doesn't sign in as the owner", async () => {
+    const r = fatAuth(os.userInfo().username, login.password);
+    assertEq(r.password, "authFailed", `test password accepted for the owner:\n${r.out}`);
+  }))) return false;
+
+  if (!(await step("0.6 before the password login, the client key alone is refused", async () => {
+    // A key enrolled by an earlier self-mirror would skip the password path:
+    // take it out for the run (teardown puts it back).
+    const fp = sshFingerprint(fatState.clientKey);
+    const st = await localCtl("GET", "/remote");
+    assertEq(st._status, 200, `GET /remote: ${st._error || st.error}`);
+    fatState.keyWasEnrolled = (st.authorizedKeys || []).some((k) => k.fingerprint === fp);
+    fatState.keyChecked = true;   // from here teardown owns the key's state
+    if (fatState.keyWasEnrolled) {
+      const rm = await localCtl("DELETE", `/remote/keys/${encodeURIComponent(fp)}`);
+      assert(rm.ok === true, `couldn't take the pre-enrolled client key out: ${JSON.stringify(rm)}`);
+    }
+    const r = fatAuth(login.user);
+    assertEq(r.probe, "authFailed", `unenrolled key not refused:\n${r.out}`);
+  }))) return false;
+
+  if (!(await step("0.7 the password login enrolls the client key for the test login only; the key then signs in alone", async () => {
+    const r = fatAuth(login.user, login.password);
+    assertEq(r.password, "ok", `password login failed:\n${r.out}`);
+    const fp = sshFingerprint(fatState.clientKey);
+    let st = null, enrolled = false;
+    for (let i = 0; i < 20 && !enrolled; i++) {
+      st = await localCtl("GET", "/remote");
+      enrolled = (st.testLoginKeys || []).includes(fp);
+      if (!enrolled) await sleep(250);
+    }
+    assert(enrolled, "the password login didn't enroll the client key for the test login");
+    // The test login's key is its own: never in authorized_keys, never the
+    // owner's (it would outlive the test login).
+    assert(!(st.authorizedKeys || []).some((k) => k.fingerprint === fp),
+           "the test login's key landed in authorized_keys");
+    const asOwner = fatAuth(os.userInfo().username);
+    assertEq(asOwner.probe, "authFailed", `the test login's key signs in as the owner:\n${asOwner.out}`);
+    const again = fatAuth(login.user);
+    assertEq(again.probe, "ok", `enrolled key refused:\n${again.out}`);
+  }))) return false;
+
+  if (!(await step("0.8 the client's tunnel serves the control API (proxy → /health)", async () => {
+    writeHosts([...readHosts().filter((h) => String(h.id).toUpperCase() !== FAT_HOST_ID),
+                { id: FAT_HOST_ID, name: FAT_HOST_NAME, address: "127.0.0.1", port: FAT_PORT, user: login.user }]);
+    fatState.hostWritten = true;
+    const sock = `${os.tmpdir()}/ace2e-fc-${process.pid}.sock`;
+    const log = openSync("/tmp/bromure-ac-e2e-fatclient-proxy.log", "a");
+    const env = { ...process.env };
+    delete env.BROMURE_AC_REMOTE_HOST;
+    fatState.proxy = spawn(AC_BIN, ["__fatclient-proxy", FAT_HOST_ID, "--socket", sock],
+                           { stdio: ["ignore", log, log], env });
+    let h = null;
+    for (let i = 0; i < 60; i++) {
+      if (fatState.proxy.exitCode !== null) break;
+      if (existsSync(sock)) {
+        h = await ctlAt(sock, "GET", "/health");
+        if (h.status === "ok") break;
+      }
+      await sleep(500);
+    }
+    assert(h && h.status === "ok",
+           `no /health through the tunnel (proxy ${fatState.proxy.exitCode === null ? "running" : `exited ${fatState.proxy.exitCode}`}; ` +
+           `log: /tmp/bromure-ac-e2e-fatclient-proxy.log): ${JSON.stringify(h).slice(0, 200)}`);
+    FC = { hostID: FAT_HOST_ID, user: login.user, sock };
+  }))) return false;
+
+  if (!(await step("0.9 the CLI reaches the server through the tunnel", async () => {
+    const out = cli(["vm", "ls"], { allowFail: true });
+    assert(/No workspaces|WORKSPACE ID/.test(out), `vm ls over the tunnel: ${out.slice(0, 200)}`);
+    assertIncludes(cli(["remote", "status"], { allowFail: true }), `Test login: ${login.user}`);
+  }))) return false;
+
+  if (!(await step("0.10 the client's mirror window connects and mirrors the server's workspaces", async () => {
+    let st = null;
+    for (let i = 0; i < 45; i++) {
+      st = await fcAsync("get-mirror-state");
+      if (st && st.connected === true) break;
+      await sleep(1000);
+    }
+    assert(st && st.connected === true, `mirror never connected: ${JSON.stringify(st).slice(0, 200)}`);
+    const server = JSON.parse(remoteScripting("list profiles", undefined, {})).map((p) => p.id.toUpperCase()).sort();
+    let mirrored = [];
+    for (let i = 0; i < 20; i++) {
+      const s = await fcAsync("get-mirror-state");
+      mirrored = (s.workspaces || []).map((w) => String(w.id).toUpperCase()).sort();
+      if (JSON.stringify(mirrored) === JSON.stringify(server)) break;
+      await sleep(500);
+    }
+    assertEq(JSON.stringify(mirrored), JSON.stringify(server), "the mirror's workspaces never matched the server's");
+  }))) return false;
+
+  console.log("");
+  return true;
+}
+
+// Undo section 0, whatever state it got to. Always runs (and on Ctrl-C).
+let fatTornDown = false;
+async function fatClientTearDown() {
+  if (fatTornDown) return;
+  fatTornDown = true;
+  FC = null;
+  // Only with our host record in place: the debug hook falls back to the
+  // first configured host, and every verb but close-mirror opens its mirror.
+  if (fatState.hostWritten) {
+    try { await fcAsync("close-settings"); } catch {}
+    try { await fcAsync("close-mirror"); } catch {}
+  }
+  if (fatState.proxy && fatState.proxy.exitCode === null) {
+    try { fatState.proxy.kill("SIGTERM"); } catch {}
+  }
+  if (fatState.hostWritten) {
+    try { writeHosts(readHosts().filter((h) => String(h.id).toUpperCase() !== FAT_HOST_ID)); } catch {}
+  }
+  if (fatState.minted) await localCtl("DELETE", "/remote/test-login");
+  if (fatState.pinLinesBefore) {
+    // Leave the client's pins as found.
+    try {
+      const mine = (l) => l.split(" ")[0] === FAT_PIN_TOKEN;
+      const lines = readFileSync(FAT_KNOWN_HOSTS, "utf-8").split("\n").filter(Boolean).filter((l) => !mine(l));
+      writeFileSync(FAT_KNOWN_HOSTS, [...lines, ...fatState.pinLinesBefore].join("\n") + "\n");
+    } catch {}
+  }
+  // The client key: put back if it was authorized before the run, removed if
+  // the run enrolled it — and left alone if bring-up stopped before 0.6
+  // looked (it may be this Mac's own enrolled key).
+  if (fatState.clientKey && fatState.keyChecked) {
+    const fp = sshFingerprint(fatState.clientKey);
+    if (fatState.keyWasEnrolled) await localCtl("POST", "/remote/keys", { key: fatState.clientKey });
+    else await localCtl("DELETE", `/remote/keys/${encodeURIComponent(fp)}`);
+  }
+  if (fatState.changedRemote && fatState.remoteBefore) {
+    const b = fatState.remoteBefore;
+    await localCtl("POST", "/remote", {
+      enabled: b.enabled === true, port: b.port, bindAddress: b.bindAddress,
+      passwordAuth: b.passwordAuth, pubkeyAuth: b.pubkeyAuth,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log("\n=== Bromure Agentic Coding E2E Test Suite ===\n");
+  console.log(`\n=== Bromure Agentic Coding E2E Test Suite${FAT ? " — fat client" : ""} ===\n`);
 
   // Preflight: binary present + app running (launched here if needed).
   await ensureAppRunning();
+
+  // Fat-client mode: connect the rich client to this app's own SSH front
+  // door with an app-minted login; every test after rides that tunnel.
+  if (FAT) {
+    process.on("SIGINT", () => { fatClientTearDown().finally(() => process.exit(130)); });
+    if (!(await fatClientBringUp())) {
+      await fatClientTearDown();
+      console.log(`\n=== ${passed} passed, ${failed} failed, ${skipped} skipped ===\n`);
+      console.log("The fat-client connection never came up — nothing else can run.");
+      for (const r of results) if (r.status === "FAIL") console.log(`  • ${r.name}: ${r.error}`);
+      process.exit(1);
+    }
+  }
 
   // Pre-check: app is reachable
   try {
@@ -2077,6 +2610,15 @@ async function main() {
   {
     await test("19.2 remote status: disabled by default, bind 0.0.0.0", async () => {
       const out = cli(["remote", "status"], { allowFail: true });
+      if (FAT) {
+        // Through the tunnel the front door is, necessarily, on — on the
+        // port section 0 connected to, with the app-minted login listed.
+        assert(/Remote access:\s*ENABLED \(sshd running\)/.test(out), `expected remote enabled + running, got: ${out}`);
+        assert(new RegExp(`Bind:\\s*(127\\.0\\.0\\.1|0\\.0\\.0\\.0):${FAT_PORT}\\b`).test(out),
+               `expected the bind section 0 used, got: ${out}`);
+        assertIncludes(out, `Test login: ${FC.user}`);
+        return;
+      }
       assert(/Remote access:\s*disabled/i.test(out), `expected remote disabled, got: ${out}`);
       assert(/Bind:\s*0\.0\.0\.0:/.test(out), `expected default bind 0.0.0.0, got: ${out}`);
     });
@@ -2443,7 +2985,10 @@ async function main() {
 
     // Bring-up: turn on the embedded SSH server (pubkey-only, loopback). It's
     // refused while there's no base image — skip the whole section then.
-    const enableOut = cli(
+    // Fat-client mode: section 0 already connected this app to itself as a
+    // client — reuse that connection; enabling here would bounce the very
+    // front door every request rides, and the teardown would cut it.
+    const enableOut = FAT ? "" : cli(
       ["remote", "enable", "--bind", HOST_ADDR, "--port", String(HOST_PORT), "--pubkey", "--no-password"],
       { allowFail: true });
     const noImage = /base image|no image/i.test(enableOut);
@@ -2453,7 +2998,7 @@ async function main() {
     } else {
       let broughtUp = true;
       let enrolledKeyFP = null;   // section-25's own key, dropped in teardown
-      try {
+      if (!FAT) try {
         // Client keypair at the exact path RemoteTransport.ensureClientKey reads.
         if (!existsSync(`${KDIR}/id_ed25519`)) {
           mkdirSync(KDIR, { recursive: true, mode: 0o700 });
@@ -2474,8 +3019,9 @@ async function main() {
 
       if (broughtUp) {
         // POST /debug/fatclient {host, action, …} → the mirror's debugPerform.
-        const fc = (action, extra = {}) =>
-          api("POST", "/debug/fatclient", { host: HOST_ADDR, action, ...extra });
+        const fc = (action, extra = {}) => FAT
+          ? fcAsync(action, extra)
+          : api("POST", "/debug/fatclient", { host: HOST_ADDR, action, ...extra });
 
         // One connected mirror is shared below; always tear the server down.
         try {
@@ -2715,10 +3261,13 @@ async function main() {
           // Fully revert section 25's mutations so a persistent CI agent starts
           // the next run's section 19 clean: disable, drop the key we enrolled,
           // and restore the default bind (`remote disable` leaves --bind persisted).
-          cli(["remote", "disable"], { allowFail: true });
-          if (enrolledKeyFP) cli(["remote", "key", "rm", enrolledKeyFP], { allowFail: true });
-          resetRemoteAccessDefaults();
-          try { writeFileSync(`${KDIR}/hosts.json`, "[]"); } catch {}
+          // (Fat-client mode made none of them: section 0 owns the connection.)
+          if (!FAT) {
+            cli(["remote", "disable"], { allowFail: true });
+            if (enrolledKeyFP) cli(["remote", "key", "rm", enrolledKeyFP], { allowFail: true });
+            resetRemoteAccessDefaults();
+            try { writeFileSync(`${KDIR}/hosts.json`, "[]"); } catch {}
+          }
         }
       }
     }
@@ -3392,7 +3941,9 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
     // it the same way WorkspaceBrowserController does: Bromure's shared dir
     // first, then AC's own copy. Absent (e.g. a node that never ran the browser
     // e2e) → skip, don't fail.
-    const HOME = process.env.HOME || "";
+    // The app's home: an isolated instance (CFFIXED_USER_HOME) boots the
+    // browser from ITS support dir, never the real one.
+    const HOME = process.env.CFFIXED_USER_HOME || process.env.HOME || "";
     const bootFiles = ["linux-base.img", "vmlinuz", "initrd"];
     const dirHasImage = (d) => bootFiles.every((f) => existsSync(`${d}/${f}`));
     // Resolve the dir the browser VM actually boots from — shared Bromure dir
@@ -4920,13 +5471,14 @@ for n, c in enumerate(calls, 1):
   // ======================================================================
   // Done
   // ======================================================================
+  if (FAT) await fatClientTearDown();
   console.log(
     `\n=== ${passed} passed, ${failed} failed, ${skipped} skipped ===\n`
   );
 
   // A filtered run that ran nothing tested nothing: not a pass (a typo the
   // index matched, or tests that all skipped themselves).
-  if (FILTER && passed + failed === 0) {
+  if (FILTER && passed + failed - fatBringUpTests === 0) {
     console.log(`--filter ${JSON.stringify(FILTER)} ran no test.`);
     process.exit(1);
   }
@@ -4942,7 +5494,8 @@ for n, c in enumerate(calls, 1):
   }
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error("Fatal:", e);
+  if (FAT) await fatClientTearDown().catch(() => {});
   process.exit(2);
 });

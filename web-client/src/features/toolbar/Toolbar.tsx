@@ -15,7 +15,7 @@
 //   toggle-browser                 the globe (⌃⌘B)
 // Selection: machine menu › Machine Details → select({kind:'workspace', workspaceID}).
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { shell, electron, isMac } from '../../platform';
 import { Lights } from '../../app/windows';
 import { useHostCtx } from '../../app/hostContext';
@@ -27,6 +27,7 @@ import { SF } from '../../ui/icons';
 import { useListModel } from '../sidebar/Sidebar';
 import { workspaceActions, openSurface } from '../sidebar/actions';
 import * as M from '../sidebar/model';
+import { tunnelFor, type TunnelController } from './tunnel';
 import './toolbar.css';
 
 const ctrlCmd = isMac ? '⌃⌘' : 'Ctrl+Alt+';
@@ -105,18 +106,19 @@ function ToolbarBar() {
     if (hostedSession) { setViewMode('chat'); select({ kind: 'session', sessionID: hostedSession.id }); }
   };
 
-  const globeHelp = `Show or hide the agentic browser (${ctrlCmd}B)`;
+  const globeHelp = `Open the browser — reaches this server's workspaces (${ctrlCmd}B)`;
   const filesHelp = `Show or hide the Files pane (${ctrlCmd}E)`;
   return (
     <div className="tb-bar">
+      <TunnelToggle />
       {placeholder && <>
         <LinuxPill back={false} disabled onClick={() => {}} help="The Linux machine behind this session — available while it runs" />
         {restingRow && <MachineMenu name={restingRow.name} accentHex={restingRow.accentHex} profileID={restingRow.id} running={false} />}
-        <HeaderIcon system="globe" help={globeHelp} disabled onClick={() => {}} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} disabled onClick={() => {}} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
       {selection.kind === 'room' && <>
-        <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
       {entry && selection.kind !== 'new-session' && <>
@@ -126,11 +128,39 @@ function ToolbarBar() {
           : hostedSession && <LinuxPill back onClick={toggleLinux} />}
         <MachineMenu name={entry.name} accentHex={m.rows.find(r => r.id === entry.id)?.accentHex ?? entry.accentHex} profileID={entry.id}
                      running ip={entry.ip} />
-        <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />
+        {electron && <HeaderIcon system="globe" help={globeHelp} onClick={toggleBrowser} />}
         <HeaderIcon system="sidebar.right" help={filesHelp} active={filePaneOpen} onClick={toggleFiles} />
       </>}
     </div>
   );
+}
+
+/** The network tunnel toggle (RemoteToolbarBar's first icon on the Mac):
+ *  direct access to the remote's VMs from any local program. Linux desktop
+ *  app only — absent in the hosted app and on Windows. */
+function TunnelToggle() {
+  const { host } = useHostCtx();
+  const t = useMemo(() => tunnelFor(host), [host]);
+  useEffect(() => { if (!t) return; t.attach(); return () => t.detach(); }, [t]);
+  const state = useSyncExternalStore(cb => t?.subscribe(cb) ?? (() => {}), () => t?.state);
+  if (!t || !state) return null;
+  return (
+    <HeaderIcon system={state === 'waiting-subnet' || state === 'starting' ? 'network.badge.shield.half.filled'
+                        : state === 'active' ? 'point.3.filled.connected.trianglepath.dotted' : 'point.3.connected.trianglepath.dotted'}
+                help={tunnelHelp(t)} active={state === 'active'} disabled={state === 'unavailable'}
+                onClick={() => t.toggle()} />
+  );
+}
+
+function tunnelHelp(t: TunnelController): string {
+  switch (t.state) {
+    case 'active': return 'Direct network access to the remote\'s VMs is ON — click to turn off';
+    case 'starting': return 'Starting the network tunnel…';
+    case 'waiting-subnet': return 'Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel';
+    case 'failed': return `Network tunnel failed — click to retry${t.reason ? `\n${t.reason}` : ''}`;
+    case 'unavailable': return `Direct network access to the remote's VMs isn't available: ${t.reason}`;
+    default: return 'Enable direct network access to the remote\'s VMs (192.168.x.x from any local app)';
+  }
 }
 
 function HeaderIcon({ system, help, active, disabled, onClick }: { system: string; help: string; active?: boolean; disabled?: boolean; onClick: () => void }) {

@@ -4413,3 +4413,26 @@
 "SHA-256 fingerprint" = "Huella SHA-256";
 "Add certificate" = "Añadir certificado";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "Necesita un nombre de host y una huella SHA-256 de 64 caracteres; se ignora hasta entonces.";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "Vigilando";
+"Watching %@" = "Vigilando %@";
+"Stop Watching Pull Request" = "Dejar de vigilar la pull request";
+"Allow /ship and /steward" = "Permitir /ship y /steward";
+"Turn /ship and /steward back on in Claude Code too?" = "¿Volver a activar también /ship y /steward en Claude Code?";
+"Turn Them Back On" = "Volver a activarlos";
+"Leave Claude Code's Settings" = "Dejar los ajustes de Claude Code";
+"An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself." = "Una versión anterior de Bromure los desactivó en los ajustes de Claude Code de este espacio de trabajo, igual que usted puede desactivar una habilidad, así que Bromure no puede saber quién lo hizo. Vuelva a activarlos solo si no los desactivó usted.";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code hace commit, push, abre una pull request y la sigue corrigiendo hasta que la fusiones.";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "/ship de Claude Code hace commit de tu trabajo, lo sube, abre una pull request en GitHub y la revisa, y luego la vigila: corrige las comprobaciones que fallan, los conflictos y los comentarios de revisión, y vuelve a subir hasta que la fusiones. /steward inicia la vigilancia de una pull request ya abierta. Sube con el token de GitHub de este espacio de trabajo, a tu nombre. Mientras vigila, la sesión dice «Vigilando PR #…» y tu Mac no se duerme; haz clic derecho en la sesión para detenerla. Desactívalo y ambos comandos desaparecen de Claude Code aquí. Surte efecto la próxima vez que se inicie este espacio de trabajo.";
+
+/* Coding tasks: merge from a client, checkout cleanup */
+"branch and checkout removed" = "rama y copia de trabajo eliminadas";
+"branch and checkout kept" = "rama y copia de trabajo conservadas";
+"This task is no longer on the board." = "Esta tarea ya no está en el tablero.";
+"This task isn't in Review any more, so there is nothing to merge." = "Esta tarea ya no está en Revisión, así que no hay nada que fusionar.";
+"The merge didn't start" = "La fusión no se inició";
+"The merge may not have started" = "Puede que la fusión no se haya iniciado";
+"The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "El host no respondió, ni siquiera al segundo intento. Mira la tarjeta de la tarea: si sigue en Revisión y no se está fusionando, comprueba la conexión y vuelve a fusionarla.";
+"The host refused it (HTTP %d)." = "El host lo rechazó (HTTP %d).";

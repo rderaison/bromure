@@ -1,0 +1,227 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Regression (CWE-613): the desktop sign-out fired SSH-key removal and device
+// self-revocation without awaiting them, swallowed their errors and deleted
+// the local credential anyway — a failed revocation left the device bearer
+// (and its SSH authorization) live on bromure.io with no way to retry.
+
+const calls: string[] = [];
+const outcome: Record<string, number | null> = {};   // method → HTTP status to fail with (null: ok)
+let stored: any = null;
+
+// method → statuses to fail with, one per call in turn (then succeed).
+const queue: Record<string, number[]> = {};
+const fail = (m: string) => {
+  calls.push(m);
+  const st = queue[m]?.length ? queue[m].shift()! : outcome[m];
+  if (st != null) return Promise.reject(Object.assign(new Error(`HTTP ${st}`), { status: st }));
+  return Promise.resolve({ ok: true });
+};
+
+vi.mock('../src/core/cloud/controlPlane', () => ({
+  ControlPlane: class {
+    removeSSHKey() { return fail('removeSSHKey'); }
+    selfRevoke() { return fail('selfRevoke'); }
+    webLogout() { return fail('webLogout'); }
+  },
+  normalizeApiBase: (s: string) => s,
+  loadDeviceRecord: async () => stored,
+  saveDeviceRecord: async (r: any) => { stored = r; },
+  clearDeviceRecord: async () => { calls.push('clearDeviceRecord'); stored = null; },
+}));
+vi.mock('../src/core/ssh/keys', () => ({ idbGet: async () => undefined, idbPut: async () => {}, idbDelete: async (k: string) => { calls.push(`idbDelete ${k}`); } }));
+vi.mock('../src/platform', () => ({ electron: undefined, http: async () => ({ status: 200 }), openExternal() {}, shell: 'electron', SITE_BASE: '', API_BASE: '' }));
+vi.mock('../src/app/store', () => ({ publicKeyLine: async () => '' }));
+
+const { account, setRevoke401DelayForTests, refusalIsFinal } = await import('../src/features/connect/account');
+setRevoke401DelayForTests(0);
+
+async function signedIn(delivery?: 'cookie', accepted = true, enrolledAt = new Date().toISOString()) {
+  stored = { deviceId: 'd1', deviceToken: delivery ? '' : 'tok', apiBase: 'https://bromure.example/api', deviceName: 'x', enrolledAt, delivery, accepted };
+  await account.load();
+  expect(account.get().record).toBeTruthy();
+}
+
+describe('account.signOut', () => {
+  beforeEach(() => { calls.length = 0; for (const k of Object.keys(outcome)) delete outcome[k]; for (const k of Object.keys(queue)) delete queue[k]; });
+
+  it('desktop: awaits SSH-key removal and self-revocation, then forgets the credential', async () => {
+    await signedIn();
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
+    expect(account.get().record).toBeNull();
+  });
+
+  it('desktop: a failed self-revocation keeps the credential and shows the failure', async () => {
+    await signedIn();
+    outcome.selfRevoke = 503;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).not.toContain('clearDeviceRecord');
+    expect(account.get().record?.deviceToken).toBe('tok');
+    expect(stored).toBeTruthy();
+    expect(account.get().error).toMatch(/Couldn't sign out of bromure\.io/);
+    // …and a retry, once bromure.io answers, completes it.
+    delete outcome.selfRevoke; calls.length = 0;
+    expect(await account.signOut()).toBe(true);
+    expect(account.get().record).toBeNull();
+  });
+
+  it('desktop: a failed SSH-key removal keeps the credential (nothing revoked yet)', async () => {
+    await signedIn();
+    outcome.removeSSHKey = 500;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).toEqual(['removeSSHKey']);
+    expect(account.get().record).toBeTruthy();
+    delete outcome.removeSSHKey;
+    expect(await account.signOut()).toBe(true);
+  });
+
+  it('desktop: no SSH key published (404) still signs out', async () => {
+    await signedIn();
+    outcome.removeSSHKey = 404;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
+    expect(account.get().record).toBeNull();
+  });
+
+  // Regression (CWE-613): a 401 for a dead credential was taken as proof the
+  // device was revoked, and sign-out erased the record and device key. But
+  // bromure.io answers the same 401 for a credential that merely EXPIRED
+  // (the hosted cookie lapses after 24 h idle), with the device and its SSH
+  // authorization still live. Nothing is erased on that 401: the first
+  // sign-out explains, the second forgets locally and keeps the device key
+  // (signing in again re-attaches to the same device, which can revoke it).
+  for (const [what, delivery, method] of [
+    ['desktop, accepted credential, SSH-key removal refused', undefined, 'removeSSHKey'],
+    ['desktop, accepted credential, self-revoke refused', undefined, 'selfRevoke'],
+    ['hosted, accepted cookie expired', 'cookie', 'webLogout'],
+  ] as const) {
+    it(`a final 401 is not a revocation: ${what}`, async () => {
+      await signedIn(delivery);
+      outcome[method] = 401;
+      expect(await account.signOut()).toBe(false);
+      expect(calls).not.toContain('clearDeviceRecord');
+      expect(calls.some(c => c.startsWith('idbDelete'))).toBe(false);
+      expect(account.get().record).toBeTruthy();
+      expect(stored).toBeTruthy();
+      expect(account.get().error).toMatch(/expired, or the device was revoked/);
+      expect(account.get().error).toMatch(/Sign Out again/);
+      // The bearer path never skips the self-revoke on its own say-so: a 401
+      // from the SSH-key removal stops there, reported, nothing erased.
+      if (method === 'removeSSHKey') expect(calls).toEqual(['removeSSHKey']);
+      // The second sign-out (told what it means) still tries bromure.io
+      // first, then forgets the credential locally, but not the device key.
+      calls.length = 0;
+      expect(await account.signOut()).toBe(true);
+      expect(calls).toContain(method);
+      expect(calls).toContain('clearDeviceRecord');
+      expect(calls.some(c => c.startsWith('idbDelete'))).toBe(false);
+      expect(account.get().record).toBeNull();
+      expect(account.get().error).toMatch(/Signed out on this device only/);
+    });
+  }
+
+  it('…and a retry that bromure.io accepts after the warning revokes normally', async () => {
+    await signedIn();
+    queue.selfRevoke = [401];
+    expect(await account.signOut()).toBe(false);
+    calls.length = 0;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
+    expect(account.get().error).toBeNull();
+  });
+
+  // Regression (CWE-613): right after enrollment a 401 can be propagation lag,
+  // not a revocation; forgetting the credential then lost the only one able
+  // to revoke a still-live device.
+  it('a 401 for a credential never accepted is retried, then keeps the credential', async () => {
+    await signedIn(undefined, false);
+    outcome.selfRevoke = 401;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'selfRevoke', 'selfRevoke', 'selfRevoke']);
+    expect(calls).not.toContain('clearDeviceRecord');
+    expect(account.get().record?.deviceToken).toBe('tok');
+    expect(account.get().error).toMatch(/couldn't be confirmed/);
+    delete outcome.selfRevoke;
+    expect(await account.signOut()).toBe(true);
+  });
+
+  it('…the same for the SSH-key removal and the hosted web logout', async () => {
+    await signedIn(undefined, false);
+    outcome.removeSSHKey = 401;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).not.toContain('selfRevoke');
+    expect(account.get().record).toBeTruthy();
+    delete outcome.removeSSHKey;
+    expect(await account.signOut()).toBe(true);
+    await signedIn('cookie', false);
+    outcome.webLogout = 401; calls.length = 0;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).toEqual(['webLogout', 'webLogout', 'webLogout', 'webLogout']);
+    expect(account.get().record).toBeTruthy();
+    delete outcome.webLogout;
+    expect(await account.signOut()).toBe(true);
+  });
+
+  // Regression (CWE-613 follow-up): a record saved before `accepted` existed
+  // starts unaccepted; one revoked before its first successful call answers
+  // 401 forever and could never sign out. Past propagation, a 401 is final.
+  // …and (CWE-613, aged 401s) that final 401 is still no revocation: it's
+  // explained, not retried, and nothing is erased until the user confirms.
+  it('a 401 for a credential enrolled long ago is final (not retried) but erases nothing', async () => {
+    await signedIn(undefined, false, new Date(Date.now() - 3600_000).toISOString());
+    outcome.selfRevoke = 401;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke']);
+    expect(account.get().record).toBeTruthy();
+    calls.length = 0;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
+    expect(account.get().record).toBeNull();
+  });
+
+  // Regression (CWE-362): two sign-outs started before the first 401 came
+  // back both captured the record; the first showed the warning, and the
+  // second took that as acknowledged and erased the credential unseen.
+  it('concurrent sign-outs share one result: the warning, with nothing erased', async () => {
+    await signedIn();
+    outcome.selfRevoke = 401;
+    const [a, b] = await Promise.all([account.signOut(), account.signOut()]);
+    expect([a, b]).toEqual([false, false]);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke']);
+    expect(account.get().record?.deviceToken).toBe('tok');
+    // Asked again once the warning is up: forgotten on this device only.
+    calls.length = 0;
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
+  });
+
+  it('a 401 that clears once the credential propagates signs out', async () => {
+    await signedIn(undefined, false);
+    queue.selfRevoke = [401, 401];
+    expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'selfRevoke', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
+    expect(account.get().record).toBeNull();
+  });
+
+  it('hosted (cookie): a failed web logout keeps the identity', async () => {
+    await signedIn('cookie');
+    outcome.webLogout = 502;
+    expect(await account.signOut()).toBe(false);
+    expect(account.get().record).toBeTruthy();
+    delete outcome.webLogout;
+    expect(await account.signOut()).toBe(true);
+    expect(account.get().record).toBeNull();
+  });
+});
+
+describe('refusalIsFinal', () => {
+  const rec = (over: Record<string, any>) => ({ deviceId: 'd', deviceToken: 't', apiBase: '', deviceName: '', enrolledAt: '', ...over });
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  it('final once accepted, past the propagation window, or with no readable enrollment time', () => {
+    expect(refusalIsFinal(rec({ accepted: true, enrolledAt: '2026-11-26T11:59:59Z' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '2026-11-26T11:00:00Z' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '' }), now)).toBe(true);
+    expect(refusalIsFinal(rec({ enrolledAt: '2026-11-26T11:58:00Z' }), now)).toBe(false);
+  });
+});

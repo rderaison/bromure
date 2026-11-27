@@ -1,0 +1,31 @@
+# One tunnel: a TUN routed to one private /24 for the caller's uid, held for
+# as long as the caller's connection lasts (bromure-client-tunnel.socket).
+[Unit]
+Description=Bromure Client network tunnel helper
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=@BIN@ helper
+# What it needs: CAP_NET_ADMIN (TUN, routes, rules, tc, net sysctls) and
+# CAP_SYS_PTRACE (reading the caller's /proc/<pid>/exe: another uid's,
+# non-dumpable process).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

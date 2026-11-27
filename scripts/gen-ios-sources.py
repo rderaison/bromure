@@ -94,6 +94,8 @@ SHARED = [
     "BACDebug.swift",
     "TerminalAppDefaults.swift",
     "FileExplorer.swift",
+    "FolderUpload.swift",
+    "ClaudeShip.swift",  # /ship & /steward model, used by shared Profile/AgentSessions (IOKit guarded)  # write(): atomic temp + rename upload (tar half is macOS-only)
     "FileExplorerViews.swift",
     "AutomationKanbanView.swift",
     "AutomationBoard.swift",

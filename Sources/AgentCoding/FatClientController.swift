@@ -449,7 +449,34 @@ final class RemoteHostController {
             remove: { [weak self] model in self?.removeServerModel(repo: model.repo) },
             installedRepos: { [weak self] in Array(self?.serverInstalledModels ?? []) },
             removeRepo: { [weak self] repo in self?.removeServerModel(repo: repo) },
-            installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] })
+            installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] },
+            probeServer: { [host] base, key, scope in
+                try await Self.probeServerEngine(host: host, baseURL: base, apiKey: key, scope: scope) })
+    }
+
+    /// "Test Connection" for a custom inference server, run BY THE REMOTE
+    /// (`POST /models/probe-server`): the server's network and source address
+    /// are what its launches use, and the client never contacts the engine.
+    /// A redacted/blank key makes the remote use the key it stores for that
+    /// server in `scope`'s configuration. Throws the remote's reason on failure.
+    nonisolated static func probeServerEngine(host: RemoteHost, baseURL: String, apiKey: String?,
+                                              scope: EngineProbeScope) async throws -> [String] {
+        var body: [String: Any] = scope.wire.merging(["baseURL": baseURL]) { _, new in new }
+        if let apiKey, !apiKey.isEmpty { body["apiKey"] = apiKey }
+        let payload = body
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/models/probe-server", body: payload)
+        }.value
+        if resp.json["ok"] as? Bool == true { return (resp.json["models"] as? [String]) ?? [] }
+        let why = resp.json["error"] as? String
+        // A server that predates the route answers the generic /models/ action's 400.
+        if resp.status == 400, why == "bad action or repo" {
+            throw RemoteProbeError(message: NSLocalizedString(
+                "This server's Bromure is too old to test the connection. Update Bromure on it, then try again.",
+                comment: "engine probe: old server"))
+        }
+        throw RemoteProbeError(message: (why?.isEmpty == false ? why! : nil)
+            ?? String(format: NSLocalizedString("The server couldn't test the connection (HTTP %d).", comment: "engine probe"), resp.status))
     }
 #endif
 
@@ -3173,16 +3200,41 @@ final class RemoteHostController {
     }
     /// One request, answered on the main actor: (status, json); status nil
     /// when the server couldn't be reached. Refreshes the mirror after.
+    ///
+    /// `retryUnanswered`, for a request that's safe to send twice: one that
+    /// got no answer at all is sent once more. A pooled connection that died
+    /// while idle (the Mac slept, the network changed) is only found out by
+    /// the request that rides it, which fails at once; the pool then dials a
+    /// fresh one, so a resend gets through.
     func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 retryUnanswered: Bool = false,
                  completion: @escaping @MainActor (Int?, [String: Any]) -> Void) {
         let host = self.host
         pollQueue.async { [weak self] in
-            let resp = try? RemoteTransport.client(for: host).request(method, path, body: body)
+            let resp = Self.sendResendingUnanswered(retryUnanswered, label: "\(method) \(path)") {
+                try? RemoteTransport.client(for: host).request(method, path, body: body)
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { completion(resp?.status, resp?.json ?? [:]) }
                 self?.pollOnce()
             }
         }
+    }
+
+    /// How long a `retryUnanswered` request waits before its resend: the
+    /// pool sees the dead connection close first.
+    nonisolated static let unansweredRetryDelay: TimeInterval = 0.5
+
+    /// `send`, and once more if it got no answer (nil) and `resend` says
+    /// it's safe to send twice (tested).
+    nonisolated static func sendResendingUnanswered<T>(_ resend: Bool, label: String,
+                                                       delay: TimeInterval = unansweredRetryDelay,
+                                                       _ send: () -> T?) -> T? {
+        if let answer = send() { return answer }
+        guard resend else { return nil }
+        FatClientLog.log("request \(label): no answer, sending it once more")
+        Thread.sleep(forTimeInterval: delay)
+        return send()
     }
 
     func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
@@ -5397,8 +5449,10 @@ final class RemoteHostWindow: NSWindow {
                     fix: { id, confirmed, done in
                         // Wait for the host: it refuses a flag this mirror
                         // hasn't shown yet, and the hub then asks.
+                        // Safe to resend: a fix already started stays the one.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/fix",
-                                  body: confirmed ? ["confirmed": true] : [:]) { status, json in
+                                  body: confirmed ? ["confirmed": true] : [:],
+                                  retryUnanswered: true) { status, json in
                             done(.fromServer(status: status, json: json))
                         }
                     },
@@ -5416,8 +5470,12 @@ final class RemoteHostWindow: NSWindow {
                         // code review, as on the local window: the
                         // finding's row says it's in progress and opens
                         // the task.
+                        // Safe to resend: the key makes a resend get the
+                        // task the first send queued, even one done since.
                         c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
-                                  body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
+                                  body: ["session": sid.uuidString, "confirmed": confirmed,
+                                         "handOver": UUID().uuidString],
+                                  retryUnanswered: true) { status, json in
                             done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
                                 "the server runs an older Bromure — update it to hand findings to a session",
                                 comment: "finding → session failure")))
@@ -5502,9 +5560,9 @@ final class RemoteHostWindow: NSWindow {
             land: { [weak self] id, mode, target, keep, push in
                 var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep, "push": push]
                 if let target { body["target"] = target }
-                self?.controller.taskCommand(id, "land", body: body)
+                self?.sendLanding(id, "land", body: body)
             },
-            retryLanding: { [weak self] id in self?.controller.taskCommand(id, "retry-landing") },
+            retryLanding: { [weak self] id in self?.sendLanding(id, "retry-landing") },
             cancelLanding: { [weak self] id in self?.controller.taskCommand(id, "cancel-landing") },
             markDone: { [weak self] id in self?.controller.taskCommand(id, "mark-done") },
             markMerged: { [weak self] id in self?.controller.taskCommand(id, "mark-merged") },
@@ -5750,7 +5808,68 @@ final class RemoteHostWindow: NSWindow {
               let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
                   AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
               }) else { return }
-        showWorkspace(task.profileID, window: tab.index)
+        // Its agent's session, as the local window opens it: the chat, where
+        // a question it asks is answered in line. The workspace's page was
+        // a VM dashboard, with no way to answer.
+        if let s = controller.sessionStore.session(profileID: task.profileID, windowIndex: tab.index) {
+            selectSession(s.id)
+        } else {
+            showWorkspace(task.profileID, window: tab.index)
+        }
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// A Merge (or Merge & Push, a batch, a Retry) the user is waiting on.
+    /// It went out once and was forgotten: a pooled connection that died
+    /// while idle failed it at once, and a refusal came back to no one —
+    /// the click did nothing. Now a request that got no answer is sent once
+    /// more (safe: the host starts one landing at a time and ignores the
+    /// same Merge while it runs), and one that still didn't go, or that the
+    /// host refused, says so.
+    private func sendLanding(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        let token = controller.beginOutgoing()
+        controller.request("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)",
+                           body: body, retryUnanswered: true) { [weak self] status, json in
+            guard let self else { return }
+            self.controller.endOutgoing(token)
+            guard let why = Self.landingFailure(status: status, json: json) else { return }
+            FatClientLog.log("landing \(action) \(id.uuidString): \(why)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = status == nil
+                ? NSLocalizedString("The merge may not have started", comment: "fat client: landing failed")
+                : NSLocalizedString("The merge didn't start", comment: "fat client: landing failed")
+            alert.informativeText = why
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            self.controller.presentSheet(alert)
+        }
+    }
+
+    /// What to tell the user about a landing request's answer; nil when it
+    /// went (an older host answers `{"ok": true}` whatever happened).
+    nonisolated static func landingFailure(status: Int?, json: [String: Any]) -> String? {
+        guard let status else {
+            return NSLocalizedString("The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again.",
+                                     comment: "fat client: landing failed")
+        }
+        if (200..<300).contains(status), json["ok"] as? Bool != false { return nil }
+        return (json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? String(format: NSLocalizedString("The host refused it (HTTP %d).", comment: "fat client: landing failed"), status)
+    }
+
+    /// The session (or room) a handed-off task was given to, as the local
+    /// window shows it. Not wired before: Open Session did nothing.
+    private func openAssignee(_ task: CodingTask) {
+        guard let a = task.assignment else { return }
+        switch a.kind {
+        case .session: selectSession(a.id)
+        case .room: showRoom(a.id)
+        case .worktree: jumpToTask(task)
+        case .switchboard:
+            if let sb = controller.sessionStore.sessions.first(where: { $0.isSwitchboard && !$0.isDeleted }) {
+                selectSession(sb.id)
+            }
+        }
         makeKeyAndOrderFront(nil)
     }
 
@@ -5790,10 +5909,10 @@ final class RemoteHostWindow: NSWindow {
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
-                    mergeBatch: { ids, push in
+                    mergeBatch: { [weak self] ids, push in
                         guard let first = ids.first else { return }
-                        c.taskCommand(first, "merge-batch",
-                                      body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
+                        self?.sendLanding(first, "merge-batch",
+                                          body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
                     },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
@@ -5818,7 +5937,6 @@ final class RemoteHostWindow: NSWindow {
                         TaskAssigneeChoices(
                             sessions: c.sessionStore.sessions
                                 .filter { !$0.isDeleted && !$0.isArchived && !$0.isSwitchboard }
-                                .prefix(40)
                                 .map { .init(id: $0.id, label: $0.nickname.map { "@" + $0 } ?? $0.title,
                                              workspace: c.profile(for: $0.profileID)?.name ?? "", busy: false,
                                              profileID: $0.profileID) },
@@ -5850,7 +5968,8 @@ final class RemoteHostWindow: NSWindow {
                     },
                     answerAttachmentLimit: RemoteHostController.answerAttachmentLimit,
                     recall: { c.taskCommand($0, "recall") },
-                    retryLanding: { c.taskCommand($0, "retry-landing") }),
+                    openAssignee: { [weak self] task in self?.openAssignee(task) },
+                    retryLanding: { [weak self] id in self?.sendLanding(id, "retry-landing") }),
                 sessionStore: c.sessionStore)
             let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []
@@ -6917,7 +7036,7 @@ final class RemoteHostWindow: NSWindow {
 
     private static let debugReadBackActions: Set<String> = [
         "get-mirror-state", "window-info", "focused", "trace-records", "shot", "fc-drop-images",
-        "request-report",
+        "request-report", "settings-window",
     ]
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -7310,7 +7429,12 @@ final class RemoteHostWindow: NSWindow {
         case "start", "stop", "suspend", "reboot":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             switch action {
-            case "start":   controller.startWorkspace(id)
+            case "start":
+                // Refused (nothing sent) until the workspace's profile has
+                // come over the tunnel — say so, so a caller can retry.
+                guard controller.startWorkspace(id) else {
+                    return ["error": "workspace not mirrored yet", "retry": true]
+                }
             case "stop":    controller.shutdownWorkspace(id)
             case "suspend": controller.suspendWorkspace(id)
             default:
@@ -7328,6 +7452,20 @@ final class RemoteHostWindow: NSWindow {
             // the profile + the remote's global models over the tunnel).
             guard let id = resolveID() else { return ["error": "workspace required"] }
             openWorkspaceSettings(id)
+            return ["ok": true]
+        case "settings-window":
+            // E2E read-back: the open workspace-settings editors (the mirror's
+            // counterpart of the local app's `get editor window id`).
+            let open = settingsSessions.filter { $0.value.window.isVisible }
+            let first = open.min { $0.value.window.windowNumber < $1.value.window.windowNumber }
+            return ["ok": true, "open": !open.isEmpty,
+                    "windowId": first?.value.window.windowNumber ?? 0,
+                    "workspace": first?.key.uuidString ?? "",
+                    "workspaces": open.keys.map(\.uuidString)]
+        case "close-settings":
+            // E2E hook: close the workspace-settings editors (one, or all).
+            let target = resolveID()
+            for (id, s) in settingsSessions where target == nil || id == target { s.close() }
             return ["ok": true]
         case "shot-settings":
             // E2E hook: render that editor window to a PNG (`path`).

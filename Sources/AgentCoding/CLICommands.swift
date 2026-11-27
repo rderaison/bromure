@@ -1358,6 +1358,8 @@ struct Exec: ParsableCommand {
 
 /// Set by the SIGWINCH handler; drained in the poll loop to forward a resize.
 private nonisolated(unsafe) var gWinchPending: Int32 = 0
+/// The writing end of the pipe that wakes the pump's poll on SIGWINCH.
+private nonisolated(unsafe) var gWinchWake: Int32 = -1
 
 /// The control-socket client the remote menu (RemoteMenu.swift, shared with
 /// the Linux server) drives: on macOS, the CLI's own.
@@ -1387,6 +1389,33 @@ enum InteractiveExec {
                     view: String? = nil, window: Int? = nil, guiConsent: Bool = false,
                     sizePassive: Bool = false,
                     overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
+        // Watch for resizes BEFORE reading the size, and wake the pump's poll
+        // through a pipe. Both used to lose resizes: the handler went in only
+        // after the stream had opened (a surface is created small and laid
+        // out a moment later — over a remote link that moment falls inside
+        // the open, SIGWINCH was still ignored, and the far pty kept the
+        // first, tiny size: 28x18 under a full window), and one arriving
+        // between the flag's check and poll() sat unsent until the next byte.
+        var wake: [Int32] = [-1, -1]
+        if pipe(&wake) == 0 {
+            for f in wake {
+                _ = fcntl(f, F_SETFL, fcntl(f, F_GETFL) | O_NONBLOCK)
+                _ = fcntl(f, F_SETFD, FD_CLOEXEC)
+            }
+        }
+        gWinchWake = wake[1]
+        gWinchPending = 0
+        signal(SIGWINCH) { _ in
+            gWinchPending = 1
+            var b: UInt8 = 0
+            if gWinchWake >= 0 { _ = Darwin.write(gWinchWake, &b, 1) }
+        }
+        defer {
+            signal(SIGWINCH, SIG_DFL)
+            gWinchWake = -1
+            for f in wake where f >= 0 { Darwin.close(f) }
+        }
+
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
         let cols0 = ws.ws_col == 0 ? 80 : Int(ws.ws_col)
@@ -1414,9 +1443,10 @@ enum InteractiveExec {
         }
         defer { if haveTTY { var o = orig; tcsetattr(STDIN_FILENO, TCSANOW, &o) } }
 
-        gWinchPending = 0
-        signal(SIGWINCH) { _ in gWinchPending = 1 }
-        defer { signal(SIGWINCH, SIG_DFL) }
+        // The size may have moved while the stream opened, unsignalled if
+        // this process wasn't yet the terminal's foreground: say it again.
+        var sent = (cols: cols0, rows: rows0)
+        gWinchPending = 1
 
         var stdinFD: Int32 = STDIN_FILENO
         var inbuf = [UInt8](); inbuf.reserveCapacity(1 << 16)
@@ -1429,12 +1459,22 @@ enum InteractiveExec {
             if gWinchPending != 0 {
                 gWinchPending = 0
                 var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
-                sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
+                let now = (cols: Int(w.ws_col), rows: Int(w.ws_row))
+                if now.cols > 0, now.rows > 0, now != sent {
+                    sent = now
+                    sendFrame(fd, 1, resizePayload(cols: now.cols, rows: now.rows))
+                }
             }
             var fds = [pollfd(fd: stdinFD, events: pollIn, revents: 0),
-                       pollfd(fd: fd, events: pollIn, revents: 0)]
-            let n = poll(&fds, 2, -1)
+                       pollfd(fd: fd, events: pollIn, revents: 0),
+                       pollfd(fd: wake[0], events: pollIn, revents: 0)]
+            let n = poll(&fds, 3, -1)
             if n < 0 { if errno == EINTR { continue }; break }
+            if fds[2].revents & pollIn != 0 {
+                var drain = [UInt8](repeating: 0, count: 64)
+                while Darwin.read(wake[0], &drain, drain.count) > 0 {}
+                continue
+            }
 
             if fds[0].revents & pollIn != 0 {
                 let r = Darwin.read(stdinFD, &rbuf, rbuf.count)
@@ -1450,6 +1490,7 @@ enum InteractiveExec {
                                 // Repaint the guest after the host-side overlay by
                                 // re-sending the window size (tmux redraws on resize).
                                 var w = winsize(); _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &w)
+                                sent = (cols: Int(w.ws_col), rows: Int(w.ws_row))
                                 sendFrame(fd, 1, resizePayload(cols: Int(w.ws_col), rows: Int(w.ws_row)))
                             } else {
                                 // The overlay asked to forward bytes to the guest
@@ -1532,6 +1573,7 @@ private func printRemoteStatus(_ s: [String: Any]) {
         print("  Login as: \(user)")
         print("  Connect:  \(connect)")
     }
+    if let t = s["testLoginUser"] as? String, !t.isEmpty { print("  Test login: \(t) (E2E, until relaunch)") }
     let keys = s["authorizedKeys"] as? [[String: Any]] ?? []
     print("  Keys:     \(keys.count) authorized")
     if let problem = s["authorizedKeysProblem"] as? String, !problem.isEmpty { print("  Warning:  \(problem)") }

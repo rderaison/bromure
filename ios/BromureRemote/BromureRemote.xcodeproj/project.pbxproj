@@ -45,6 +45,7 @@
 		B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */; };
 		0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4859F57204F5FFC9440A246F /* BulkLanePriority.swift */; };
 		C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */; };
+		6FFFBBDD8BEDB3BDE1836E76 /* ClaudeShip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */; };
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
 		9BD8DFBAE81C758FE50018D8 /* CodingTaskCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F0BF456AF9F49DF4ECF7A8 /* CodingTaskCommands.swift */; };
@@ -70,6 +71,7 @@
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		CAEB25CBA64BEB60E01EB9FF /* FolderUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */; };
 		CD40F8FC35AF8A8FE2940D95 /* GuestExecError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */; };
 		867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */; };
 		0A6E103CD91A1B11445707C2 /* HermesHook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A4678F54C1BBE97B742BB4A /* HermesHook.swift */; };
@@ -111,6 +113,7 @@
 		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
 		FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */; };
 		3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */; };
+		7C915E95C47368E1220EFA95 /* P2P__WSRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 937A2E3E3E4044D182D3690D /* P2P__WSRelay.swift */; };
 		6CE6F798CD034F642319C07A /* PlatformCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DE157DC969981AF49458519 /* PlatformCompat.swift */; };
 		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
@@ -219,6 +222,7 @@
 		D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BranchMergeCommands.swift"; path = "Sources/BromureRemote/_shared/BranchMergeCommands.swift"; sourceTree = "<group>"; };
 		4859F57204F5FFC9440A246F /* BulkLanePriority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BulkLanePriority.swift"; path = "Sources/BromureRemote/_shared/BulkLanePriority.swift"; sourceTree = "<group>"; };
 		000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeAutoMode.swift"; path = "Sources/BromureRemote/_shared/ClaudeAutoMode.swift"; sourceTree = "<group>"; };
+		6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeShip.swift"; path = "Sources/BromureRemote/_shared/ClaudeShip.swift"; sourceTree = "<group>"; };
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
 		13F0BF456AF9F49DF4ECF7A8 /* CodingTaskCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTaskCommands.swift"; path = "Sources/BromureRemote/_shared/CodingTaskCommands.swift"; sourceTree = "<group>"; };
@@ -244,6 +248,7 @@
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FolderUpload.swift"; path = "Sources/BromureRemote/_shared/FolderUpload.swift"; sourceTree = "<group>"; };
 		65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestExecError.swift"; path = "Sources/BromureRemote/_shared/GuestExecError.swift"; sourceTree = "<group>"; };
 		3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestURLGate.swift"; path = "Sources/BromureRemote/_shared/GuestURLGate.swift"; sourceTree = "<group>"; };
 		9A4678F54C1BBE97B742BB4A /* HermesHook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HermesHook.swift"; path = "Sources/BromureRemote/_shared/HermesHook.swift"; sourceTree = "<group>"; };
@@ -285,6 +290,7 @@
 		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
 		7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTLS.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTLS.swift"; sourceTree = "<group>"; };
 		03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnUDP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnUDP.swift"; sourceTree = "<group>"; };
+		937A2E3E3E4044D182D3690D /* P2P__WSRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__WSRelay.swift"; path = "Sources/BromureRemote/_shared/P2P__WSRelay.swift"; sourceTree = "<group>"; };
 		7DE157DC969981AF49458519 /* PlatformCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformCompat.swift"; path = "Sources/BromureRemote/_shared/PlatformCompat.swift"; sourceTree = "<group>"; };
 		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
@@ -417,6 +423,7 @@
 				D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */,
 				4859F57204F5FFC9440A246F /* BulkLanePriority.swift */,
 				000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */,
+				6F06CE5DE8F73687E75CAF27 /* ClaudeShip.swift */,
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
 				13F0BF456AF9F49DF4ECF7A8 /* CodingTaskCommands.swift */,
@@ -442,6 +449,7 @@
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				3453B7FA67AC4EB5D96BA9EB /* FolderUpload.swift */,
 				65807D6CF50DB4D2F45F4BA5 /* GuestExecError.swift */,
 				3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */,
 				9A4678F54C1BBE97B742BB4A /* HermesHook.swift */,
@@ -483,6 +491,7 @@
 				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
 				7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */,
 				03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */,
+				937A2E3E3E4044D182D3690D /* P2P__WSRelay.swift */,
 				7DE157DC969981AF49458519 /* PlatformCompat.swift */,
 				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
 				C2368064077094F44DF16B8E /* Profile.swift */,
@@ -669,6 +678,7 @@
 				B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */,
 				0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */,
 				C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */,
+				6FFFBBDD8BEDB3BDE1836E76 /* ClaudeShip.swift in Sources */,
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
 				9BD8DFBAE81C758FE50018D8 /* CodingTaskCommands.swift in Sources */,
@@ -694,6 +704,7 @@
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				CAEB25CBA64BEB60E01EB9FF /* FolderUpload.swift in Sources */,
 				CD40F8FC35AF8A8FE2940D95 /* GuestExecError.swift in Sources */,
 				867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */,
 				0A6E103CD91A1B11445707C2 /* HermesHook.swift in Sources */,
@@ -735,6 +746,7 @@
 				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,
 				FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */,
 				3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */,
+				7C915E95C47368E1220EFA95 /* P2P__WSRelay.swift in Sources */,
 				6CE6F798CD034F642319C07A /* PlatformCompat.swift in Sources */,
 				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,

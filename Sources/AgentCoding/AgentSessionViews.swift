@@ -725,6 +725,12 @@ struct SessionSectionsView: View {
                 if s.windowIndex != nil, !s.hasEnded {
                     Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
                 }
+                if !s.hasEnded, SessionHome.shipWatching(s) != nil {
+                    // Claude Code's own way to end it: the wake-up is cancelled.
+                    Button(NSLocalizedString("Stop Watching Pull Request", comment: "session menu: end Claude Code's /ship watch")) {
+                        actions.resumeWith(s.id, "/ship stop")
+                    }
+                }
                 Divider()
                 Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameFor = s }
                 if SessionHome.hasFolder(s) {

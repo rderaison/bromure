@@ -87,8 +87,9 @@ could not be carried over, or that works differently, and why.
 ## Sidebar & toolbar
 
 - **Network tunnel toggle** (RemoteToolbarBar's first icon — direct
-  192.168.x.x access to the remote's VMs through a macOS system extension) is
-  not offered: a browser/Electron app can't install a host network route.
+  192.168.x.x access to the remote's VMs) is in the **Linux desktop app** only
+  (see "System-wide network tunnel" below). The hosted app (a page can't
+  install a route) and the Windows app (no helper yet) don't show it.
 - **Toolbar** follows UnifiedToolbarBar's layout (dimmed Terminal pill + globe
   while a session's machine sleeps, as in the reference renders) rather than
   the older RemoteToolbarBar order. No **Sandbox drawer** shield
@@ -313,10 +314,14 @@ could not be carried over, or that works differently, and why.
 
 ## Machines, files & branches
 
-- **System-wide network tunnel (utun) / SOCKS forwarder.** The macOS fat client can install a privileged helper that routes the remote host's VM subnet through a local utun interface (and a per-app SOCKS forwarder), so any local app can reach a remote guest's ports. A browser can't create interfaces or listen on sockets, and Electron would need an elevated helper per OS; not ported. The VM dashboard's Listening Ports card shows and copies the endpoints, but they are only reachable from the host's own network.
+- **System-wide network tunnel (utun) / SOCKS forwarder.** The macOS fat client can install a privileged helper that routes the remote host's VM subnet through a local utun interface (and a per-app SOCKS forwarder), so any local app can reach a remote guest's ports.
+  - **Linux desktop app: ported** (`web-client/tunnel/`, `electron/tunnel.ts`, `src/features/toolbar/tunnel.ts`). Same design as the Mac: a root helper (systemd socket from the .deb, `bromure-client-tunnel helper`) creates a TUN and routes the /24 the remote reports (`vmnetSubnet`), the user's side runs a Go port of the Mac's userspace stack (TCP, UDP over `forward-udp`, ping answered locally), and every flow rides the window's SSH (`bromure-fatclient/1 forward …`) on its own connection, as the Mac's forward lane. Same toggle, states and copy.
+  - **Differences on Linux:** the route applies to **your own user's programs only** (a uid policy rule), not system-wide — other accounts on the machine, and `sudo`/root, don't go through your tunnel. The helper refuses when reverse-path filtering is strict (`net.ipv4.conf.all.rp_filter=1`, e.g. RHEL-style hardening; Debian/Ubuntu default to loose). It also refuses a subnet another route already covers (a LAN, VPN or Docker network using the same range), like the Mac's helper.
+  - **Not available:** in the tarball build (no helper: the toggle is disabled with the reason), the hosted app, and the Windows app. **DNS:** none, as on the Mac (the Mac tunnel doesn't touch the resolver either): guests are reached by address.
+  - The VM dashboard's Listening Ports card shows and copies the endpoints; with the tunnel on they're reachable from this machine at those addresses.
 - **Cloudflare quick tunnels** (the ports card's globe — expose a guest web service at a trycloudflare.com URL) run `cloudflared` as a local subprocess on the Mac; not available in the web client. The globe is omitted.
-- **Local browser pane VM** (the fat client's per-workspace Chromium VM next to the stage, and its browser-MCP relay) needs Virtualization.framework on the client; not ported. The toolbar globe explains this instead of opening a pane; agents' browser-MCP calls are then handled by the server itself, exactly as when no Mac client is attached.
-- **Remote Access settings** (the server's SSH front door) are changed on the server itself; the palette entry explains where.
+- **Local browser pane VM** (the fat client's per-workspace Chromium VM next to the stage, and its browser-MCP relay) needs Virtualization.framework on the client; not ported. The desktop app's globe (⌃⌘B / Ctrl+Alt+B) opens a **built-in browser window** instead (`electron/browser.ts`): an in-memory session whose PAC sends only the workspace subnet to a loopback HTTP proxy that answers only this session's random credential, each connection carried over the window's SSH forward lane (`forward <ip> <port>`), the rest direct — the reach of the Mac's pane, without its VM isolation or agent control. Agents' browser-MCP calls are handled by the server itself, as when no Mac client is attached. The hosted app has no globe (the user's own browser is the browser).
+- **Remote Access settings** (the server's SSH front door) are changed on the server itself (Bromure › Remote Access… there, or `bromure-ac remote`); the client has no menu or palette entry for them.
 - **Files pane drag-out** (dragging a guest file to the Finder/desktop as a lazily-downloaded file promise) has no web equivalent; use the row's context menu › Save to Downloads (browser download / Electron save dialog). Drag-in of files **and folders** works (folders travel as one gzipped tar the guest unpacks, built in the browser).
 - **Pop-out file viewer window** (full-screen-capable) is not ported; the preview stays in the pane's split.
 - **Syntax highlighting** in the file preview (Highlightr / highlight.js) is not bundled (no new dependencies): source previews are plain monospaced text. Video previews aren't shown (images are).

@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.1</string>
+	<string>1.0.2</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -32,7 +32,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1.0.1</string>
+	<string>1.0.2</string>
 	<!-- Sparkle: Bromure AC's scheme on its own channel. The feed serves
 	     downloads under releases-sidecar/; same SUPublicEDKey (one signing
 	     key on the build host). Sparkle compares CFBundleVersion, so it is

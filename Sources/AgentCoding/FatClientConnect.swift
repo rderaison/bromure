@@ -351,12 +351,15 @@ final class RemoteConnectModel {
             directoryEverLoaded = true
             firstLoad401Retries = 0
         } catch ControlPlaneError.http(401, _) where directoryEverLoaded {
-            // The directory loaded before, so a 401 now is a genuine
-            // server-side revocation of this device — sign out.
+            // The directory loaded before, so the credential is dead -- but
+            // bromure.io answers the same 401 for a revoked device and for a
+            // token that merely expired (CWE-613), so this doesn't erase the
+            // identity: the device and its SSH key may still be live. Stop
+            // polling and explain; Sign Out then forgets it on this Mac.
             stopDirectoryRefresh()
-            account.signOut()
             p2pServers = []
-            directoryError = "This Mac's bromure.io device was revoked. Sign in again."
+            account.noteCredentialRefused(bearer: id.bearer)
+            directoryError = P2PEnrollmentCoordinator.directoryRefusedMessage
         } catch ControlPlaneError.http(401, _) {
             // First load after a fresh sign-in. A 401 here is a device that
             // isn't queryable yet (enrollment still propagating) or an account
@@ -517,19 +520,16 @@ final class RemoteConnectModel {
         }
     }
 
-    func signOutAccount() {
+    /// Retire this device on bromure.io, then forget it locally (see
+    /// `P2PEnrollmentCoordinator.signOutRevoking`). If bromure.io couldn't
+    /// confirm the revoke, the user stays signed in with the error shown, and
+    /// this returns false.
+    @discardableResult
+    func signOutAccount() async -> Bool {
+        guard await account.signOutRevoking() else { return false }
         stopDirectoryRefresh()
-        // Retire this device on bromure.io before sign-out erases its identity:
-        // the install is about to be dead (its keys are gone locally), so revoke
-        // it so it doesn't linger as a live duplicate when the user signs in
-        // again. Revoke also drops its SSH key from the user's servers. Capture
-        // the bearer first — sign-out is local, so the token stays valid long
-        // enough for this to land.
-        if let (client, bearer) = ControlPlaneClient.current() {
-            Task { try? await client.selfRevoke(bearer: bearer) }
-        }
-        account.signOut()
         p2pServers = []
+        return true
     }
 }
 
@@ -742,8 +742,11 @@ struct RemoteConnectView: View {
                         .font(.caption).foregroundStyle(.tertiary)
                         .help("This Mac is enrolled by your organization; its bromure.io identity is managed outside this window.")
                 } else {
-                    Button("Sign Out") { model.signOutAccount(); selection = nil }
-                        .buttonStyle(.link)
+                    Button("Sign Out") {
+                        Task { if await model.signOutAccount() { selection = nil } }
+                    }
+                    .buttonStyle(.link)
+                    .disabled(model.p2pBusy)
                 }
             } else {
                 Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(.secondary)

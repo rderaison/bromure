@@ -144,6 +144,10 @@ textarea.field { height: auto; padding: 4px 6px; resize: none; line-height: 1.3;
      content behind bleed through wherever backdrop-filter isn't composited. */
   background: var(--control-bg);
   box-shadow: var(--shadow-popover); font-size: var(--fs-body);
+  /* Bounded by the viewport (MenuView keeps 4px clear on each side) and
+     scrolls, like an NSMenu taller than the screen: a long list (every
+     active session) must keep its lower items reachable. */
+  max-height: calc(100vh - 8px); overflow-y: auto; overscroll-behavior: contain;
 }
 :root[data-theme="dark"] .menu { background: #2A2A2A; }
 .menu-item {
@@ -162,6 +166,7 @@ textarea.field { height: auto; padding: 4px 6px; resize: none; line-height: 1.3;
 .popover {
   position: fixed; z-index: 9000; border-radius: 12px; background: var(--control-bg);
   box-shadow: var(--shadow-popover);
+  max-height: calc(100vh - 12px); overflow-y: auto; overscroll-behavior: contain;   /* Popover keeps 6px clear */
 }
 
 /* ── In-app windows & sheets ──────────────────────────────────────────── */

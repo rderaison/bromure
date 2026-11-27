@@ -7,6 +7,10 @@ import Darwin
 #endif
 
 extension Notification.Name {
+    /// bromure.io refused this device's bearer for good (`userInfo["bearer"]`),
+    /// e.g. on the device channel's upgrade. Revoked or only expired -- not a
+    /// confirmed revoke, so nothing is erased on it.
+    static let p2pCredentialRefused = Notification.Name("io.bromure.p2pCredentialRefused")
     /// Posted when the device channel reports a peer's SSH key changed — the
     /// server re-pulls the owner's authorized keys immediately (no-op on a
     /// client with no SSH server).
@@ -284,16 +288,16 @@ final class P2PBroker: @unchecked Sendable {
         }
         let revokedToken = id.bearer
         ch.onRevoked = { [weak self] in
-            // Only a browser-enrolled device record is ours to erase; the
-            // enterprise identity is managed by BACEnrollment's own lifecycle.
-            // And only the record THIS channel spoke for: after a re-enroll the
-            // old device's channel can still be open, and revoking that old
-            // device must not wipe the new record that replaced it.
-            FatClientLog.log("p2p: device channel reported revoked")
-            if case .found(let rec) = DeviceIdentityStore.load(), rec.deviceToken == revokedToken {
-                DeviceIdentityStore.erase()
-            }
+            // bromure.io refused this bearer on the upgrade: revoked, or only
+            // expired -- its 401 doesn't say which. So the identity is NOT
+            // erased here (CWE-613): the device and its SSH key may still be
+            // live, and this bearer is the only one that can revoke them.
+            // Stop serving and say so; the user's Sign Out decides
+            // (P2PEnrollmentCoordinator observes the notification).
+            FatClientLog.log("p2p: device channel refused (revoked or expired)")
             self?.stopServing()
+            NotificationCenter.default.post(name: .p2pCredentialRefused, object: nil,
+                                            userInfo: ["bearer": revokedToken])
         }
         ch.connect()
         return waitConnected(ch) ? ch : nil

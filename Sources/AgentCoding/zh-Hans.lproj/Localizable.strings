@@ -4411,3 +4411,26 @@
 "SHA-256 fingerprint" = "SHA-256 指纹";
 "Add certificate" = "添加证书";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "需要主机名和 64 个字符的 SHA-256 指纹；在此之前将被忽略。";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "正在监视";
+"Watching %@" = "正在监视 %@";
+"Stop Watching Pull Request" = "停止监视拉取请求";
+"Allow /ship and /steward" = "允许 /ship 和 /steward";
+"Turn /ship and /steward back on in Claude Code too?" = "也在 Claude Code 中重新开启 /ship 和 /steward？";
+"Turn Them Back On" = "重新开启";
+"Leave Claude Code's Settings" = "保留 Claude Code 的设置";
+"An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself." = "早期版本的 Bromure 在此工作区的 Claude Code 设置中关闭了它们，方式与您自己关闭某个技能相同，因此 Bromure 无法分辨是谁关闭的。仅当不是您自己关闭时才重新开启。";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code 会提交、推送、创建拉取请求，并持续修复直到你合并。";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "Claude Code 的 /ship 会提交你的工作、推送、在 GitHub 上创建拉取请求并进行审查，然后监视它：修复失败的检查、冲突和审查意见，并再次推送，直到你合并。/steward 会开始监视一个已打开的拉取请求。推送使用此工作区的 GitHub 令牌，以你的名义进行。监视期间，会话显示“正在监视 PR #…”，你的 Mac 保持唤醒；右键点按会话即可停止。关闭此项后，这里的 Claude Code 将不再有这两个命令。在此工作区下次启动时生效。";
+
+/* Coding tasks: merge from a client, checkout cleanup */
+"branch and checkout removed" = "分支和检出已删除";
+"branch and checkout kept" = "分支和检出已保留";
+"This task is no longer on the board." = "此任务已不在看板上。";
+"This task isn't in Review any more, so there is nothing to merge." = "此任务已不在审阅中，没有可合并的内容。";
+"The merge didn't start" = "合并未开始";
+"The merge may not have started" = "合并可能未开始";
+"The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "主机两次都没有响应。请查看任务卡片：如果它仍在审阅中且未在合并，请检查连接后再次合并。";
+"The host refused it (HTTP %d)." = "主机拒绝了该请求（HTTP %d）。";

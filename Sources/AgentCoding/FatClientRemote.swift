@@ -59,6 +59,21 @@ enum RemoteTransport {
         return list
     }
 
+    /// Point every default `ControlClient()` in this process at a remote
+    /// (by host id or name, from hosts.json) through the fat-client tunnel.
+    /// The CLI calls it at startup for BROMURE_AC_REMOTE_HOST. False when no
+    /// such host is configured.
+    @discardableResult
+    static func installCLIRemote(_ key: String) -> Bool {
+        let hosts = loadHosts()
+        guard let host = hosts.first(where: {
+            $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame
+                || $0.name.caseInsensitiveCompare(key) == .orderedSame
+        }) else { return false }
+        ControlClient.defaultRemote = { client(for: host) }
+        return true
+    }
+
     static func saveHosts(_ hosts: [RemoteHost]) {
         ensureDirs()
         guard let data = try? JSONEncoder().encode(hosts) else { return }

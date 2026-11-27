@@ -21,7 +21,6 @@
 //   review-branch      Review Changes for a session; { sessionID }
 //   merge-branch       Merge into parent; { sessionID }
 //   toggle-files       Files pane
-//   remote-access      the server's Remote Access settings
 
 import { useEffect, useRef } from 'react';
 

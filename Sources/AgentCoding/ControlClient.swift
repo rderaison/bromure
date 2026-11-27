@@ -23,7 +23,21 @@ struct ControlClient {
     /// tunnel to a remote bromure-ac. Returns an fd the caller owns, or nil.
     let dial: () -> Int32?
 
+    /// The process's default transport, when it isn't the local control
+    /// socket: the CLI sets it once at startup from BROMURE_AC_REMOTE_HOST
+    /// (RemoteTransport.installCLIRemote) so every subcommand rides the
+    /// fat-client SSH tunnel to that remote — what the fat-client E2E suite
+    /// runs the CLI tests through. nil = the local control socket.
+    static var defaultRemote: (() -> ControlClient)?
+
+    /// Whether this client rides a fat-client tunnel rather than the local socket.
+    var isRemote: Bool { socketPath.hasPrefix("ssh://") }
+
     init(socketPath: String? = nil) {
+        if socketPath == nil, let remote = ControlClient.defaultRemote {
+            self = remote()
+            return
+        }
         let path = socketPath ?? ProfileStore().controlSocketURL.path
         self.socketPath = path
         self.dial = { ControlClient.connect(to: path) }
@@ -265,6 +279,8 @@ struct ControlClient {
     /// then poll the control socket until it answers (or `timeout` elapses).
     func ensureAgentRunning(timeout: TimeInterval = 40) throws {
         if isAgentRunning() { return }
+        // A remote agent can't be started from here.
+        if isRemote { throw ClientError.transport("The remote bromure-ac (\(socketPath)) isn't answering.") }
 
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
         let proc = Process()

@@ -48,6 +48,11 @@ final class P2PEnrollmentCoordinator {
     /// link can't enroll this Mac into an attacker's workspace.
     private var pendingState: String?
 
+    /// The bearer (fingerprint) whose refused sign-out was already explained:
+    /// the next sign-out with it forgets the identity locally
+    /// (`signOutRevoking`). In memory only, so a relaunch explains again.
+    private var refusalShownFor: String?
+
 #if os(iOS)
     /// Retained while the in-app sign-in web sheet is on screen; the callback
     /// (a `bromure://enroll` redirect) is captured by the session itself.
@@ -66,7 +71,20 @@ final class P2PEnrollmentCoordinator {
     var webSignIn: WebSignIn?
 #endif
 
-    init() { identity = P2PIdentity.current() }
+    init() {
+        identity = P2PIdentity.current()
+        // The device channel found the bearer refused (P2PBroker): explain,
+        // and let the next Sign Out forget it on this device.
+        NotificationCenter.default.addObserver(forName: .p2pCredentialRefused, object: nil, queue: .main) { note in
+            guard let bearer = note.userInfo?["bearer"] as? String else { return }
+            MainActor.assumeIsolated {
+                let me = P2PEnrollmentCoordinator.shared
+                guard ControlPlaneClient.current()?.1 == bearer else { return }
+                me.noteCredentialRefused(bearer: bearer)
+                me.error = Self.directoryRefusedMessage
+            }
+        }
+    }
 
     var signedIn: Bool { identity != nil }
     var accountLabel: String? { identity?.orgSlug ?? (signedIn ? "bromure.io" : nil) }
@@ -195,9 +213,132 @@ final class P2PEnrollmentCoordinator {
     /// Forget a browser-enrolled identity locally (server-side revoke is an
     /// admin action). No-op for the enterprise enrollment — that's owned by the
     /// managed-enrollment lifecycle, not this window.
+    /// The user's sign-out: retire this device on bromure.io (which revokes
+    /// its token and drops its SSH key from the user's servers), and only once
+    /// bromure.io confirmed it, forget the identity locally. Erasing it first
+    /// would leave the token live on bromure.io with nothing left to retry the
+    /// revoke with (CWE-613). On failure the identity is kept, `error` says
+    /// why, and the user can try again. Returns whether it signed out.
+    /// `beforeErase` runs once the revoke is done, before the identity is
+    /// forgotten (the log-out panel unenrolls there, so the identity doesn't
+    /// fall back to that enrollment's).
+    ///
+    /// A credential bromure.io refuses for good (`.refused`) is NOT a
+    /// confirmed revoke: its 401 is the same for a revoked device and for a
+    /// token that merely expired, with the device and its SSH key still live
+    /// (CWE-613). The first such sign-out explains and keeps the identity; the
+    /// next one (or one after `noteCredentialRefused`) forgets it on this Mac
+    /// only, saying the device may still be listed on bromure.io.
+    @discardableResult
+    func signOutRevoking(beforeErase: (() async -> Void)? = nil) async -> Bool {
+        guard !isEnterprise, !busy else { return false }
+        var localOnly = false
+        if let (client, bearer) = ControlPlaneClient.current() {
+            busy = true; error = nil
+            // Decided now, not when bromure.io answers: the explanation must
+            // have been shown before this sign-out was asked for. A refusal
+            // noted while it's in flight (the directory, the device channel)
+            // isn't one the user has seen yet (CWE-362).
+            let warned = refusalShownFor == AcceptedCredential.fingerprint(bearer)
+            var record: DeviceRecord?
+            if case .found(let r) = DeviceIdentityStore.load() { record = r }
+            let final = AcceptedCredential.refusalIsFinal(bearer: bearer, record: record)
+            let outcome = await Self.revokeForSignOut(final: final) {
+                try await client.selfRevoke(bearer: bearer)
+            }
+            busy = false
+            switch outcome {
+            case .done:
+                break
+            case .failed(let failure):
+                error = failure
+                return false
+            case .refused:
+                guard warned else {
+                    refusalShownFor = AcceptedCredential.fingerprint(bearer)
+                    error = Self.refusedMessage
+                    return false
+                }
+                localOnly = true
+            }
+        }
+        await beforeErase?()
+        signOut()
+        if localOnly {
+            error = "Signed out on this device only. If bromure.io still lists it under your devices, revoke it there."
+        }
+        return true
+    }
+
+    static let refusedMessage = "bromure.io no longer accepts this device’s credentials — they expired, or the device was revoked, and bromure.io doesn’t say which, so this device may still be registered there. Sign Out again to forget it on this device only, and if it is still listed under your devices on bromure.io, revoke it there."
+
+    /// Something other than sign-out (the directory) found bromure.io
+    /// refusing `bearer` for good and explained it (`directoryRefusedMessage`):
+    /// the next sign-out may forget the identity locally without asking again.
+    func noteCredentialRefused(bearer: String) {
+        refusalShownFor = AcceptedCredential.fingerprint(bearer)
+    }
+
+    static let directoryRefusedMessage = "bromure.io no longer accepts this device’s credentials — they expired, or the device was revoked, and bromure.io doesn’t say which. Sign Out to forget it on this device, and if it is still listed under your devices on bromure.io, revoke it there."
+
+
+    enum RevokeOutcome: Equatable {
+        /// bromure.io confirmed the revoke.
+        case done
+        /// bromure.io refuses the credential for good (`final` 401): revoked,
+        /// or only expired -- unknown, so not a confirmed revoke.
+        case refused
+        /// Not confirmed; the message to show.
+        case failed(String)
+    }
+
+    /// Run a sign-out revoke. Only a 2xx confirms it (`.done`). A 401 never
+    /// does (CWE-613): for a credential whose refusal is final (`final`:
+    /// AcceptedCredential.refusalIsFinal -- accepted before, expired, or past
+    /// propagation) it's `.refused`, since bromure.io answers the same 401 for
+    /// a revoked device and for an expired token.
+    ///
+    /// A 401 for a credential bromure.io never accepted may be propagation lag
+    /// right after enrollment: it's retried (`retries` times, `retryDelay`
+    /// apart, as the directory's first load does), then reported. Erasing the
+    /// identity then would lose the only bearer that can revoke a device that
+    /// is still live, SSH key included.
+    nonisolated static func revokeForSignOut(final: Bool, retries: Int = 3,
+                                             retryDelay: UInt64 = 2_000_000_000,
+                                             _ revoke: () async throws -> Void) async -> RevokeOutcome {
+        var attempt = 0
+        while true {
+            do {
+                try await revoke()
+                return .done
+            } catch ControlPlaneError.http(status: 401, _) {
+                if final { return .refused }
+                if attempt < retries {
+                    attempt += 1
+                    try? await Task.sleep(nanoseconds: retryDelay)
+                    continue
+                }
+                return .failed("Couldn’t sign out of bromure.io: it doesn’t recognize this device’s credentials yet, so the sign-out couldn’t be confirmed. This device may still be registered there — try again in a moment.")
+            } catch {
+                let why: String
+                switch error as? ControlPlaneError {
+                case .transport(let m)?: why = m
+                case .http(let status, _)?: why = "HTTP \(status)"
+                case .decode?: why = "unexpected response"
+                default: why = error.localizedDescription
+                }
+                return .failed("Couldn’t sign out of bromure.io (\(why)). This device is still registered there — check your connection and try again.")
+            }
+        }
+    }
+
+    /// Forget the identity locally. The user's sign-out goes through
+    /// `signOutRevoking()`, which decides when that is safe.
     func signOut() {
         guard !isEnterprise else { return }
+        refusalShownFor = nil
         DeviceIdentityStore.erase()
+        AcceptedCredential.forget()
         P2PBroker.shared.stopServing()
         identity = P2PIdentity.current()   // may fall back to enterprise if present
         NotificationCenter.default.post(name: .p2pIdentityChanged, object: nil)

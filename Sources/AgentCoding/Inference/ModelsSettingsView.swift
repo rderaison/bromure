@@ -42,6 +42,10 @@ struct ModelsSubscriptionHooks {
     /// The saved sign-in's health (last host refresh, access-token expiry, an
     /// unreadable store) — nil when the host can't tell.
     var health: (ModelProvider) -> SubscriptionLoginHealth? = { _ in nil }
+    /// Set on a fat client: "Test Connection" for the custom server runs on
+    /// the REMOTE (its network, its source address) and returns the model ids
+    /// or throws its error. nil = this machine is the one that uses it.
+    var probeServer: ((_ baseURL: String, _ apiKey: String?) async throws -> [String])? = nil
 }
 
 /// A workspace's LAYER over the global settings (see `ModelOverride`): the
@@ -946,9 +950,12 @@ struct ModelsSettingsView: View {
         }
         localServerProbe = .probing
         let key = s.apiKey
+        let remoteProbe = subscription?.probeServer
         Task {
             do {
-                let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+                let models: [String]
+                if let remoteProbe { models = try await remoteProbe(s.baseURL, key) }
+                else { models = try await ExternalEngine.listModels(base: base, apiKey: key) }
                 await MainActor.run { localServerModels = models; localServerProbe = .ok(models.count) }
             } catch {
                 await MainActor.run { localServerModels = []; localServerProbe = .failed(error.localizedDescription) }

@@ -257,6 +257,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
             if oldValue != windowIndex {
                 windowID = nil; agentProcessStart = nil
                 agentProcessPID = nil; agentProcessUptime = nil
+                shipWatch = nil; shipWatchSeen = nil
                 if windowIndex != nil { releasedWindowIndex = nil }
             }
         }
@@ -340,6 +341,13 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// beautified view. Its hooks still say "done", so without this the
     /// sidebar read "Ready" while the chat said the agent was asking.
     var awaitingAnswer: Bool?
+    /// The pull request (`#41`) or branch Claude Code's `/ship` watch is
+    /// tending in this tab, as its last turn's end reported it; `""` a watch
+    /// whose target couldn't be read. nil: no watch (ClaudeShip).
+    var shipWatch: String?
+    /// When the watch was last reported: one not heard from in
+    /// `ClaudeShip.staleAfter` is gone (the agent exited, the tab closed).
+    var shipWatchSeen: Date?
     /// How many times the agent finished a turn or stopped to ask -- counted
     /// on the server, where the hooks land. `readReplies` is how far anyone
     /// has read: the session shows unread on every client while it's behind
@@ -1756,6 +1764,40 @@ final class AgentSessionStore {
         save()
     }
 
+    /// What a turn's end said about the tab's `/ship` watch: `ref` running
+    /// (`#41`, a branch, `""`), or none. Saved on a change, and when a
+    /// running one's last word gets old (the stale check goes by it).
+    func setShipWatch(_ id: UUID, _ ref: String?, now: Date = Date()) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let was = sessions[i].shipWatch
+        let seen = sessions[i].shipWatchSeen
+        sessions[i].shipWatch = ref
+        sessions[i].shipWatchSeen = ref == nil ? nil : now
+        let refreshed = ref != nil && (seen.map { now.timeIntervalSince($0) > 600 } ?? true)
+        if was != ref || refreshed { save() }
+    }
+
+    /// The machine stopped: none of its tabs watch anything any more.
+    func clearShipWatches(profileID: UUID) {
+        var changed = false
+        for i in sessions.indices where sessions[i].profileID == profileID && sessions[i].shipWatch != nil {
+            sessions[i].shipWatch = nil
+            sessions[i].shipWatchSeen = nil
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Watches running now: reported within `ClaudeShip.staleAfter`, in a
+    /// live tab.
+    func liveShipWatches(now: Date = Date()) -> Int {
+        sessions.filter { s in
+            guard s.shipWatch != nil, s.windowIndex != nil, !s.isArchived,
+                  let seen = s.shipWatchSeen else { return false }
+            return now.timeIntervalSince(seen) < ClaudeShip.staleAfter
+        }.count
+    }
+
     /// The beautified view's verdict on whether the agent's screen shows a
     /// dialog waiting on the user. Persisted only on change.
     /// True when it changed.
@@ -2211,6 +2253,14 @@ enum SessionHome {
         return f.hasPrefix(String(t.prefix(12))) || t.hasPrefix(f)
     }
 
+    /// The `/ship` watch the session's tab runs, when one was reported
+    /// lately (`""`: its target couldn't be read); nil when none.
+    static func shipWatching(_ s: AgentSession, now: Date = Date()) -> String? {
+        guard let ref = s.shipWatch, s.windowIndex != nil, let seen = s.shipWatchSeen,
+              now.timeIntervalSince(seen) < ClaudeShip.staleAfter else { return nil }
+        return ref
+    }
+
     /// One line under the title.
     @MainActor
     static func statusLine(for s: AgentSession, in model: SessionListModel, now: Date = Date()) -> String {
@@ -2243,6 +2293,14 @@ enum SessionHome {
             }
             return NSLocalizedString("Working…", comment: "session status")
         case .idle:
+            // Between a /ship watch's wake-ups: ready for a message, and
+            // tending a pull request.
+            if let ref = shipWatching(s, now: now) {
+                return ref.isEmpty
+                    ? NSLocalizedString("Watching", comment: "session status: Claude Code's /ship is watching a pull request")
+                    : String(format: NSLocalizedString("Watching %@", comment: "session status: Claude Code's /ship is watching a pull request, e.g. “Watching PR #41”"),
+                             ClaudeShip.label(ref))
+            }
             return NSLocalizedString("Ready", comment: "session status")
         case .asleep:
             // A workspace on its way up (booting, or attached with tmux not

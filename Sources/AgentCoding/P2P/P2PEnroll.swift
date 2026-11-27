@@ -78,7 +78,8 @@ enum P2PEnroll {
             capability: complete.capability,
             orgSlug: complete.orgSlug,
             orgKind: complete.orgKind,
-            apiBase: endpoint.base.absoluteString)
+            apiBase: endpoint.base.absoluteString,
+            enrolledAt: Date())
 
         guard DeviceIdentityStore.store(record) else {
             return .failure(.keychainWriteFailed)

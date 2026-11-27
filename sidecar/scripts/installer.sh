@@ -162,7 +162,9 @@ if [ -f "$dist/SHA256SUMS" ]; then
   done < "$dist/SHA256SUMS" > "$tmp"
   mv "$tmp" "$dist/SHA256SUMS"
 fi
-( cd "$dist" && sha256 BromureSidecar-"$version"-*.exe | sed 's/ \*/  /' > installers-SHA256SUMS && cat installers-SHA256SUMS )
+# This run's installers only: dist/ may hold another architecture's from an
+# earlier (maybe unsigned) run.
+( cd "$dist" && sha256 "${installers[@]##*/}" | sed 's/ \*/  /' > installers-SHA256SUMS && cat installers-SHA256SUMS )
 
 # The update feed the Sidecar's updater reads (internal/updater): this
 # version and, per architecture, the versioned installer's URL and SHA-256.

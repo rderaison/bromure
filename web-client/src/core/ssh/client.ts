@@ -92,22 +92,41 @@ export class SSHChannel {
   localWindow = WINDOW;
   closed = false;
   private eofSent = false;
+  /** eof() was called with bytes still queued: sent once they've gone. */
+  private eofPending = false;
   private outQueue: Uint8Array[] = [];
   private buffered: Uint8Array[] = [];
   private eofSeen = false;
   private delivering = false;
   /** Set when the receiver isn't ready yet; data queues meanwhile. */
   paused = false;
+  /** Called when everything written has gone out (the peer's window took
+   *  it): a producer that stopped on `queuedBytes` resumes. */
+  onDrain: () => void = () => {};
 
   constructor(readonly conn: SSHConnection, readonly localId: number) {}
 
   write(data: Uint8Array) {
-    if (this.closed || this.eofSent) return;
+    if (this.closed || this.eofSent || this.eofPending) return;
     this.outQueue.push(data);
     this.flush();
   }
+  /** Bytes written but not yet sent (waiting for the peer's window). */
+  get queuedBytes(): number {
+    let n = 0;
+    for (const c of this.outQueue) n += c.length;
+    return n;
+  }
   /** @internal */
   flush() {
+    const had = this.outQueue.length > 0;
+    this.flushQueue();
+    if (this.outQueue.length || this.closed) return;
+    // The EOF asked for while bytes were queued goes right after the last.
+    if (this.eofPending) { this.eofPending = false; this.sendEOF(); }
+    if (had) this.onDrain();
+  }
+  private flushQueue() {
     while (this.outQueue.length && this.remoteWindow > 0 && !this.closed) {
       let chunk = this.outQueue[0];
       const n = Math.min(chunk.length, this.remoteWindow, this.remoteMaxPacket - 64);
@@ -117,8 +136,15 @@ export class SSHChannel {
       this.conn.sendPacket(new Writer().byte(MSG.CHANNEL_DATA).u32(this.remoteId).string(chunk).bytes());
     }
   }
+  /** No more data from us. Sent after everything already written: bytes
+   *  still queued for the peer's window go first (the EOF follows the last
+   *  of them, from flush), never after it. */
   eof() {
-    if (this.closed || this.eofSent) return;
+    if (this.closed || this.eofSent || this.eofPending) return;
+    if (this.outQueue.length) { this.eofPending = true; return; }
+    this.sendEOF();
+  }
+  private sendEOF() {
     this.eofSent = true;
     this.conn.sendPacket(new Writer().byte(MSG.CHANNEL_EOF).u32(this.remoteId).bytes());
   }
@@ -154,7 +180,9 @@ export class SSHChannel {
     if (this.paused) { this.buffered.push(d); return; }
     this.onData(d);
     this.consumed += d.length;
-    if (this.localWindow < WINDOW / 2 && this.consumed > 0) {
+    // (Not for a channel the peer already closed: data it buffered is still
+    // delivered, but no window adjust goes out for a dead channel.)
+    if (!this.closed && this.localWindow < WINDOW / 2 && this.consumed > 0) {
       const add = this.consumed;
       this.consumed = 0;
       this.localWindow += add;

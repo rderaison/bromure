@@ -112,7 +112,6 @@ export function buildPaletteItems(st: RemoteState, selection: StageSelection, se
     ['m.trace', 'Trace Inspector…', 'waveform.path.ecg', 'trace requests http log', () => openSurface('trace'), '⇧' + sc('I')],
     ['m.sidebar', 'Toggle Sidebar', 'sidebar.left', 'hide show sidebar', extra.toggleSidebar, '⌃' + sc('S')],
     ['m.files', 'Toggle Files Pane', 'folder', 'files browser pane', () => openSurface('toggle-files'), '⌃' + sc('E')],
-    ['m.remote', 'Remote Access…', 'antenna.radiowaves.left.and.right', 'ssh remote access server', () => openSurface('remote-access')],
   ];
   for (const [id, title, icon, keywords, run, shortcut] of menu) {
     items.push({ id, section: 'actions', title, icon, tint: 'var(--gray)', keywords, run, shortcut, searchOnly: true });

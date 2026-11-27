@@ -279,6 +279,11 @@ final class ACAutomationServer {
     /// Replace the global model settings from a redacted document (a blank or
     /// redacted key keeps the stored one). Returns `{ok}` or `{ok:false, error}`.
     var onUpdateModelSettings: ((_ doc: [String: Any]) -> [String: Any])?
+    /// "Test Connection" for a custom inference server (vLLM, Ollama, …),
+    /// run FROM THIS HOST — the machine whose launches will reach it, with its
+    /// source address and network. A blank/redacted key uses the key stored
+    /// for that same server. `{ok, models}` or `{ok:false, error}`.
+    var onProbeEngine: ((_ base: String, _ apiKey: String?, _ scope: EngineProbeScope) async -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -604,7 +609,15 @@ final class ACAutomationServer {
         }
         let start = bodyStart!
 
-        let headerBlock = String(decoding: data[0..<start], as: UTF8.self)
+        var headerBlock = String(decoding: data[0..<start], as: UTF8.self)
+        // The SSH front door's mark on a test-login connection (see
+        // RemoteTestLogin.bridgeMarker): the line before the request line.
+        var testLoginUser: String?
+        if headerBlock.hasPrefix(RemoteTestLogin.bridgeMarker), let eol = headerBlock.range(of: "\r\n") {
+            testLoginUser = String(headerBlock[headerBlock.index(headerBlock.startIndex,
+                offsetBy: RemoteTestLogin.bridgeMarker.count)..<eol.lowerBound])
+            headerBlock = String(headerBlock[eol.upperBound...])
+        }
         var contentLength = 0
         if let clRange = headerBlock.lowercased().range(of: "content-length:") {
             contentLength = Int(headerBlock.lowercased()[clRange.upperBound...]
@@ -674,13 +687,14 @@ final class ACAutomationServer {
         // older one (no header) the whole state each time, as before. Only a
         // flag here: the route's owner-only guard decides who gets a feed.
         let stateDelta = headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil
-        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta)
+        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta,
+              testLoginUser: testLoginUser)
     }
 
     // MARK: - Routing
 
     private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool,
-                       stateDelta: Bool = false) {
+                       stateDelta: Bool = false, testLoginUser: String? = nil) {
         // Local shadow so every `sendResponse` in this switch honors the client's
         // gzip capability without threading a flag through ~50 call sites. The
         // real 4-arg method is reached via `self.sendResponse`.
@@ -931,6 +945,27 @@ final class ACAutomationServer {
         // model ON THE SERVER (that's where the engine + downloads live). The
         // fat client's Local Models pane calls these instead of downloading
         // to the client. Result state comes back via /state's `localModels`.
+        // Fat-client "Test Connection" for a custom inference server: the
+        // probe runs here, so the client never contacts that server itself.
+        // A failed probe is still a 200 (the answer is the error).
+        case ("POST", "/models/probe-server"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let base = bodyJSON["baseURL"] as? String, !base.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'baseURL'"]); return
+            }
+            let key = bodyJSON["apiKey"] as? String
+            let scope = EngineProbeScope(wire: bodyJSON)
+            let semaphore = DispatchSemaphore(value: 0)
+            var result: [String: Any] = ["ok": false, "error": "unavailable"]
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    result = await self.onProbeEngine?(base, key, scope) ?? ["ok": false, "error": "unavailable"]
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+            sendResponse(fd: fd, status: 200, body: result)
+
         case ("POST", let p) where p.hasPrefix("/models/"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let action = String(p.dropFirst("/models/".count))
@@ -1142,12 +1177,64 @@ final class ACAutomationServer {
             let r = DispatchQueue.main.sync { self.onRemoteApply?(bodyJSON) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
+        // The AppleScript verbs (BromureAC.sdef) over the control socket:
+        // {command: "get profile json", direct: "<name|id>", args: {key,
+        // toValue, color}} → {result: "<what AppleScript would return>"}.
+        // How the fat-client E2E suite drives a REMOTE app's scripting
+        // surface through the SSH tunnel. Debug runs only.
+        case ("POST", "/scripting"):
+            guard isTrustedLocal, debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Scripting needs BROMURE_DEBUG_CLAUDE and the local control socket"])
+                return
+            }
+            guard let command = bodyJSON["command"] as? String, !command.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "command required"])
+                return
+            }
+            let direct = bodyJSON["direct"]
+            let args = bodyJSON["args"] as? [String: Any]
+            let result = DispatchQueue.main.sync {
+                ScriptCall(directParameter: direct, evaluatedArguments: args).run(command)
+            }
+            sendResponse(fd: fd, status: 200, body: ["result": result.map { "\($0)" } ?? ""])
+
+        // Fat-client E2E: mint (POST) or end (DELETE) an app-generated SSH
+        // login (RemoteTestLogin). Only when the app runs with
+        // BROMURE_DEBUG_CLAUDE, and only over the owner's control socket —
+        // the password is in the reply.
+        case ("POST", "/remote/test-login"), ("DELETE", "/remote/test-login"):
+            guard isTrustedLocal, debugEnabled else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Test logins need BROMURE_DEBUG_CLAUDE and the local control socket"])
+                return
+            }
+            if method == "DELETE" {
+                RemoteTestLogin.shared.clear()
+                sendResponse(fd: fd, status: 200, body: ["ok": true])
+                return
+            }
+            let c = RemoteTestLogin.shared.mint()
+            var body = DispatchQueue.main.sync { self.onRemoteStatus?() ?? [:] }
+            body["user"] = c.user
+            body["password"] = c.password
+            body.removeValue(forKey: "connect")
+            sendResponse(fd: fd, status: 200, body: body)
+
         case ("POST", "/remote/keys"):
             guard isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
                 return
             }
             let key = (bodyJSON["key"] as? String) ?? ""
+            // Over the E2E test login, the key is the test login's: in
+            // memory, under its name only, gone with it (RemoteTestLogin).
+            if let testLoginUser {
+                guard let fp = RemoteTestLogin.shared.addKey(key, user: testLoginUser) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "Not a key for the current test login"])
+                    return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true, "fingerprint": fp, "testLogin": true])
+                return
+            }
             let r = DispatchQueue.main.sync { self.onRemoteAddKey?(key) ?? ["error": "unavailable"] }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 

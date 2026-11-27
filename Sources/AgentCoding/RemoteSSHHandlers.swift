@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import NIOCore
 import NIOPosix
@@ -94,6 +95,95 @@ final class RemoteErrorHandler: ChannelInboundHandler {
 
 // MARK: - Authentication
 
+/// An app-generated login for the fat-client E2E suite (Tests/ac-fatclient-e2e.mjs):
+/// a random user name + password the SSH front door accepts besides the
+/// owner's macOS password, so a test can sign in with a password and enroll
+/// the client key without anyone's real account password.
+///
+/// Debug-only and ephemeral: only the control-socket route `POST
+/// /remote/test-login` mints one, and that route answers only when the app
+/// runs with BROMURE_DEBUG_CLAUDE. It lives in memory (never persisted), a
+/// new mint replaces the old one, and `DELETE /remote/test-login` or a
+/// relaunch ends it. Sessions still run as the owner, as with every login.
+///
+/// A key enrolled over the test login (the fat client's password bootstrap)
+/// is the test login's own: kept here, in memory, never in authorized_keys,
+/// it signs in only under the test login's name, and goes with the login
+/// (cleared, replaced, or the app quitting). Otherwise it would have stayed
+/// an owner key for good (CWE-613).
+final class RemoteTestLogin: @unchecked Sendable {
+    static let shared = RemoteTestLogin()
+
+    struct Credential: Equatable { let user: String; let password: String }
+
+    /// The line the SSH front door writes ahead of a test-login connection's
+    /// control-socket request, followed by the login's name and CRLF. The
+    /// control socket strips it and scopes what the request enrolls to that
+    /// login. Anyone else sending it only makes their own key temporary.
+    static let bridgeMarker = "BROMURE-TEST-LOGIN "
+
+    private let lock = NSLock()
+    private var _current: Credential?
+    private var _keys: [NIOSSHPublicKey: String] = [:]   // key → fingerprint
+
+    var current: Credential? { lock.lock(); defer { lock.unlock() }; return _current }
+
+    /// Mint a fresh login, replacing any earlier one.
+    func mint() -> Credential {
+        let hex = Array("0123456789abcdef")
+        let alnum = Array("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789")
+        var rng = SystemRandomNumberGenerator()
+        let user = "bromure-e2e-" + String((0..<6).map { _ in hex.randomElement(using: &rng)! })
+        let password = String((0..<24).map { _ in alnum.randomElement(using: &rng)! })
+        let c = Credential(user: user, password: password)
+        lock.lock(); _current = c; _keys = [:]; lock.unlock()
+        return c
+    }
+
+    func clear() { lock.lock(); _current = nil; _keys = [:]; lock.unlock() }
+
+    /// Enroll `line` (an OpenSSH public key) for the test login named `user`.
+    /// Its fingerprint, or nil when the key doesn't parse or `user` isn't the
+    /// current test login.
+    func addKey(_ line: String, user: String) -> String? {
+        let key = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blob = key.split(separator: " ").prefix(2).joined(separator: " ")
+        guard let pk = try? NIOSSHPublicKey(openSSHPublicKey: blob),
+              let raw = Data(base64Encoded: String(blob.split(separator: " ")[1])) else { return nil }
+        // As RemoteAccessServer lists authorized keys: SHA256:<unpadded base64>.
+        let fp = "SHA256:" + Data(SHA256.hash(data: raw)).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+        lock.lock(); defer { lock.unlock() }
+        guard let c = _current, c.user == user else { return nil }
+        _keys[pk] = fp
+        return fp
+    }
+
+    /// Whether `key` was enrolled for the current test login and `user` is its name.
+    func authorizes(user: String, key: NIOSSHPublicKey) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let c = _current, c.user == user else { return false }
+        return _keys[key] != nil
+    }
+
+    /// The fingerprints of the keys enrolled for the current test login.
+    var keyFingerprints: [String] { lock.lock(); defer { lock.unlock() }; return _keys.values.sorted() }
+
+    /// Whether `user` is the minted login's name.
+    func isUser(_ user: String) -> Bool { current?.user == user }
+
+    /// Whether `user` + `password` match the minted login (constant-time on
+    /// the password bytes).
+    func matches(user: String, password: String) -> Bool {
+        guard let c = current, c.user == user else { return false }
+        let a = Array(c.password.utf8), b = Array(password.utf8)
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count { diff |= a[i] ^ b[i] }
+        return diff == 0
+    }
+}
+
 /// Verifies the macOS account password unprivileged via OpenDirectory. This is
 /// what lets us offer password login without root and without enabling Remote
 /// Login (which the stock sshd's PAM path would require).
@@ -173,6 +263,14 @@ final class RemoteGrant: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _machineOnly }
         set { lock.lock(); _machineOnly = newValue; lock.unlock() }
     }
+    private var _testLoginUser: String?
+    /// Set when the connection signed in with the E2E test login (its
+    /// password, or a key enrolled over it): that login's name. What its
+    /// control requests enroll stays the test login's (RemoteTestLogin).
+    var testLoginUser: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _testLoginUser }
+        set { lock.lock(); _testLoginUser = newValue; lock.unlock() }
+    }
 }
 
 /// Single-user auth: only the user who launched bromure-ac, via an enrolled
@@ -215,7 +313,7 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
 
     var supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods {
         var m: NIOSSHAvailableUserAuthenticationMethods = []
-        if allowPassword { m.insert(.password) }
+        if allowPassword || RemoteTestLogin.shared.current != nil { m.insert(.password) }
         if allowPubkey { m.insert(.publicKey) }
         return m
     }
@@ -246,16 +344,28 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             // the key is enrolled. Wrong-name and unenrolled-key failures are
             // identical (both instant), so this path leaks nothing about
             // which name is right.
-            let ok = allowPubkey && request.username == username && authorizedKeys.contains(pk.publicKey)
-            if ok { grant.machineOnly = machineOnlyKeys[pk.publicKey] }
+            // The E2E test login's name signs in only with a key enrolled
+            // over that login, and an owner key never under it: each name
+            // has its own keys (RemoteTestLogin).
+            let isTest = request.username != username && RemoteTestLogin.shared.isUser(request.username)
+            let nameOK = request.username == username || isTest
+            let ok = allowPubkey && (isTest
+                ? RemoteTestLogin.shared.authorizes(user: request.username, key: pk.publicKey)
+                : nameOK && authorizedKeys.contains(pk.publicKey))
+            if ok {
+                if isTest { grant.testLoginUser = request.username }
+                else { grant.machineOnly = machineOnlyKeys[pk.publicKey] }
+            }
             FatClientLog.log("srv-auth: publickey user=\(request.username) allow=\(allowPubkey) "
-                + "nameMatch=\(request.username == username) inSet=\(authorizedKeys.contains(pk.publicKey)) "
+                + "nameMatch=\(nameOK) inSet=\(authorizedKeys.contains(pk.publicKey)) "
                 + "keys=\(authorizedKeys.count) → \(ok ? "SUCCESS" : "FAILURE")")
             responsePromise.succeed(ok ? .success : .failure)
         case .password(let pw):
-            guard allowPassword else { responsePromise.succeed(.failure); return }
+            let testLogin = RemoteTestLogin.shared.current != nil
+            guard allowPassword || testLogin else { responsePromise.succeed(.failure); return }
             let user = username
             let password = pw.password
+            let ownerPasswordAllowed = allowPassword
             // Per-IP rate limit with TEETH. `reserve` hands each attempt a
             // slot on a per-IP monotonic schedule (burst budget first, then
             // one attempt per refill interval) and REFUSES once the queue is
@@ -271,6 +381,7 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             }
             let throttle = self.throttle
             let requestedUser = request.username
+            let grant = self.grant
             let work: @Sendable () -> Void = {
                 defer { throttle.endVerification() }
                 // The username check rides INSIDE the throttled verification,
@@ -279,8 +390,17 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
                 // the same timing as a wrong password — no enumeration oracle
                 // revealing the owner's short name. (An up-front name check
                 // would fail instantly and give the valid name away.)
-                let ok = SystemPassword.verify(user: user, password: password)
-                    && requestedUser == user
+                // The E2E test login (debug-only, RemoteTestLogin) is checked
+                // first; it never falls through to OpenDirectory.
+                let ok: Bool
+                if RemoteTestLogin.shared.isUser(requestedUser) {
+                    ok = RemoteTestLogin.shared.matches(user: requestedUser, password: password)
+                    if ok { grant.testLoginUser = requestedUser }
+                } else {
+                    ok = ownerPasswordAllowed
+                        && SystemPassword.verify(user: user, password: password)
+                        && requestedUser == user
+                }
                 responsePromise.succeed(ok ? .success : .failure)
             }
             let q = DispatchQueue.global(qos: .utility)
@@ -1003,6 +1123,12 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
             channel.close(promise: nil)
             return
+        }
+        // A test-login connection's request goes in marked as such, ahead of
+        // anything the client sends: a key it enrolls stays the test login's.
+        var preamble = preamble
+        if let testUser = grant?.testLoginUser {
+            preamble = Data((RemoteTestLogin.bridgeMarker + testUser + "\r\n").utf8) + (preamble ?? Data())
         }
         if let preamble {
             // Small, and the socket is still blocking: written whole.

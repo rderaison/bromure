@@ -65,11 +65,11 @@ struct BromureAC: ParsableCommand {
         // `__attach-window` (native terminal view pump) are app-internal;
         // bromure-cli exposes none of them and has no GUI default.
         let topLevel: [ParsableCommand.Type] =
-            asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self,
+            asCLI ? [FatClientPost.self, FatClientAuthProbe.self, FatClientForward.self, FatClientProxy.self,
                      FatClientSocks.self, FatClientDial.self, FatClientBrowserMCPProbe.self,
                      TunnelHelper.self]
                   : [Run.self, RemoteMenu.self, VMAttachWindow.self, FatClientPost.self,
-                     FatClientAuthProbe.self, FatClientForward.self, FatClientSocks.self,
+                     FatClientAuthProbe.self, FatClientForward.self, FatClientProxy.self, FatClientSocks.self,
                      FatClientDial.self, FatClientBrowserMCPProbe.self, TunnelHelper.self]
         let defaultCmd: ParsableCommand.Type? = asCLI ? nil : Run.self
         return CommandConfiguration(
@@ -113,6 +113,18 @@ struct BromureAC: ParsableCommand {
         // default. (Bug#4.)
         if filtered.isEmpty, invokedName == "bromure-cli" {
             filtered = ["help"]
+        }
+        // BROMURE_AC_REMOTE_HOST=<host id|name> (hosts.json): every CLI
+        // subcommand talks to that remote bromure-ac through the fat-client
+        // SSH tunnel instead of the local control socket — the fat-client E2E
+        // suite runs its CLI tests this way. Never for the app itself (`run`,
+        // or no subcommand) or its plumbing children (`__…`).
+        if let remote = ProcessInfo.processInfo.environment["BROMURE_AC_REMOTE_HOST"], !remote.isEmpty,
+           let sub = filtered.first, sub != "run", !sub.hasPrefix("__"), !sub.hasPrefix("-") {
+            guard RemoteTransport.installCLIRemote(remote) else {
+                FileHandle.standardError.write(Data("BROMURE_AC_REMOTE_HOST: no remote host \"\(remote)\" in remote-client/hosts.json\n".utf8))
+                Darwin.exit(2)
+            }
         }
         // Hidden verification hook: run the PII detector over files and print
         // what it finds and how long it took. Standalone, no servers or VMs.
@@ -3899,6 +3911,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
+        // Claude Code's /ship watches: the Mac stays awake while one runs.
+        // Reported ones from before a restart are old by now (stale) or
+        // heard from again at their next wake-up.
+        ShipWatchAwake.shared.provider = { [weak self] in
+            self?.agentSessionStore.liveShipWatches() ?? 0
+        }
+        ShipWatchAwake.shared.refresh()
         // Host sleep stops the guests' clocks; set them right on wake.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -4646,6 +4665,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "connect": "ssh -p \(cfg.port) \(user)@\(host)",
             "authorizedKeys": keys,
             "authorizedKeysProblem": server.authorizedKeysProblem ?? "",
+            // The fat-client E2E's app-generated login, by name only (its
+            // password is only ever in POST /remote/test-login's reply).
+            "testLoginUser": RemoteTestLogin.shared.current?.user ?? "",
+            "testLoginKeys": RemoteTestLogin.shared.keyFingerprints,
         ]
     }
 
@@ -5415,6 +5438,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                     return ["ok": true, "count": samples.count]
 
+                case "seed-hub-demo":
+                    // Screenshot/QA fixture for the Automations hub (Code
+                    // Review): the same watches, runs and findings the
+                    // offscreen `__shot-ui hub-*` preview renders, into the
+                    // live stores — so a remote client shows them too.
+                    guard self.profiles.count >= 1 else { return ["error": "no workspace"] }
+                    let ws1 = self.profiles[0].id
+                    let ws2 = self.profiles.count > 1 ? self.profiles[1].id : ws1
+                    AutomationHubPreview.populate(autoStore: self.scheduledAutomationStore,
+                                                  findingStore: self.findingStore,
+                                                  taskStore: self.codingTaskStore, ws1: ws1, ws2: ws2)
+                    return ["ok": true, "findings": self.findingStore.findings.count]
+
                 case "seed-board-demo":
                     // Screenshot/demo fixture: populate BOTH kanban boards
                     // with representative cards. Everything is tagged with a
@@ -5623,6 +5659,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         || $0.address == key
                 }) ?? hosts.first
                 guard let host else { return ["error": "no remote host configured"] }
+                if (params["action"] as? String) == "close-mirror" {
+                    // E2E teardown: close this host's mirror window (if open)
+                    // without opening one — its poller stops with it.
+                    let wasOpen = self.remoteHostWindows[host.id] != nil
+                    self.remoteHostWindows[host.id]?.close()
+                    return ["ok": true, "wasOpen": wasOpen]
+                }
                 if self.remoteHostWindows[host.id] == nil { self.openRemoteHost(host) }
                 guard let win = self.remoteHostWindows[host.id] else {
                     return ["error": "mirror window not open"]
@@ -5791,6 +5834,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
         server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
+        server.onProbeEngine = { [weak self] base, key, scope in
+            await self?.automationProbeEngine(base: base, apiKey: key, scope: scope) ?? ["ok": false, "error": "unavailable"]
+        }
         server.onUpdateModelSettings = { [weak self] doc in
             self?.automationUpdateModelSettings(doc) ?? ["ok": false, "error": "unavailable"]
         }
@@ -6433,6 +6479,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "merge", "land":
                     // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
                     // legacy merge body ({squash, cleanup}) still works.
+                    // One it won't start says why: the client tells the user
+                    // (it showed nothing at all).
+                    if let why = self.codingTaskEngine.landRefusal(id) { return ["ok": false, "error": why] }
                     let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
                         ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
@@ -6442,6 +6491,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {with: [ids], push?, keepBranch?}: this task and those,
                     // one batch (CodingTaskEngine.landBatch).
                     let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+                    if let why = self.codingTaskEngine.landRefusal([id] + others) { return ["ok": false, "error": why] }
                     self.codingTaskEngine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
                                                     push: body["push"] as? Bool ?? false)
                 case "open-pr":
@@ -11731,6 +11781,79 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return dict
     }
 
+    /// A fat client's "Test Connection" for a custom inference server, run
+    /// from this host. The client's copy of a stored key is redacted, so a
+    /// blank or redacted key means "the key stored for this server" in the
+    /// configuration being edited (`scope`), and only for that exact server,
+    /// so a client can't send a stored key anywhere else.
+    @MainActor
+    func automationProbeEngine(base raw: String, apiKey: String?,
+                               scope: EngineProbeScope = .unspecified) async -> [String: Any] {
+        guard let base = Profile.normalizedEngineBase(raw),
+              ["http", "https"].contains(base.scheme?.lowercased() ?? "") else {
+            return ["ok": false, "error": NSLocalizedString("That isn't a valid server URL.", comment: "engine probe")]
+        }
+        let key = ModelSettings.isRedactedSecret(apiKey) ? storedEngineKey(for: base, scope: scope) : apiKey
+        do {
+            let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+            return ["ok": true, "models": models]
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
+    /// The API key stored for the custom server at `base` in `scope`'s
+    /// configuration (normalized URLs compared), or nil.
+    @MainActor
+    private func storedEngineKey(for base: URL, scope: EngineProbeScope) -> String? {
+        let candidates = Self.engineKeyCandidates(scope: scope,
+                                                  global: ModelSettingsStore.shared.settings.localServer,
+                                                  profiles: profiles, template: store.loadTemplate())
+        return Self.engineKey(for: base, among: candidates)
+    }
+
+    /// Where a probe's redacted key is looked up, in order (tested):
+    /// - global settings: the global custom server only;
+    /// - a workspace: its own custom server (its Models override, then its
+    ///   Local Models engine), then the global one if it inherits it (no
+    ///   override, or a layered one that doesn't exclude it). A workspace not
+    ///   saved yet is the template's copy.
+    /// - unspecified (a client older than the scope): every configuration,
+    ///   global first, as before.
+    /// Two configurations on one server with different keys (tenant keys)
+    /// each test their own.
+    nonisolated static func engineKeyCandidates(scope: EngineProbeScope, global: LocalServer?,
+                                                profiles: [Profile], template: Profile) -> [(url: String?, key: String?)] {
+        func own(_ p: Profile) -> [(url: String?, key: String?)] {
+            var c: [(url: String?, key: String?)] = []
+            if let ls = p.modelOverride?.settings.localServer { c.append((ls.baseURL, ls.apiKey)) }
+            c.append((p.localEngineURL, p.localEngineAPIKey))
+            return c
+        }
+        let inherited: [(url: String?, key: String?)] = global.map { [($0.baseURL, $0.apiKey)] } ?? []
+        switch scope {
+        case .global:
+            return inherited
+        case .workspace(let id):
+            let p = id.flatMap { id in profiles.first { $0.id == id } } ?? template
+            let inherits = p.modelOverride.map { $0.inheritsGlobal && !$0.excludedProviders.contains(.custom) } ?? true
+            return own(p) + (inherits ? inherited : [])
+        case .unspecified:
+            return inherited + (profiles + [template]).flatMap(own)
+        }
+    }
+
+    /// Pure lookup (tested): the first non-blank key whose server URL
+    /// normalizes to `base`.
+    nonisolated static func engineKey(for base: URL, among candidates: [(url: String?, key: String?)]) -> String? {
+        for c in candidates {
+            guard let k = c.key, !ModelSettings.isRedactedSecret(k),
+                  Profile.normalizedEngineBase(c.url)?.absoluteString == base.absoluteString else { continue }
+            return k
+        }
+        return nil
+    }
+
     /// Replace the global model settings from a document round-tripped
     /// through `automationModelSettingsExport`: a blank or redacted key keeps
     /// the stored one, a typed key replaces it.
@@ -15010,6 +15133,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         do {
             return try await guestFileOp(profileID: id, op: op, timeout: timeout)
+        } catch let e as GuestExecError {
+            // The guest's own message (commandFailed's stderr), not the enum
+            // dump: clients read the refusal from its start (`[Errno 13] …`,
+            // FolderUpload.refusedByFilesystem / permissionDenied in the web
+            // client), so it must arrive as the guest said it.
+            return ["error": e.errorDescription ?? String(describing: e)]
         } catch {
             return ["error": String(describing: error)]
         }
@@ -16181,6 +16310,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     sessions: self.agentSessionStore.sessions) else { return }
                 self.setTabAgentStatus(pid, index: w, status,
                                        turnEnded: AgentStatus.endsTurn(signal: signal))
+                // Line 3, at a turn's end: the tab's /ship watch, if any.
+                if case .some(let ref) = ClaudeShip.watch(inStatus: signal),
+                   let s = self.agentSessionStore.session(profileID: pid, windowIndex: w) {
+                    self.agentSessionStore.setShipWatch(s.id, ref)
+                    ShipWatchAwake.shared.refresh()
+                }
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
@@ -16239,6 +16374,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         GuestSandboxStatusStore.shared.reset(profileID: profile.id)
         OpenShellAdvisor.shared.reset(profileID: profile.id)
         AgentWatchdog.shared.reset(profileID: profile.id)
+        agentSessionStore.clearShipWatches(profileID: profile.id)
+        ShipWatchAwake.shared.refresh()
         UnmanagedCredentialGuard.shared.reset(profileID: profile.id)
         PolicySteering.shared.reset(profileID: profile.id)
         browserMCPBridges[profile.id]?.stop()

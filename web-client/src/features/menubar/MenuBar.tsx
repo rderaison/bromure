@@ -96,7 +96,6 @@ export function MenuBar() {
       { label: 'About Bromure Client', action: about },
       { separator: true },
       { label: 'Preferences…', shortcut: shortcut(','), action: () => openSurface('preferences') },
-      { label: 'Remote Access…', action: () => openSurface('remote-access') },
       ...(electron ? [{ separator: true } as MenuItem, { label: 'Quit Bromure Client', shortcut: shortcut('q'), action: () => electron!.windowControl('close') }] : []),
     ] },
     { title: 'Workspaces', items: [
@@ -153,7 +152,9 @@ export function MenuBar() {
     { title: 'View', items: [
       { label: 'Toggle Sidebar', shortcut: shortcut('s', ['ctrl', 'cmd']), action: () => setSidebarCollapsed(!sidebarCollapsed) },
       { label: 'Toggle Files Pane', shortcut: shortcut('e', ['ctrl', 'cmd']), action: () => openSurface('toggle-files') },
-      { label: 'Toggle Browser Pane', shortcut: shortcut('b', ['ctrl', 'cmd']), action: () => openSurface('toggle-browser') },
+      // The browser: the desktop app's built-in browser window; the hosted
+      // app has none (the user's own browser is right there).
+      ...(electron ? [{ label: 'Toggle Browser Pane', shortcut: shortcut('b', ['ctrl', 'cmd']), action: () => openSurface('toggle-browser') } as MenuItem] : []),
       { separator: true },
       { label: document.fullscreenElement ? 'Exit Full Screen' : 'Enter Full Screen', shortcut: shortcut('f', ['ctrl', 'cmd']), action: fullScreen },
     ] },

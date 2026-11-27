@@ -4411,3 +4411,26 @@
 "SHA-256 fingerprint" = "SHA-256 フィンガープリント";
 "Add certificate" = "証明書を追加";
 "Needs a hostname and a 64-character SHA-256 fingerprint; ignored until then." = "ホスト名と 64 文字の SHA-256 フィンガープリントが必要です。それまでは無視されます。";
+
+/* Claude Code's /ship (ClaudeShip) */
+"PR %@" = "PR %@";
+"Watching" = "監視中";
+"Watching %@" = "%@ を監視中";
+"Stop Watching Pull Request" = "プルリクエストの監視を停止";
+"Allow /ship and /steward" = "/ship と /steward を許可";
+"Turn /ship and /steward back on in Claude Code too?" = "Claude Code でも /ship と /steward を再びオンにしますか？";
+"Turn Them Back On" = "再びオンにする";
+"Leave Claude Code's Settings" = "Claude Code の設定はそのままにする";
+"An earlier version of Bromure turned them off in this workspace's Claude Code settings, the same way you can turn a skill off yourself, so Bromure can't tell which it was. Turn them back on only if you didn't turn them off yourself." = "以前のバージョンの Bromure が、このワークスペースの Claude Code 設定でこれらをオフにしました。これはスキルをご自身でオフにする場合と同じ方法のため、Bromure にはどちらによるものか判別できません。ご自身でオフにしていない場合にのみ、再びオンにしてください。";
+"Claude Code commits, pushes, opens a pull request and keeps fixing it until you merge." = "Claude Code がコミット、プッシュ、プルリクエスト作成を行い、マージまで修正を続けます。";
+"Claude Code's /ship commits your work, pushes it, opens a pull request on GitHub and reviews it, then watches it: it fixes failing checks, conflicts and review comments and pushes again until you merge. /steward starts the watch on a pull request already open. It pushes with this workspace's GitHub token, under your name. While a watch runs, the session says “Watching PR #…” and your Mac stays awake; right-click the session to stop it. Turn this off and both commands are gone from Claude Code here. Takes effect the next time this workspace starts." = "Claude Code の /ship は作業をコミットしてプッシュし、GitHub にプルリクエストを作成してレビューし、その後監視します。失敗したチェック、コンフリクト、レビューコメントを修正し、マージされるまで再プッシュします。/steward はすでに開いているプルリクエストの監視を開始します。プッシュにはこのワークスペースの GitHub トークンが使われ、あなたの名前で行われます。監視中はセッションに「PR #… を監視中」と表示され、Mac はスリープしません。停止するにはセッションを右クリックします。オフにすると、ここでは Claude Code から両方のコマンドがなくなります。このワークスペースの次回起動時から有効です。";
+
+/* Coding tasks: merge from a client, checkout cleanup */
+"branch and checkout removed" = "ブランチとチェックアウトを削除済み";
+"branch and checkout kept" = "ブランチとチェックアウトを保持";
+"This task is no longer on the board." = "このタスクはもうボードにありません。";
+"This task isn't in Review any more, so there is nothing to merge." = "このタスクはもうレビュー中ではないため、マージするものはありません。";
+"The merge didn't start" = "マージは開始されませんでした";
+"The merge may not have started" = "マージが開始されていない可能性があります";
+"The host didn't answer, even when asked twice. Look at the task's card: if it is still in Review and not landing, check the connection and merge it again." = "2回送信してもホストから応答がありませんでした。タスクのカードを確認し、まだレビュー中でマージ中でなければ、接続を確認してもう一度マージしてください。";
+"The host refused it (HTTP %d)." = "ホストに拒否されました（HTTP %d）。";

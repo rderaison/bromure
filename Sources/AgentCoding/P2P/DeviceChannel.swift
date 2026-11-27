@@ -13,8 +13,9 @@ import FoundationNetworking
 /// `WS /v1/device-channel`, authed with the same `Authorization: Bearer
 /// <deviceToken>` header as the REST calls. The connection reconnects with
 /// capped backoff on unexpected drops; a 401/403 on the upgrade means the token
-/// was revoked, so it stops permanently and reports it (revocation must close
-/// access, not spin).
+/// is dead (revoked, or only expired: bromure.io doesn't say which), so it
+/// stops permanently and reports it (a dead token must close access, not
+/// spin).
 final class DeviceChannel: NSObject, @unchecked Sendable {
     // Callbacks (always delivered on the main queue).
     var onSignal: ((_ connectionId: String, _ seq: Int, _ kind: SignalKind,
@@ -23,7 +24,8 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     var onConnectionOffered: ((ConnectionGrant) -> Void)?
     var onError: ((_ code: String, _ connectionId: String?) -> Void)?
     var onStateChange: ((_ connected: Bool) -> Void)?
-    /// The token is dead (revoked / invalid). Terminal — no reconnect.
+    /// The token is dead (revoked, expired or invalid -- not a confirmed
+    /// revoke of the device). Terminal — no reconnect.
     var onRevoked: (() -> Void)?
     /// A peer's SSH key was published/withdrawn — re-pull authorized keys now.
     var onKeysChanged: (() -> Void)?
@@ -230,7 +232,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         guard current else { return }
         setConnected(false)
 
-        // A 401/403 on the upgrade = the token is revoked/invalid. Terminal.
+        // A 401/403 on the upgrade = the token is dead (revoked or expired). Terminal.
         if let http = t.response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
             lock.lock(); desiredOpen = false; lock.unlock()
             dispatch { self.onRevoked?() }

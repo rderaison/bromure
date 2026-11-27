@@ -469,6 +469,18 @@ struct PeerMention: Identifiable, Hashable, Sendable {
         }
         return out
     }
+
+    /// As a menu lists them (tested): by the name it shows, the @nickname
+    /// or, for a session without one, its title. Finder's order ("agent-2"
+    /// before "agent-10", case aside); equal names by workspace.
+    static func byName(_ peers: [PeerMention]) -> [PeerMention] {
+        func name(_ p: PeerMention) -> String { p.assigned ? p.nick : p.title }
+        return peers.sorted { a, b in
+            let c = name(a).localizedStandardCompare(name(b))
+            if c != .orderedSame { return c == .orderedAscending }
+            return a.workspace.localizedStandardCompare(b.workspace) == .orderedAscending
+        }
+    }
 }
 
 /// The "@" completion every composer shares — the chat's and the new-session

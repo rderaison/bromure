@@ -10,6 +10,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
+import { setupTunnel, stopTunnel } from './tunnel';
+import { setupBrowser, stopBrowser } from './browser';
+import { closeGracefully } from './sockClose';
+import { documents, heldEvents, resumeTable } from './tcpEvents';
 
 const DIST = process.env.BROMURE_DIST ? path.resolve(process.env.BROMURE_DIST) : path.join(__dirname, '..', 'dist');
 // Its own data folder — never "Bromure", which on macOS is the Bromure web
@@ -180,8 +184,10 @@ function createWindow(hash = '') {
 // ── TCP bridge (direct hosts) ─────────────────────────────────────────────
 // The renderer can only reach a host:port the USER approved in a native
 // dialog here (persisted) — a compromised page can't turn this into an open
-// TCP proxy into the LAN. Sockets belong to the window that opened them.
+// TCP proxy into the LAN. Sockets belong to the document that opened them
+// (documents(): a reload releases the old one's).
 const sockets = new Map<number, { s: net.Socket; owner: number }>();
+const docs = documents();
 let nextSock = 1;
 const ALLOWED_FILE = () => path.join(app.getPath('userData'), 'allowed-hosts.json');
 function allowedHosts(): Set<string> {
@@ -205,23 +211,119 @@ async function approveHost(e: Electron.IpcMainInvokeEvent, host: string, port: n
   return true;
 }
 ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
+  const wc = e.sender;
+  const owner = docs.of(wc.id);   // the asking document, before the dialog
   if (!(await approveHost(e, host, port))) throw new Error('Connection not allowed.');
+  if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) throw new Error('Window closed.');
   return new Promise<number>((resolve, reject) => {
     const id = nextSock++;
     const s = net.connect({ host, port });
     s.setNoDelay(true);
     s.setKeepAlive(true, 30000);
-    const wc = e.sender;
-    s.once('connect', () => { sockets.set(id, { s, owner: wc.id }); resolve(id); });
-    s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else wc.send('tcp:event', id, 'error', null, err.message); });
-    s.on('data', (d: Buffer) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, 'data', new Uint8Array(d)); });
-    s.on('close', () => { sockets.delete(id); if (!wc.isDestroyed()) wc.send('tcp:event', id, 'close'); });
+    // Held paused (no 'data' listener) until the renderer has its stream and
+    // says so (tcp:resume), as an accepted socket is: bytes that beat
+    // tcpOpen's reply wait in the kernel and this socket's buffer — TCP's
+    // own backpressure — instead of piling up in the renderer.
+    // Its close / error wait too (heldEvents): the renderer never hears of
+    // an id before it has a stream for it.
+    const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
+    s.once('connect', () => {
+      // The window closed, or reloaded, while it connected: nobody to take it.
+      if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { s.destroy(); reject(new Error('Window closed.')); return; }
+      sockets.set(id, { s, owner });
+      ownSockets(wc);
+      accepted.hold(id, owner, () => { s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d))); ev.resume(); });
+      resolve(id);
+    });
+    s.once('error', err => { if (!sockets.has(id)) reject(new Error(friendlyNetError(err, host, port))); else ev.emit('error', null, err.message); });
+    // A connect that failed was rejected above; its close is nobody's. One
+    // that closes before tcp:resume keeps its `accepted` entry: the resume
+    // still delivers the held close (CWE-362).
+    s.on('close', () => { if (sockets.delete(id)) ev.emit('close'); });
     s.setTimeout(15000, () => { if (!sockets.has(id)) { s.destroy(); reject(new Error(`Timed out reaching ${host}:${port}`)); } else s.setTimeout(0); });
   });
 });
-const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(id); return x && x.owner === e.sender.id ? x.s : undefined; };
+const owned = (e: Electron.IpcMainEvent, id: number) => { const x = sockets.get(id); return x && x.owner === docs.of(e.sender.id) ? x.s : undefined; };
 ipcMain.on('tcp:write', (e, id: number, data: Uint8Array) => { owned(e, id)?.write(data); });
-ipcMain.on('tcp:close', (e, id: number) => { const s = owned(e, id); if (s) { s.destroy(); sockets.delete(id); } });
+// Graceful: the renderer's last writes (sent just before) still reach the peer.
+ipcMain.on('tcp:close', (e, id: number) => {
+  accepted.drop(id, docs.of(e.sender.id));     // never resumed: nothing to deliver now
+  const s = owned(e, id); if (s) { closeGracefully(s); sockets.delete(id); }
+});
+/** A document's sockets, listeners and pending resumes go with it, at a
+ *  reload or renderer restart (tcp:reset) or with its window: nothing is
+ *  left to read them (CWE-401). */
+function release(owner: number | undefined) {
+  if (owner === undefined) return;
+  accepted.dropOwner(owner);
+  for (const [id, x] of sockets) if (x.owner === owner) { x.s.destroy(); sockets.delete(id); }
+  for (const [lid, l] of listeners) if (l.owner === owner) { l.srv.close(); listeners.delete(lid); }
+}
+// The preload's first message in each document, before any page script.
+ipcMain.on('tcp:reset', e => { ownSockets(e.sender); release(docs.reset(e.sender.id)); });
+/** Registered once per webContents. */
+const owners = new WeakSet<Electron.WebContents>();
+function ownSockets(wc: Electron.WebContents) {
+  if (owners.has(wc)) return;
+  owners.add(wc);
+  const id = wc.id;
+  wc.once('destroyed', () => release(docs.forget(id)));
+}
+
+// ── Loopback listener (a model sign-in's OAuth callback) ───────────────────
+// The provider sends the browser back to http://localhost:<port>/… — the port
+// the CLI in the host's throwaway sign-in VM listens on. Like the macOS
+// client, we answer on 127.0.0.1:<port> HERE and the renderer splices each
+// connection to the VM over SSH (`forward <vmIP> <port>`). Loopback only,
+// unprivileged ports, a few per window, closed with the window.
+const listeners = new Map<number, { srv: net.Server; owner: number }>();
+let nextListen = 1;
+ipcMain.handle('tcp:listen', async (e, port: number) => {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Bad port.');
+  const wc = e.sender;
+  const owner = docs.of(wc.id);
+  if ([...listeners.values()].filter(l => l.owner === owner).length >= 4) throw new Error('Too many listeners.');
+  const lid = nextListen++;
+  const srv = net.createServer(s => {
+    // Node still hands over a connection it accepted before release()
+    // closed this listener: its document is gone, so nobody can take it.
+    if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { s.destroy(); return; }
+    const id = nextSock++;
+    // Held paused (no 'data' listener yet), and its close too, until the
+    // renderer has its stream (heldEvents).
+    const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
+    sockets.set(id, { s, owner });
+    ownSockets(wc);
+    accepted.hold(id, owner, () => {
+      s.setNoDelay(true);
+      s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d)));
+      ev.resume();
+    });
+    s.on('error', () => {});
+    // Closed before the renderer resumed it (the client gave up while the
+    // forward was opening): the `accepted` entry stays, so the resume still
+    // delivers this close and the renderer's stream ends (CWE-362).
+    s.on('close', () => { sockets.delete(id); ev.emit('close'); });
+    wc.send('tcp:accept', lid, id);
+  });
+  await new Promise<void>((resolve, reject) => {
+    srv.once('error', (err: any) => reject(new Error(err?.code === 'EADDRINUSE' ? `Port ${port} is in use on this computer.` : (err?.message ?? 'listen failed'))));
+    srv.listen(port, '127.0.0.1', () => resolve());
+  });
+  srv.on('error', () => {});
+  if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { srv.close(); throw new Error('Window closed.'); }
+  listeners.set(lid, { srv, owner });
+  ownSockets(wc);   // it goes with its document (release)
+  return lid;
+});
+const accepted = resumeTable();
+// Not `owned`: a socket that already closed is no longer in `sockets`, and
+// its held close is exactly what this must deliver.
+ipcMain.on('tcp:resume', (e, id: number) => { accepted.claim(id, docs.of(e.sender.id)); });
+ipcMain.on('tcp:unlisten', (e, lid: number) => {
+  const l = listeners.get(lid);
+  if (l && l.owner === docs.of(e.sender.id)) { l.srv.close(); listeners.delete(lid); }
+});
 
 function friendlyNetError(err: any, host: string, port: number) {
   switch (err?.code) {
@@ -294,6 +396,10 @@ app.whenReady().then(() => {
   const argLink = process.argv.find(a => a.startsWith(SCHEME + '://'));
   if (argLink) pendingDeepLink = argLink;
   mainWindow = createWindow(process.env.BROMURE_HASH || '');
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => { mainWindow = null; stopBrowser(); });
 });
+// Linux network tunnel (electron/tunnel.ts): torn down with the app.
+if (PRIMARY && !SHOT) setupTunnel(() => mainWindow);
+if (PRIMARY) setupBrowser(() => mainWindow);
+app.on('will-quit', () => { stopTunnel(); stopBrowser(); });
 app.on('window-all-closed', () => app.quit());
