@@ -197,4 +197,25 @@ struct UploadFailedCopyTests {
         close(g.fileDescriptor)
         #expect(StagedReplace.finish(g) != nil)
     }
+
+    @Test("In place: a write whose flush to disk fails gets the old bytes back",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func inPlaceFlushFails() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            dest = stage('f', 'old data, the original'); os.link(dest, os.path.join(d, 'other'))
+            real_fsync = os.fsync
+            def fail_on_dest(fd):
+                if os.fstat(fd).st_ino == os.stat(dest).st_ino:
+                    raise OSError(errno.EIO, 'Input/output error')
+                return real_fsync(fd)
+            m.os.fsync = fail_on_dest
+            staged = stage('.f.part', 'NEW DATA, longer than before')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': dest})
+            assert r['exit_code'] == 1, r
+            assert open(dest).read() == 'old data, the original', open(dest).read()
+            assert leftovers() == [], leftovers()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
 }

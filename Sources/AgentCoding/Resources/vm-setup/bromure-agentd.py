@@ -1935,6 +1935,9 @@ def _write_in_place(staged, dest, create=False):
                 shutil.copyfileobj(src, out, 1 << 20)
                 out.truncate()
                 out.flush()
+                # Deferred write errors surface here, while the backup can
+                # still put the old bytes back -- not at the close, after.
+                os.fsync(out.fileno())
             except BaseException as e:
                 if backup is None:
                     raise
