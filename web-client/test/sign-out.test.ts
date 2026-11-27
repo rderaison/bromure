@@ -29,7 +29,7 @@ vi.mock('../src/core/cloud/controlPlane', () => ({
   saveDeviceRecord: async (r: any) => { stored = r; },
   clearDeviceRecord: async () => { calls.push('clearDeviceRecord'); stored = null; },
 }));
-vi.mock('../src/core/ssh/keys', () => ({ idbGet: async () => undefined, idbPut: async () => {}, idbDelete: async () => {} }));
+vi.mock('../src/core/ssh/keys', () => ({ idbGet: async () => undefined, idbPut: async () => {}, idbDelete: async (k: string) => { calls.push(`idbDelete ${k}`); } }));
 vi.mock('../src/platform', () => ({ electron: undefined, http: async () => ({ status: 200 }), openExternal() {}, shell: 'electron', SITE_BASE: '', API_BASE: '' }));
 vi.mock('../src/app/store', () => ({ publicKeyLine: async () => '' }));
 
@@ -48,7 +48,7 @@ describe('account.signOut', () => {
   it('desktop: awaits SSH-key removal and self-revocation, then forgets the credential', async () => {
     await signedIn();
     expect(await account.signOut()).toBe(true);
-    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
     expect(account.get().record).toBeNull();
   });
 
@@ -76,15 +76,59 @@ describe('account.signOut', () => {
     expect(await account.signOut()).toBe(true);
   });
 
-  it('desktop: already revoked (401, a credential bromure.io accepted before) or no SSH key (404) still signs out', async () => {
+  it('desktop: no SSH key published (404) still signs out', async () => {
     await signedIn();
-    outcome.removeSSHKey = 404; outcome.selfRevoke = 401;
+    outcome.removeSSHKey = 404;
     expect(await account.signOut()).toBe(true);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
     expect(account.get().record).toBeNull();
+  });
+
+  // Regression (CWE-613): a 401 for a dead credential was taken as proof the
+  // device was revoked, and sign-out erased the record and device key. But
+  // bromure.io answers the same 401 for a credential that merely EXPIRED
+  // (the hosted cookie lapses after 24 h idle), with the device and its SSH
+  // authorization still live. Nothing is erased on that 401: the first
+  // sign-out explains, the second forgets locally and keeps the device key
+  // (signing in again re-attaches to the same device, which can revoke it).
+  for (const [what, delivery, method] of [
+    ['desktop, accepted credential, SSH-key removal refused', undefined, 'removeSSHKey'],
+    ['desktop, accepted credential, self-revoke refused', undefined, 'selfRevoke'],
+    ['hosted, accepted cookie expired', 'cookie', 'webLogout'],
+  ] as const) {
+    it(`a final 401 is not a revocation: ${what}`, async () => {
+      await signedIn(delivery);
+      outcome[method] = 401;
+      expect(await account.signOut()).toBe(false);
+      expect(calls).not.toContain('clearDeviceRecord');
+      expect(calls.some(c => c.startsWith('idbDelete'))).toBe(false);
+      expect(account.get().record).toBeTruthy();
+      expect(stored).toBeTruthy();
+      expect(account.get().error).toMatch(/expired, or the device was revoked/);
+      expect(account.get().error).toMatch(/Sign Out again/);
+      // The bearer path never skips the self-revoke on its own say-so: a 401
+      // from the SSH-key removal stops there, reported, nothing erased.
+      if (method === 'removeSSHKey') expect(calls).toEqual(['removeSSHKey']);
+      // The second sign-out (told what it means) still tries bromure.io
+      // first, then forgets the credential locally, but not the device key.
+      calls.length = 0;
+      expect(await account.signOut()).toBe(true);
+      expect(calls).toContain(method);
+      expect(calls).toContain('clearDeviceRecord');
+      expect(calls.some(c => c.startsWith('idbDelete'))).toBe(false);
+      expect(account.get().record).toBeNull();
+      expect(account.get().error).toMatch(/Signed out on this device only/);
+    });
+  }
+
+  it('…and a retry that bromure.io accepts after the warning revokes normally', async () => {
     await signedIn();
-    outcome.removeSSHKey = 401; calls.length = 0;
+    queue.selfRevoke = [401];
+    expect(await account.signOut()).toBe(false);
+    calls.length = 0;
     expect(await account.signOut()).toBe(true);
-    expect(calls).toEqual(['removeSSHKey', 'clearDeviceRecord']);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
+    expect(account.get().error).toBeNull();
   });
 
   // Regression (CWE-613): right after enrollment a 401 can be propagation lag,
@@ -122,9 +166,15 @@ describe('account.signOut', () => {
   // Regression (CWE-613 follow-up): a record saved before `accepted` existed
   // starts unaccepted; one revoked before its first successful call answers
   // 401 forever and could never sign out. Past propagation, a 401 is final.
-  it('a 401 for a credential enrolled long ago signs out, accepted or not', async () => {
+  // …and (CWE-613, aged 401s) that final 401 is still no revocation: it's
+  // explained, not retried, and nothing is erased until the user confirms.
+  it('a 401 for a credential enrolled long ago is final (not retried) but erases nothing', async () => {
     await signedIn(undefined, false, new Date(Date.now() - 3600_000).toISOString());
     outcome.selfRevoke = 401;
+    expect(await account.signOut()).toBe(false);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke']);
+    expect(account.get().record).toBeTruthy();
+    calls.length = 0;
     expect(await account.signOut()).toBe(true);
     expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'clearDeviceRecord']);
     expect(account.get().record).toBeNull();
@@ -134,7 +184,7 @@ describe('account.signOut', () => {
     await signedIn(undefined, false);
     queue.selfRevoke = [401, 401];
     expect(await account.signOut()).toBe(true);
-    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'selfRevoke', 'selfRevoke', 'clearDeviceRecord']);
+    expect(calls).toEqual(['removeSSHKey', 'selfRevoke', 'selfRevoke', 'selfRevoke', 'clearDeviceRecord', 'idbDelete device-identity']);
     expect(account.get().record).toBeNull();
   });
 
