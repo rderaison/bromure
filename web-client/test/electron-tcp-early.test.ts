@@ -140,6 +140,21 @@ describe('documents (main)', () => {
     }
   });
 
+  // …and a socket that arrives for a released document (an accept Node had
+  // already taken when release() closed the listener, a connect that
+  // finished after the reload) is refused, not stored under the old id.
+  it('a socket arriving after its document was released is refused', () => {
+    const docs = documents();
+    const before = docs.of(5);
+    expect(docs.isCurrent(5, before)).toBe(true);
+    docs.reset(5);                            // reload while a listen accept is in flight
+    expect(docs.isCurrent(5, before)).toBe(false);
+    expect(docs.isCurrent(5, docs.of(5))).toBe(true);
+    const last = docs.of(5);
+    docs.forget(5);                           // window closed
+    expect(docs.isCurrent(5, last)).toBe(false);
+  });
+
   it('documents are per window, and a destroyed window hands back its last one', () => {
     const docs = documents();
     const a = docs.of(1), b = docs.of(2);

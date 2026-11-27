@@ -67,6 +67,10 @@ export function documents() {
       if (d === undefined) { d = next++; current.set(wc, d); }
       return d;
     },
+    /** Whether `doc` is still the document `wc` shows. Checked when a
+     *  socket arrives (a connect, an accept) or a listen completes for it:
+     *  one that outlived its document is destroyed, not handed over. */
+    isCurrent(wc: number, doc: number) { return current.get(wc) === doc; },
     /** `wc` started a new document: the one it replaces, if any. */
     reset(wc: number) { const old = current.get(wc); current.set(wc, next++); return old; },
     /** `wc` is destroyed: its last document, if any. */

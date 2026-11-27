@@ -211,14 +211,15 @@ async function approveHost(e: Electron.IpcMainInvokeEvent, host: string, port: n
   return true;
 }
 ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
+  const wc = e.sender;
+  const owner = docs.of(wc.id);   // the asking document, before the dialog
   if (!(await approveHost(e, host, port))) throw new Error('Connection not allowed.');
+  if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) throw new Error('Window closed.');
   return new Promise<number>((resolve, reject) => {
     const id = nextSock++;
     const s = net.connect({ host, port });
     s.setNoDelay(true);
     s.setKeepAlive(true, 30000);
-    const wc = e.sender;
-    const owner = docs.of(wc.id);
     // Held paused (no 'data' listener) until the renderer has its stream and
     // says so (tcp:resume), as an accepted socket is: bytes that beat
     // tcpOpen's reply wait in the kernel and this socket's buffer — TCP's
@@ -228,7 +229,7 @@ ipcMain.handle('tcp:open', async (e, host: string, port: number) => {
     const ev = heldEvents((kind, data, message) => { if (!wc.isDestroyed()) wc.send('tcp:event', id, kind, data, message); });
     s.once('connect', () => {
       // The window closed, or reloaded, while it connected: nobody to take it.
-      if (wc.isDestroyed() || docs.of(wc.id) !== owner) { s.destroy(); reject(new Error('Window closed.')); return; }
+      if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { s.destroy(); reject(new Error('Window closed.')); return; }
       sockets.set(id, { s, owner });
       ownSockets(wc);
       accepted.hold(id, owner, () => { s.on('data', (d: Buffer) => ev.emit('data', new Uint8Array(d))); ev.resume(); });
@@ -284,7 +285,9 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
   if ([...listeners.values()].filter(l => l.owner === owner).length >= 4) throw new Error('Too many listeners.');
   const lid = nextListen++;
   const srv = net.createServer(s => {
-    if (wc.isDestroyed()) { s.destroy(); return; }
+    // Node still hands over a connection it accepted before release()
+    // closed this listener: its document is gone, so nobody can take it.
+    if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { s.destroy(); return; }
     const id = nextSock++;
     // Held paused (no 'data' listener yet), and its close too, until the
     // renderer has its stream (heldEvents).
@@ -308,7 +311,7 @@ ipcMain.handle('tcp:listen', async (e, port: number) => {
     srv.listen(port, '127.0.0.1', () => resolve());
   });
   srv.on('error', () => {});
-  if (wc.isDestroyed() || docs.of(wc.id) !== owner) { srv.close(); throw new Error('Window closed.'); }
+  if (wc.isDestroyed() || !docs.isCurrent(wc.id, owner)) { srv.close(); throw new Error('Window closed.'); }
   listeners.set(lid, { srv, owner });
   ownSockets(wc);   // it goes with its document (release)
   return lid;
