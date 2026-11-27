@@ -154,6 +154,8 @@ enum FolderUpload {
     ///   holds an apostrophe) and may say anything.
     /// - A Sidecar Mac (HostExec.swift) answers with strerror's text alone,
     ///   `Permission denied` / `Operation not permitted`, no path.
+    /// A remote Mac relays the guest's message as is (automationGuestFileOp);
+    /// an older one wrapped it in an enum dump, whose fixed prefix is skipped.
     /// Anything else is not a refusal: the direct-write fallback truncates the
     /// destination, so it must never run on a guess. Only the guest's message
     /// is read (`commandFailed`'s stderr, which is its localizedDescription),
@@ -162,7 +164,12 @@ enum FolderUpload {
     /// the two in step.
     static func refusedByFilesystem(_ error: Error) -> Bool {
         let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.range(of: #"^\[errno (1|13)\] "#, options: [.regularExpression, .caseInsensitive]) != nil
+        // A remote Mac older than this check relays the guest's error as the
+        // enum dump `commandFailed(exitCode: 1, stderr: "[Errno 13] …")`: a
+        // fixed prefix, after which the guest's message starts as above.
+        let guest = text.replacingOccurrences(of: #"^commandFailed\(exitCode: -?\d+, stderr: ""#, with: "",
+                                              options: .regularExpression)
+        return guest.range(of: #"^\[errno (1|13)\] "#, options: [.regularExpression, .caseInsensitive]) != nil
             || text.range(of: #"^(permission denied|operation not permitted)$"#,
                           options: [.regularExpression, .caseInsensitive]) != nil
     }

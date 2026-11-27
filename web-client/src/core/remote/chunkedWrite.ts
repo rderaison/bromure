@@ -92,14 +92,21 @@ const unknownOp = (e: unknown) => /unknown file op/i.test(String((e as any)?.mes
  *    an apostrophe) and may say anything, "permission denied" included.
  *  - A Sidecar Mac (HostExec.swift) answers a refused write with strerror's
  *    text alone, `Permission denied` / `Operation not permitted`, no path.
+ *  (A Mac host relays the guest's message as is; an older one wrapped it in
+ *  an enum dump, whose fixed prefix is skipped.)
  *  Anything else (ENOSPC on a file named `permission denied's.txt`, an
  *  exception that merely mentions a path) is not a refusal: the direct-write
  *  fallback truncates the destination, so it must never run on a guess.
  *  Mirrors FolderUpload.refusedByFilesystem in Swift; keep the two in step. */
 export const permissionDenied = (e: unknown) => {
   const text = String((e as any)?.message ?? e).trim();
-  return /^\[errno (1|13)\] /i.test(text) || /^(permission denied|operation not permitted)$/i.test(text);
+  // A Mac host older than this check relays a VM guest's error as a Swift
+  // enum dump, `commandFailed(exitCode: 1, stderr: "[Errno 13] …")`: a fixed
+  // prefix, after which the guest's message starts as above.
+  const guest = text.replace(GUEST_ERROR_DUMP, '');
+  return /^\[errno (1|13)\] /i.test(guest) || /^(permission denied|operation not permitted)$/i.test(text);
 };
+const GUEST_ERROR_DUMP = /^commandFailed\(exitCode: -?\d+, stderr: "/;
 
 /** Copy a dropped file OVER `dest` without ever leaving it half-written: the
  *  bytes go to a hidden temp file beside it, which replaces `dest` in one

@@ -119,6 +119,19 @@ struct FolderUploadWriteTests {
             exitCode: 1, stderr: #"[Errno 28] No space left on device: "/d/permission denied's""#)))
     }
 
+    // A fat client gets the remote Mac's error as commandFailed(stderr:); an
+    // older Mac sent the guest's own commandFailed as an enum dump there.
+    @Test("a guest's error inside an older host's enum dump is read by its start only")
+    func olderHostDump() {
+        typealias G = ACAppDelegate.GuestExecError
+        func viaOldHost(_ guest: String) -> Error {
+            G.commandFailed(exitCode: 1, stderr: String(describing: G.commandFailed(exitCode: 1, stderr: guest)))
+        }
+        #expect(FolderUpload.refusedByFilesystem(viaOldHost("[Errno 13] Permission denied: '/d/.bromure-1.part'")))
+        #expect(!FolderUpload.refusedByFilesystem(viaOldHost(#"[Errno 28] No space left on device: "/permission denied's/.bromure-1.part""#)))
+        #expect(!FolderUpload.refusedByFilesystem(viaOldHost(#"[Errno 5] Input/output error: "/d/[Errno 13] x""#)))
+    }
+
     @Test("ENOSPC creating the temp in a double-quoted folder leaves the destination untouched")
     func noSpaceKeepsDestination() async throws {
         let g = Guest(); g.files["/permission denied's/f.txt"] = Data("old".utf8)

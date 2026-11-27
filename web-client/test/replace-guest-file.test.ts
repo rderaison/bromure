@@ -201,6 +201,19 @@ describe('replaceGuestFile', () => {
 // a refusal: the fallback then wrote straight onto the destination, whose
 // first write truncates it.
 describe('replaceGuestFile: a non-refusal error is never a direct write', () => {
+  // The fallback the anchored check must keep: through an older host the
+  // refusal arrives wrapped, and a writable file in a directory the guest
+  // can't create a sibling in must still upload.
+  it("an older host's wrapped refusal still falls back to the direct write", async () => {
+    const g = guest({ roDir: '/home/ubuntu' });
+    const wrapped: typeof g.op = async o => {
+      try { return await g.op(o); }
+      catch (e: any) { throw new Error(`commandFailed(exitCode: 1, stderr: "${String(e.message).replace(/'/g, "\\'")}")`); }
+    };
+    expect(await replaceGuestFile(bytes(10), DEST, 4, wrapped, enc)).toBe(10);
+    expect(g.files.get(DEST)).toBe('[4][4][2]');
+  });
+
   it("ENOSPC under a folder named permission denied's leaves the destination untouched", async () => {
     const dest = "/home/permission denied's/notes.txt";
     const g = guest({ noSpaceNo: 1, dest });
@@ -228,6 +241,16 @@ describe('permissionDenied', () => {
     expect(permissionDenied(new Error('unknown file op: Operation not permitted'))).toBe(false);
     expect(permissionDenied(new Error(`[Errno 13] Permission denied: "/d/.it's.bromure-1.part"`))).toBe(true);
     expect(permissionDenied(new Error('Operation not permitted'))).toBe(true);   // a Sidecar Mac (strerror)
+  });
+
+  // What an older Mac host puts on the wire for a VM guest's error: Swift's
+  // String(describing:) of GuestExecError.commandFailed, its quotes escaped.
+  it("reads a guest's error inside an older host's enum dump, by its start only", () => {
+    expect(permissionDenied(new Error(String.raw`commandFailed(exitCode: 1, stderr: "[Errno 13] Permission denied: '/d/.bromure-1.part'")`))).toBe(true);
+    expect(permissionDenied(new Error(String.raw`commandFailed(exitCode: 1, stderr: "[Errno 1] Operation not permitted: '/d/x'")`))).toBe(true);
+    expect(permissionDenied(new Error(String.raw`commandFailed(exitCode: 1, stderr: "[Errno 28] No space left on device: "/home/permission denied's/.bromure-1.part"")`))).toBe(false);
+    expect(permissionDenied(new Error(String.raw`commandFailed(exitCode: 1, stderr: "[Errno 5] Input/output error: "/d/[Errno 13] x"")`))).toBe(false);
+    expect(permissionDenied(new Error('connectionFailed'))).toBe(false);
   });
 });
 

@@ -15865,6 +15865,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         do {
             return try await guestFileOp(profileID: id, op: op, timeout: timeout)
+        } catch let e as GuestExecError {
+            // The guest's own message (commandFailed's stderr), not the enum
+            // dump: clients read the refusal from its start (`[Errno 13] …`,
+            // FolderUpload.refusedByFilesystem / permissionDenied in the web
+            // client), so it must arrive as the guest said it.
+            return ["error": e.errorDescription ?? String(describing: e)]
         } catch {
             return ["error": String(describing: error)]
         }
