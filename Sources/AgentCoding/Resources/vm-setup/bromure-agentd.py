@@ -1908,14 +1908,12 @@ def _write_in_place(staged, dest, create=False):
         except FileExistsError:
             out = None
         if out is not None:
+            ours = os.fstat(out.fileno())
             try:
                 with out, open(staged, "rb") as src:
                     shutil.copyfileobj(src, out, 1 << 20)
             except BaseException:
-                try:
-                    os.unlink(dest)
-                except OSError:
-                    pass
+                _unlink_if_ours(dest, ours)
                 raise
             os.unlink(staged)
             return
@@ -1953,6 +1951,19 @@ def _write_in_place(staged, dest, create=False):
                 os.unlink(backup)
             _restore_setid(out.fileno(), kept, dest)
     os.unlink(staged)
+
+
+def _unlink_if_ours(path, ours):
+    """Remove `path` only while it is still the file this upload created
+    (`ours`, that file's fstat): another writer may have put a file of its
+    own at that name since -- a rename lands there whatever we hold open --
+    and that one isn't ours to delete (CWE-362). Best effort, never raises."""
+    try:
+        st = os.lstat(path)
+        if (st.st_dev, st.st_ino) == (ours.st_dev, ours.st_ino):
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 def _copy_aside(dest, staged):

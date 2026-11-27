@@ -135,4 +135,50 @@ struct UploadFailedCopyTests {
         let left = try FileManager.default.contentsOfDirectory(atPath: d.path).filter { $0.hasPrefix(".bromure-") }
         #expect(left.isEmpty)
     }
+
+    // Regression (CWE-362): a new file the fallback created was removed by
+    // name when its copy failed — even when another writer had renamed a
+    // finished file of its own onto that name meanwhile.
+    @Test("A failed new file is removed only while it's still this upload's",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func newFileReplacedMeanwhile() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let (status, err) = try agentd("""
+            dest = os.path.join(d, 'new')
+            staged = stage('.f.part', 'NEW DATA')
+            theirs = stage('theirs', 'their finished file')
+            def copy(src, dst, length=0):
+                if getattr(src, 'name', None) == staged:
+                    dst.write(src.read(3))
+                    os.replace(theirs, dest)          # another writer's rename lands
+                    raise OSError(errno.ENOSPC, 'No space left on device')
+                return real_copy(src, dst, length)
+            m.shutil.copyfileobj = copy
+            try:
+                m._write_in_place(staged, dest, create=True)
+                assert False, 'no error'
+            except OSError as e:
+                assert e.errno == errno.ENOSPC
+            assert open(dest).read() == 'their finished file', open(dest).read()
+            """, in: d)
+        #expect(status == 0, Comment(rawValue: err))
+    }
+
+    @Test("Mac: a failed new file is removed only while it's still this upload's")
+    func macUnlinkIfOurs() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let path = d.appendingPathComponent("new").path
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        var ours = stat(); fstat(fd, &ours); close(fd)
+        // Another writer's file renamed onto the name: stays.
+        let theirs = d.appendingPathComponent("theirs").path
+        try "theirs".write(toFile: theirs, atomically: false, encoding: .utf8)
+        #expect(rename(theirs, path) == 0)
+        StagedReplace.unlinkIfOurs(path, ours)
+        #expect((try? String(contentsOfFile: path, encoding: .utf8)) == "theirs")
+        // Still ours: removed.
+        var now = stat(); lstat(path, &now)
+        StagedReplace.unlinkIfOurs(path, now)
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
 }

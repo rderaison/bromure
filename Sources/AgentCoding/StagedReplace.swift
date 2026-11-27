@@ -164,10 +164,15 @@ enum StagedReplace {
         if create {
             let fd = open(dest, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
             if fd >= 0 {
+                var ours = stat()
+                let known = fstat(fd, &ours) == 0
                 let out = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                 let failure = copyAll(from: staged, to: out)
                 try? out.close()
-                if let failure { unlink(dest); return failure }
+                if let failure {
+                    if known { unlinkIfOurs(dest, ours) }
+                    return failure
+                }
                 unlink(staged)
                 return nil
             }
@@ -219,6 +224,16 @@ enum StagedReplace {
         if let failure = restoreSetID(fd, kept, path: dest) { return failure }
         unlink(staged)
         return nil
+    }
+
+    /// Remove `path` only while it is still the file this upload created
+    /// (`ours`, that file's fstat): another writer may have put a file of
+    /// its own at that name since — a rename lands there whatever we hold
+    /// open — and that one isn't ours to delete (CWE-362).
+    static func unlinkIfOurs(_ path: String, _ ours: stat) {
+        var now = stat()
+        guard lstat(path, &now) == 0, now.st_dev == ours.st_dev, now.st_ino == ours.st_ino else { return }
+        unlink(path)
     }
 
     /// The staged file is this user's own, but may carry `dest`'s mode and
