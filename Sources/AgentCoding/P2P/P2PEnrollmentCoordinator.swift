@@ -235,6 +235,11 @@ final class P2PEnrollmentCoordinator {
         var localOnly = false
         if let (client, bearer) = ControlPlaneClient.current() {
             busy = true; error = nil
+            // Decided now, not when bromure.io answers: the explanation must
+            // have been shown before this sign-out was asked for. A refusal
+            // noted while it's in flight (the directory, the device channel)
+            // isn't one the user has seen yet (CWE-362).
+            let warned = refusalShownFor == AcceptedCredential.fingerprint(bearer)
             var record: DeviceRecord?
             if case .found(let r) = DeviceIdentityStore.load() { record = r }
             let final = AcceptedCredential.refusalIsFinal(bearer: bearer, record: record)
@@ -249,9 +254,8 @@ final class P2PEnrollmentCoordinator {
                 error = failure
                 return false
             case .refused:
-                let fp = AcceptedCredential.fingerprint(bearer)
-                guard refusalShownFor == fp else {
-                    refusalShownFor = fp
+                guard warned else {
+                    refusalShownFor = AcceptedCredential.fingerprint(bearer)
                     error = Self.refusedMessage
                     return false
                 }
