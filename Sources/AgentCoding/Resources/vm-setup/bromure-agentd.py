@@ -1820,8 +1820,17 @@ def _copy_file_metadata(src, dst, st):
 
 
 def _write_in_place(staged, dest, create=False):
-    mode = "wb" if create and not os.path.exists(dest) else "r+b"
-    with open(staged, "rb") as src, open(dest, mode) as out:
+    """Write `staged`'s bytes into `dest` itself. Needs only what a plain
+    upload needs -- write access to `dest` (CWE-732): the staged file is
+    this user's own, and readable again first (`_copy_file_metadata` may
+    have given it `dest`'s mode, a write-only 0200 say), and `dest` is
+    opened write-only, never for reading, truncated only once written."""
+    os.chmod(staged, 0o600)
+    flags = os.O_WRONLY | os.O_CLOEXEC
+    if create and not os.path.exists(dest):
+        flags |= os.O_CREAT
+    fd = os.open(dest, flags, 0o666)
+    with open(staged, "rb") as src, os.fdopen(fd, "wb") as out:
         shutil.copyfileobj(src, out, 1 << 20)
         out.truncate()
     os.unlink(staged)

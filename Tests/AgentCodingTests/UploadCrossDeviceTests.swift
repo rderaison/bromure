@@ -43,6 +43,25 @@ struct UploadCrossDeviceTests {
             m.os.replace = cross(errno.EBUSY)
             assert m._file_op({'op': 'rename', 'path': staged, 'dest': link2}) == {'exit_code': 0}
             assert open(missing).read() == 'fresh' and not os.path.exists(staged)
+            # A write-only target (CWE-732): as a plain upload, writing it is
+            # all it takes -- not reading it, nor the staged file once it
+            # carries that mode.
+            wo = os.path.join(d, 'wo'); open(wo, 'w').write('old contents, longer'); os.chmod(wo, 0o200)
+            link3 = os.path.join(d, 'link3'); os.symlink(wo, link3)
+            staged = os.path.join(d, '.link3.part'); open(staged, 'w').write('new')
+            m.os.replace = cross(errno.EXDEV)
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': link3})
+            assert r == {'exit_code': 0}, r
+            assert os.stat(wo).st_mode & 0o7777 == 0o200 and not os.path.exists(staged)
+            os.chmod(wo, 0o600); assert open(wo).read() == 'new'
+            # Hard-linked and write-only: in place, no rename at all.
+            m.os.replace = real_replace
+            hl = os.path.join(d, 'hl'); open(hl, 'w').write('old contents, longer')
+            os.link(hl, os.path.join(d, 'hl2')); os.chmod(hl, 0o200)
+            staged = os.path.join(d, '.hl.part'); open(staged, 'w').write('new')
+            r = m._file_op({'op': 'rename', 'path': staged, 'dest': hl})
+            assert r == {'exit_code': 0}, r
+            os.chmod(hl, 0o600); assert open(os.path.join(d, 'hl2')).read() == 'new'
             # Any other failure is still an error, the destination untouched.
             staged = os.path.join(d, '.link.part'); open(staged, 'w').write('nope')
             m.os.replace = cross(errno.EIO)

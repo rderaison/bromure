@@ -140,4 +140,49 @@ struct StagedReplaceTests {
         var st = stat(); stat(plain.path, &st)
         #expect(read(plain) == "new" && st.st_mode & 0o7777 == 0o640)
     }
+
+    // Regression (CWE-732): the in-place fallback read the staged file after
+    // the destination's mode had been copied onto it, and opened the
+    // destination for reading too — a write-only (0200) file, which a plain
+    // upload can replace, failed with "permission denied".
+    private func chmodOwnerRead(_ u: URL) { chmod(u.path, 0o600) }
+
+    @Test("A write-only hard-linked file is replaced in place, its mode kept")
+    func writeOnlyHardLink() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("old contents, longer", dest)
+        #expect(link(dest.path, d.appendingPathComponent("other").path) == 0)
+        #expect(chmod(dest.path, 0o200) == 0)
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        var st = stat(); stat(dest.path, &st)
+        #expect(st.st_mode & 0o7777 == 0o200)
+        chmodOwnerRead(dest)
+        #expect(read(dest) == "new")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("A write-only file whose rename is refused gets the bytes in place, though its mode went onto the staged file first")
+    func writeOnlyRefusedRename() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let staged = d.appendingPathComponent(".f.part"), dest = d.appendingPathComponent("f")
+        try write("old contents", dest)
+        #expect(chmod(dest.path, 0o200) == 0)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        p.arguments = ["+a", "everyone deny delete", dest.path]
+        try p.run(); p.waitUntilExit()
+        try write("new", staged)
+        #expect(StagedReplace.replace(staged.path, onto: dest.path) == nil)
+        let undo = Process()
+        undo.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        undo.arguments = ["-N", dest.path]
+        try undo.run(); undo.waitUntilExit()
+        var st = stat(); stat(dest.path, &st)
+        #expect(st.st_mode & 0o7777 == 0o200)
+        chmodOwnerRead(dest)
+        #expect(read(dest) == "new")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
 }
