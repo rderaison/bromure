@@ -67,30 +67,11 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
-                        # The namespace and deployment: from "<namespace> <deployment>",
-                        # or picked out of a kubectl line (deploy/<name>, -n <ns>,
-                        # -n<ns>, --namespace[=]<ns>). Validated as Kubernetes names;
-                        # anything else stops here rather than restarting the wrong thing.
-                        ns=''; dep=''
-                        set -f; set -- $ROLLOUT_TARGET; set +f
-                        if [ $# -eq 2 ] && [ "${1#-}" = "$1" ] && [ "${2#*/}" = "$2" ]; then
-                            ns=$1; dep=$2
-                        else
-                            while [ $# -gt 0 ]; do
-                                case "$1" in
-                                    deploy/*|deployment/*|deployments/*|deployment.apps/*) dep=${1#*/} ;;
-                                    -n|--namespace) if [ $# -ge 2 ]; then shift; ns=$1; fi ;;
-                                    --namespace=*) ns=${1#--namespace=} ;;
-                                    -n*) ns=${1#-n} ;;
-                                esac
-                                shift
-                            done
-                        fi
-                        name='^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
-                        if ! printf '%s' "$ns" | grep -Eq "$name" || ! printf '%s' "$dep" | grep -Eq "$name"; then
-                            echo 'WEB_CLIENT_ROLLOUT must be "<namespace> <deployment>" (or a "kubectl rollout restart deploy/<deployment> -n <namespace>" line); it is neither.'
-                            exit 1
-                        fi
+                        # The namespace and deployment, from "<namespace> <deployment>" or
+                        # a "kubectl rollout restart deploy/<name> -n <ns>" line, nothing
+                        # else (web-client/ci/web/rollout-target.sh; it says why it refused).
+                        target=$(sh web-client/ci/web/rollout-target.sh "$ROLLOUT_TARGET")
+                        ns=${target% *}; dep=${target#* }
                         kubectl rollout restart "deploy/$dep" -n "$ns"
                         kubectl rollout status "deploy/$dep" -n "$ns" --timeout=5m
                     '''
