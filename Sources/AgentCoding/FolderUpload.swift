@@ -180,7 +180,10 @@ enum FolderUpload {
     /// size since long before `rename`.
     private static func guestSize(_ path: String, op: FileOp) async -> Int? {
         guard let reply = try? await op(["op": "read", "path": path, "offset": 0, "length": 1]) else { return nil }
-        return (reply["size"] as? NSNumber)?.intValue
+        // As DisplayFileReader reads it: an agent's JSON number, or an Int
+        // from an in-process file service.
+        let size = reply["size"]
+        return (size as? Int) ?? (size as? Int64).map(Int.init) ?? (size as? Double).map(Int.init)
     }
 
     /// The filesystem refused: EPERM (1) or EACCES (13), read from the
